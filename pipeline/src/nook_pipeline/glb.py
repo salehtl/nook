@@ -71,7 +71,8 @@ def _uri_bytes(uri: str, base: Path) -> bytes:
         raise NookError(f"the glTF links a remote file ({uri}); download it next to the .gltf first")
     p = base / urllib.parse.unquote(uri)
     if not p.is_file():
-        raise NookError(f"the glTF links {uri}, but {p} doesn't exist; keep its files next to it")
+        raise NookError(f"the glTF links {uri}, which isn't next to it: put the .gltf and its files in one local "
+                        f"folder and pass that path, or use a .glb")
     return p.read_bytes()
 
 
@@ -144,6 +145,8 @@ def errors_pct(bounds: np.ndarray, dims_m: np.ndarray) -> dict:
 
 
 def self_check(bounds: np.ndarray, dims_m: np.ndarray) -> None:
+    if not np.all(np.isfinite(bounds)):
+        raise NookError("self-check failed: GLB has non-finite (NaN/inf) coordinates; the model is corrupt")
     (x0, y0, z0), (x1, y1, z1) = bounds
     size = bounds[1] - bounds[0]
     for axis, s, t in zip("whd", size, dims_m):

@@ -125,11 +125,11 @@ def run(argv: list[str] | None) -> None:
         raise NookError("--name can't be empty")
     if args.id is not None:
         item_id = args.id
-        if not SLUG.match(item_id):
+        if not SLUG.fullmatch(item_id):
             raise NookError(f"--id must be a slug like 'reading-chair' (a-z, 0-9, '-', max 64), got '{item_id}'")
     else:
         item_id = slugify(name)
-        if not SLUG.match(item_id):
+        if not SLUG.fullmatch(item_id):
             raise NookError(f"can't make an id from --name '{name}'; pass --id reading-chair or similar")
 
     engine = args.engine

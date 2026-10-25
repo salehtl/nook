@@ -139,7 +139,7 @@ def run(fal, engine: str, image: Path, prompt: str, resolution: int, raw_dir: Pa
     else:
         glb_url, splat_url = _file_url(resp, "model_glb"), None
     if not glb_url:
-        raise NookError(f"{endpoint} returned no model_glb (response saved in {raw_dir / 'response.json'})")
+        raise NookError(f"{endpoint} returned no model_glb (live runs keep the response in <library>/_failed/)")
     out = {"glb": fal.fetch(glb_url, raw_dir), "splat": None}
     if splat_url:
         out["splat"] = fal.fetch(splat_url, raw_dir)

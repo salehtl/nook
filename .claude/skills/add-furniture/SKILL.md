@@ -33,5 +33,5 @@ For a dry run with no spend, set `NOOK_FAL_MOCK=fixtures/fal`.
 
 - The CLI validates its own output. If it fails, read the one-line error and fix the cause; don't retry blindly. Each live retry costs money.
 - Run `evals/py evals/validate_library.py library/library.json`.
-- Look at it: open the planner (`npm run serve`, then `http://localhost:8765/planner/`), add the item, and check it faces +Z (the front points toward the default camera). If it's backwards or sideways, re-run with `--yaw` using `--engine glb` on `library/<id>/raw/` output, which is free, instead of regenerating.
+- Look at it: open the planner (`npm run serve`, then `http://localhost:8765/planner/`), add the item, and check it faces +Z (the front points toward the default camera). If it's backwards or sideways, just rotate it in the planner: placement rotation is saved in the layout. Only fix the asset itself if it will be reused a lot. A free re-run with `--engine glb --yaw N` on `library/<id>/raw/*.glb` works, but it produces a GLB-only item (no splat, no thumbnail).
 - Tell the user the item name, dims, engine, the cost (from the CLI's summary line), and anything that looked off.

@@ -102,6 +102,8 @@ def errors_pct(xyz: np.ndarray, dims_m: np.ndarray) -> dict:
 
 
 def self_check(xyz: np.ndarray, dims_m: np.ndarray) -> None:
+    if not np.all(np.isfinite(xyz)):
+        raise NookError("self-check failed: splat has non-finite (NaN/inf) positions; the splat is corrupt")
     lo, hi = _robust_bounds(xyz)
     h, target = hi[1] - lo[1], dims_m[1]
     if abs(h - target) / target > H_TOL:

@@ -229,6 +229,8 @@ async function loadRoomInternal(cfg, { fileBytes = null, fileName = null, frame 
   const token = ++roomToken
   let next
   try { next = normalizeRoomConfig(cfg) } catch (e) { throw reportError('Bad room config', e) }
+  // A failed drop must leave the working room (and what Save room would write) as it was.
+  const prev = { config: roomConfig, dropped: room.dropped, hadSplat: room.kind === 'splat' && !!room.mesh }
   roomConfig = next
   room.loaded = false
   room.dropped = fileBytes ? fileName : null
@@ -249,6 +251,14 @@ async function loadRoomInternal(cfg, { fileBytes = null, fileName = null, frame 
     if (!mesh.numSplats) throw new Error('the file contains no splats')
   } catch (e) {
     try { mesh?.dispose() } catch { /* ignore */ }
+    if (token === roomToken && fileBytes) {
+      roomConfig = prev.config
+      room.dropped = prev.dropped
+      if (prev.hadSplat) room.loaded = true
+      else showPlaceholder()
+      syncRoomUI()
+      throw reportError(`Could not load room scan ${label}; keeping the current room`, e)
+    }
     if (token === roomToken) {
       showPlaceholder()
       syncRoomUI()

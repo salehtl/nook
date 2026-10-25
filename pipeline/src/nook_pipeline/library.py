@@ -40,7 +40,7 @@ def upsert(lib_dir: Path, data: dict, entry: dict) -> bool:
             del items[i]
     else:
         items.append(entry)
-    atomic_write(lib_dir / "library.json", json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    atomic_write(lib_dir / "library.json", json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
     return bool(idx)
 
 
