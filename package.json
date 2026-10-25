@@ -5,7 +5,9 @@
   "scripts": {
     "serve": "python3 planner/serve.py",
     "eval:planner": "node evals/planner_smoke.mjs",
-    "eval:pipeline": "bash evals/pipeline_offline.sh"
+    "eval:pipeline": "bash evals/pipeline_offline.sh",
+    "cf:publish": "node deploy/publish.mjs",
+    "cf:pull": "node deploy/pull.mjs"
   },
   "devDependencies": {
     "ajv": "^8.20.0",

@@ -1,0 +1,14 @@
+# Cloudflare Pages project for the hosted planner. Deploy with `npm run cf:publish` (see deploy/publish.mjs).
+name = "nook"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-10-01"
+
+# Room config (key "room") and layouts (keys "layout:<name>"), same shapes as room.json / layouts/*.json.
+[[kv_namespaces]]
+binding = "NOOK_KV"
+id = "a3d603dc459040148c1cb3540f9f0264"
+
+# library/** and room/** scans, served at the same URLs as the local server.
+[[r2_buckets]]
+binding = "NOOK_R2"
+bucket_name = "nook-assets"

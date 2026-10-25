@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "morris-chair",
+      "name": "Morris chair",
+      "category": "armchair",
+      "dims_cm": {
+        "w": 76,
+        "d": 89,
+        "h": 94
+      },
+      "assets": {
+        "glb": "morris-chair/model.glb",
+        "splat": "morris-chair/splat.ply",
+        "thumb": "morris-chair/thumb.jpg"
+      },
+      "default_render": "splat",
+      "source": {
+        "engine": "sam3d",
+        "input": "evals/golden/morris-chair.jpg",
+        "prompt": "armchair",
+        "cost_usd": 0.0,
+        "mock": true,
+        "created": "2026-10-25T11:54:43Z"
+      },
+      "fit": {
+        "glb_error_pct": {
+          "w": 0.0,
+          "d": 0.0,
+          "h": 0.0
+        },
+        "splat_error_pct": {
+          "w": 2.664,
+          "d": 0.633,
+          "h": 0.0
+        }
+      },
+      "notes": "Starter piece: replay of the real 2026-10-25 capture. Dims approximate."
+    }
+  ]
+}
