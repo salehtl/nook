@@ -67,6 +67,18 @@ def _seeds_from_depth(cap: Capture, max_points: int) -> tuple[np.ndarray, np.nda
     return np.concatenate(xyz_all).astype(np.float32), np.concatenate(rgb_all).astype(np.uint8)
 
 
+BRUSH_MIN_IMAGE_BYTES = 16_400
+
+
+def _pad_for_brush(path: Path) -> None:
+    """Brush v0.3.0 can't load an image file under 16,387 bytes (it read_exact()s a fixed header buffer). Bytes after
+    a JPEG's end marker are ignored by decoders, so small (flat, dark, tiny) frames are padded with zeros."""
+    size = path.stat().st_size
+    if size < BRUSH_MIN_IMAGE_BYTES:
+        with open(path, "ab") as f:
+            f.write(b"\0" * (BRUSH_MIN_IMAGE_BYTES - size))
+
+
 def prepare(cap: Capture, work: Path, holdout_every: int, max_image_size: int) -> Prepared:
     data = work / "data"
     (data / "images").mkdir(parents=True)
@@ -86,6 +98,7 @@ def prepare(cap: Capture, work: Path, holdout_every: int, max_image_size: int) -
                 im.convert("RGB").resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS).save(dst, quality=95)
         else:
             shutil.copyfile(src, dst)
+        _pad_for_brush(dst)
         (held if holdout_every > 0 and i % holdout_every == 0 else train).append(_frame_entry(cap, f, name, scale))
     if len(train) < 10:
         raise ScanError(f"--holdout-every {holdout_every} leaves only {len(train)} training frames: use a larger value (or 0)")

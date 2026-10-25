@@ -13,9 +13,11 @@ pass=0; fail=0
 ok()  { echo "ok   $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL $1"; fail=$((fail + 1)); }
 check() { if eval "$2"; then ok "$1"; else bad "$1${3:+ — $3}"; fi; }
+# Like check, but the failure detail is a command run after the check, so it can read logs the check just wrote.
+checkl() { if eval "$2"; then ok "$1"; else bad "$1 — $(eval "$3" 2>/dev/null | tr '\n' ' ' | cut -c1-600)"; fi; }
 
 [ -f ios/project.yml ] || { echo "FAIL ios/project.yml not found (app not built yet)"; exit 1; }
-check "xcodegen generates the project" 'xcodegen generate --spec ios/project.yml --project ios >"$OUT/xcodegen.log" 2>&1' "$(tail -n 3 "$OUT/xcodegen.log")"
+checkl "xcodegen generates the project" 'xcodegen generate --spec ios/project.yml --project ios >"$OUT/xcodegen.log" 2>&1' 'tail -n 3 "$OUT/xcodegen.log"'
 PROJ=$(ls -d ios/*.xcodeproj 2>/dev/null | head -n 1)
 [ -n "$PROJ" ] || { echo "FAIL no .xcodeproj generated"; exit 1; }
 
@@ -34,13 +36,13 @@ check "ReplayCaptureTests.testReplayWritesValidCapture ran" 'grep -q "testReplay
 CAP=$(find "$HOME/Library/Developer/CoreSimulator/Devices/$UDID/data" -path '*nook-eval-capture/transforms.json' -newer "$marker" 2>/dev/null | head -n 1)
 if [ -n "$CAP" ]; then
   CAPDIR=$(dirname "$CAP"); rm -rf "$OUT/replay-capture"; cp -R "$CAPDIR" "$OUT/replay-capture"
-  check "replay capture passes validate_capture.py (≥ 20 frames)" 'evals/py evals/validate_capture.py "$OUT/replay-capture" --min-frames 20 >"$OUT/validate.out" 2>&1' "$(cat "$OUT/validate.out" | head -n 5 | tr '\n' ' ')"
+  checkl "replay capture passes validate_capture.py (≥ 20 frames)" 'evals/py evals/validate_capture.py "$OUT/replay-capture" --min-frames 20 >"$OUT/validate.out" 2>&1' 'head -n 5 "$OUT/validate.out"'
 else
   bad "replay test wrote <tmp>/nook-eval-capture/transforms.json in the simulator"
 fi
 
 # Device build (unsigned): catches ARKit/LiDAR APIs that only exist for real devices.
-check "builds for generic iOS device (unsigned)" 'xcodebuild build -project "$PROJ" -scheme NookScan -destination "generic/platform=iOS" -derivedDataPath "$DD" CODE_SIGNING_ALLOWED=NO >"$OUT/device.log" 2>&1' "$(grep -E 'error:' "$OUT/device.log" | head -n 3 | tr '\n' ' ' | cut -c1-400)"
+checkl "builds for generic iOS device (unsigned)" 'xcodebuild build -project "$PROJ" -scheme NookScan -destination "generic/platform=iOS" -derivedDataPath "$DD" CODE_SIGNING_ALLOWED=NO >"$OUT/device.log" 2>&1' 'grep -E "error:" "$OUT/device.log" | head -n 3'
 
 # Release settings (I3), read from the built device app and the build settings.
 APP=$(ls -d "$DD"/Build/Products/Release-iphoneos/*.app "$DD"/Build/Products/Debug-iphoneos/*.app 2>/dev/null | head -n 1)

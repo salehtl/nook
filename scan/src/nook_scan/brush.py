@@ -30,11 +30,16 @@ def _fmt(secs: float) -> str:
 def _run_logged(cmd: list[str], log, cwd: Path | None = None, env: dict | None = None, on_line=None) -> int:
     p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, errors="replace", bufsize=1)
-    for line in p.stdout:
-        log.write(line)
-        if on_line:
-            on_line(line.rstrip("\n"))
-    return p.wait()
+    try:
+        for line in p.stdout:
+            log.write(line)
+            if on_line:
+                on_line(line.rstrip("\n"))
+        return p.wait()
+    except BaseException:  # interrupted or terminated: don't leave Brush training in the background
+        p.kill()
+        p.wait()
+        raise
 
 
 def _last_lines(path: Path, n: int = 40) -> list[str]:

@@ -11,6 +11,8 @@ pass=0; fail=0
 ok()  { echo "ok   $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL $1"; fail=$((fail + 1)); }
 check() { if eval "$2"; then ok "$1"; else bad "$1${3:+ — $3}"; fi; }
+# Like check, but the failure detail is a command run after the check, so it can read logs the check just wrote.
+checkl() { if eval "$2"; then ok "$1"; else bad "$1 — $(eval "$3" 2>/dev/null | tr '\n' ' ' | cut -c1-600)"; fi; }
 last() { tail -n 1 "$1" 2>/dev/null; }
 scan() { uv run -q --project scan nook-scan "$@"; }
 
@@ -19,7 +21,7 @@ if [ ! -f "$GT/transforms.json" ]; then node fixtures/make_capture.mjs --out "$G
 (cd "$(dirname "$GT")" && rm -f "$OLDPWD/$OUT/capture.zip" && zip -qr "$OLDPWD/$OUT/capture.zip" "$(basename "$GT")")
 
 # --- check ---------------------------------------------------------------------------------------
-check "nook-scan check accepts the fixture capture" 'scan check "$OUT/capture.zip" >"$OUT/check.out" 2>&1' "$(tail -n 2 "$OUT/check.out")"
+checkl "nook-scan check accepts the fixture capture" 'scan check "$OUT/capture.zip" >"$OUT/check.out" 2>&1' 'tail -n 2 "$OUT/check.out"'
 
 # --- train (S1) ----------------------------------------------------------------------------------
 start=$(date +%s)

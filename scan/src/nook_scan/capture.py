@@ -2,6 +2,7 @@
 
 import json
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -50,6 +51,8 @@ def open_capture(arg: str, workdir: Path) -> Path:
             return subs[0]
         raise ScanError(f"{arg} has no transforms.json: pass the capture folder (scan-YYYYMMDD-HHMMSS) or its .zip")
     if not zipfile.is_zipfile(p):
+        if p.suffix.lower() == ".zip":
+            raise ScanError(f"{p.name} is a damaged zip (incomplete transfer?): AirDrop the capture again")
         raise ScanError(f"{arg} is neither a folder nor a .zip: pass the capture .zip from the nook-scan app")
     try:
         with zipfile.ZipFile(p) as z:
@@ -68,7 +71,7 @@ def open_capture(arg: str, workdir: Path) -> Path:
             dest.mkdir(parents=True)
             for n in names:
                 z.extract(n, dest)
-    except zipfile.BadZipFile:
+    except (zipfile.BadZipFile, zlib.error, EOFError):
         raise ScanError(f"{p.name} is a damaged zip: AirDrop the capture again")
     return dest / tops.pop()
 

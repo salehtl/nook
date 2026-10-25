@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -75,7 +76,7 @@ def cmd_train(args) -> int:
     room_dir = Path(args.room_dir).expanduser()
     if room_dir.exists() and not room_dir.is_dir():
         raise ScanError(f"--room-dir {room_dir} is a file, not a folder")
-    existing = room.read_existing(room_dir)
+    room.read_existing(room_dir)  # fail fast on a broken room.json; it is re-read at commit time
 
     work = Path(tempfile.mkdtemp(prefix="nook-scan-"))
     try:
@@ -103,7 +104,8 @@ def cmd_train(args) -> int:
 
         ply_path = room_dir / f"{args.name}.ply"
         room_json = room_dir / "room.json"
-        new_room = room.updated(existing, ply_path, room_dir, floor_y)
+        # Re-read: training takes minutes and the planner may have saved room.json (e.g. its look) meanwhile.
+        new_room = room.updated(room.read_existing(room_dir), ply_path, room_dir, floor_y)
         ply_tmp = work / "final.ply"
         write_splats(ply_tmp, splats)
 
@@ -111,12 +113,15 @@ def cmd_train(args) -> int:
         created = not room_dir.exists()
         room_dir.mkdir(parents=True, exist_ok=True)
         staged = room_dir / f".{args.name}.ply.tmp-{os.getpid()}"
+        staged_json = room_dir / f".room.json.tmp-{os.getpid()}"
         try:
             shutil.copyfile(ply_tmp, staged)
+            staged_json.write_bytes((json.dumps(new_room, indent=2) + "\n").encode())
             os.replace(staged, ply_path)
-            room.write_atomic(room_json, (json.dumps(new_room, indent=2) + "\n").encode())
+            os.replace(staged_json, room_json)
         except OSError as e:
             staged.unlink(missing_ok=True)
+            staged_json.unlink(missing_ok=True)
             if created:
                 shutil.rmtree(room_dir, ignore_errors=True)
             raise ScanError(f"cannot write into {room_dir}: {e.strerror}")
@@ -133,12 +138,17 @@ def cmd_train(args) -> int:
     return 0
 
 
+def _terminate(signum, frame):
+    raise KeyboardInterrupt
+
+
 def main() -> None:
     # stderr is reserved for the single error line: silence numpy floating-point chatter
     # (Accelerate's det/matmul can raise spurious RuntimeWarnings on Apple silicon).
     warnings.simplefilter("ignore")
     np.seterr(all="ignore")
     args = build_parser().parse_args()
+    signal.signal(signal.SIGTERM, _terminate)
     try:
         sys.exit(cmd_check(args) if args.cmd == "check" else cmd_train(args))
     except ScanError as e:

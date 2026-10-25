@@ -3,6 +3,7 @@
 // Usage: node evals/psnr_judge.mjs <splat.ply> <capture-dir> [--every 10] [--max 18] [--save evals/out/psnr]
 // Prints JSON: { mean_psnr, min_psnr, frames: [{ index, psnr }] }
 import fs from 'node:fs'
+import http from 'node:http'
 import path from 'node:path'
 import { chromium } from 'playwright-core'
 
@@ -47,13 +48,19 @@ window.READY = true
 const browser = await chromium.launch({ executablePath: process.env.NOOK_BROWSER || '/Applications/Helium.app/Contents/MacOS/Helium', headless: true, args: process.env.NOOK_SOFTWARE_GL ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : ['--use-angle=metal', '--ignore-gpu-blocklist'] })
 const page = await browser.newPage({ viewport: { width: t.w, height: t.h } })
 page.on('pageerror', (e) => { console.error('page error:', e); process.exit(1) })
-await page.route('http://judge.local/**', (route) => {
-  const p = decodeURIComponent(new URL(route.request().url()).pathname)
-  if (p === '/judge.html') return route.fulfill({ contentType: 'text/html', body: PAGE })
-  route.fulfill({ path: p.replace(/^\/f/, '') })
-})
+// A local server streams files: page.route/fulfill buffers whole bodies and dies on splats of ~90 MB and up.
+const server = http.createServer((req, res) => {
+  const p = decodeURIComponent(new URL(req.url, 'http://x').pathname)
+  if (p === '/judge.html') return res.writeHead(200, { 'content-type': 'text/html' }).end(PAGE)
+  const file = p.replace(/^\/f/, '')
+  if (!p.startsWith('/f/') || !fs.existsSync(file)) return res.writeHead(404).end()
+  res.writeHead(200, { 'content-length': fs.statSync(file).size })
+  fs.createReadStream(file).pipe(res)
+}).listen(0, '127.0.0.1')
+await new Promise((r) => server.once('listening', r))
+const BASE = `http://127.0.0.1:${server.address().port}`
 await page.addInitScript((cfg) => { window.CFG = cfg }, { w: t.w, h: t.h, fl_y: t.fl_y, splatUrl: `/f${path.resolve(splat)}` })
-await page.goto('http://judge.local/judge.html')
+await page.goto(`${BASE}/judge.html`)
 await page.waitForFunction(() => window.READY, null, { timeout: 180000 })
 if (SAVE) fs.mkdirSync(SAVE, { recursive: true })
 const frames = []
@@ -63,5 +70,6 @@ for (const f of pick) {
   if (SAVE) fs.writeFileSync(path.join(SAVE, `render-${String(f.index).padStart(4, '0')}.jpg`), Buffer.from(r.render.split(',')[1], 'base64'))
 }
 await browser.close()
+server.close()
 const ps = frames.map((f) => f.psnr)
 console.log(JSON.stringify({ mean_psnr: +(ps.reduce((a, b) => a + b, 0) / ps.length).toFixed(2), min_psnr: Math.min(...ps), frames }))

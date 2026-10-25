@@ -51,7 +51,7 @@ def estimate_floor(seeds: np.ndarray, cams: np.ndarray) -> float | None:
     if len(seeds) < 200:
         return None
     y = seeds[:, 1].astype(np.float64)
-    below = y[y < cams[:, 1].min() - 0.2]
+    below = y[y < np.percentile(cams[:, 1], 10) - 0.2]
     if len(below) < 100:
         return None
     lo, hi = np.percentile(below, 0.1), below.max()
