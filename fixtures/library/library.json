@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "sheen-chair",
+      "name": "Sheen Chair",
+      "category": "chair",
+      "dims_cm": {
+        "w": 82.66,
+        "d": 57.03,
+        "h": 68.62
+      },
+      "assets": {
+        "glb": "sheen-chair/model.glb",
+        "splat": null,
+        "thumb": null
+      },
+      "default_render": "glb",
+      "source": {
+        "engine": "fixture",
+        "input": "fixtures/models/SheenChair.glb",
+        "prompt": null,
+        "cost_usd": 0,
+        "mock": false,
+        "created": "2026-10-25T00:00:00Z"
+      },
+      "notes": "Khronos glTF sample asset (CC-BY 4.0, Wayfair)."
+    },
+    {
+      "id": "test-cube",
+      "name": "Test Cube",
+      "category": "test",
+      "dims_cm": {
+        "w": 50,
+        "d": 40,
+        "h": 60
+      },
+      "assets": {
+        "glb": "test-cube/model.glb",
+        "splat": "test-cube/splat.ply",
+        "thumb": null
+      },
+      "default_render": "splat",
+      "source": {
+        "engine": "fixture",
+        "input": "generated",
+        "prompt": null,
+        "cost_usd": 0,
+        "mock": false,
+        "created": "2026-10-25T00:00:00Z"
+      },
+      "notes": "Front (+Z) half is red."
+    }
+  ]
+}

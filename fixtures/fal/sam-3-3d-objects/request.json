@@ -1,0 +1,5 @@
+{
+  "image_url": "https://v3b.fal.media/files/mock/input.jpg",
+  "prompt": "chair",
+  "export_textured_glb": true
+}

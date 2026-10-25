@@ -1,0 +1,14 @@
+{
+  "name": "nook",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "python3 planner/serve.py",
+    "eval:planner": "node evals/planner_smoke.mjs",
+    "eval:pipeline": "bash evals/pipeline_offline.sh"
+  },
+  "devDependencies": {
+    "ajv": "^8.20.0",
+    "playwright-core": "^1.64.1"
+  }
+}

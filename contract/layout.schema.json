@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "nook/layout.schema.json",
+  "title": "nook layout",
+  "type": "object",
+  "required": ["version", "name", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+    "library": { "description": "Library URL the layout was made with.", "type": ["string", "null"] },
+    "room": { "description": "Room config at save time (room.schema.json), or null.", "type": ["object", "null"] },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["uid", "id", "render", "position", "rotation_y_deg"],
+        "additionalProperties": false,
+        "properties": {
+          "uid": { "type": "string", "minLength": 1 },
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+          "render": { "enum": ["glb", "splat"] },
+          "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+          "rotation_y_deg": { "type": "number" }
+        }
+      }
+    },
+    "camera": {
+      "type": ["object", "null"],
+      "properties": {
+        "view": { "enum": ["orbit", "seated", "standing"] },
+        "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+        "target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+      }
+    },
+    "notes": { "type": ["string", "null"] }
+  }
+}

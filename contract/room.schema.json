@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "nook/room.schema.json",
+  "title": "nook room config",
+  "type": "object",
+  "required": ["version"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "splat": {
+      "description": "URL path of the scan, relative to the repo root (e.g. room/scan.spz) or absolute URL. Null/absent means placeholder room.",
+      "type": ["string", "null"]
+    },
+    "transform": {
+      "type": "object",
+      "required": ["position", "quaternion", "scale"],
+      "additionalProperties": false,
+      "properties": {
+        "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+        "quaternion": { "description": "[x, y, z, w]", "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+        "scale": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "placeholder": {
+      "type": "object",
+      "required": ["w", "d", "h"],
+      "additionalProperties": false,
+      "properties": {
+        "w": { "type": "number", "exclusiveMinimum": 0 },
+        "d": { "type": "number", "exclusiveMinimum": 0 },
+        "h": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "measured": {
+      "description": "Last two-point scale measurement, for reference.",
+      "type": ["object", "null"],
+      "required": ["a", "b", "meters"],
+      "properties": {
+        "a": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+        "b": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+        "meters": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    }
+  }
+}

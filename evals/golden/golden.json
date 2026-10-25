@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "note": "Real furniture photos with true dimensions, for live engine comparisons. Add the user's own candidates here.",
+  "items": [
+    {
+      "id": "morris-chair",
+      "photo": "morris-chair.jpg",
+      "prompt": "armchair",
+      "category": "armchair",
+      "dims_cm": { "w": 76, "d": 89, "h": 94 },
+      "dims_source": "approximate: typical Morris chair; photo is public domain (Wikimedia Commons, Morris-Chair-Ironwood.jpg)",
+      "kind": "clean product shot"
+    }
+  ]
+}

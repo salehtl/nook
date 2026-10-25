@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "sheen-chair",
+      "name": "Sheen Chair",
+      "category": "chair",
+      "dims_cm": {
+        "w": 82.66,
+        "d": 57.03,
+        "h": 68.62
+      },
+      "assets": {
+        "glb": "../library/sheen-chair/model.glb",
+        "splat": null,
+        "thumb": null
+      },
+      "default_render": "glb",
+      "source": {
+        "engine": "fixture",
+        "input": "fixtures/models/SheenChair.glb",
+        "prompt": null,
+        "cost_usd": 0,
+        "mock": false,
+        "created": "2026-10-25T00:00:00Z"
+      },
+      "notes": "Khronos glTF sample asset (CC-BY 4.0, Wayfair)."
+    },
+    {
+      "id": "missing-asset",
+      "name": "Missing Asset",
+      "category": "test",
+      "dims_cm": {
+        "w": 50,
+        "d": 50,
+        "h": 50
+      },
+      "assets": {
+        "glb": "missing-asset/model.glb",
+        "splat": null,
+        "thumb": null
+      },
+      "default_render": "glb",
+      "source": {
+        "engine": "fixture",
+        "input": "none",
+        "prompt": null,
+        "cost_usd": 0,
+        "mock": false,
+        "created": "2026-10-25T00:00:00Z"
+      }
+    }
+  ]
+}

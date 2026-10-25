@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "splat": "fixtures/room/test.spz",
+  "transform": {
+    "position": [
+      0,
+      0.6,
+      0
+    ],
+    "quaternion": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "scale": 1
+  }
+}

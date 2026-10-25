@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "nook/library.schema.json",
+  "title": "nook furniture library",
+  "type": "object",
+  "required": ["version", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/item" } }
+  },
+  "$defs": {
+    "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+    "relpath": { "type": "string", "minLength": 1, "not": { "pattern": "^(/|[a-zA-Z]+:)" } },
+    "pct": { "type": "number", "minimum": 0 },
+    "axisErr": {
+      "type": "object",
+      "required": ["w", "d", "h"],
+      "additionalProperties": false,
+      "properties": { "w": { "$ref": "#/$defs/pct" }, "d": { "$ref": "#/$defs/pct" }, "h": { "$ref": "#/$defs/pct" } }
+    },
+    "item": {
+      "type": "object",
+      "required": ["id", "name", "dims_cm", "assets", "default_render", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "name": { "type": "string", "minLength": 1 },
+        "category": { "type": ["string", "null"] },
+        "dims_cm": {
+          "type": "object",
+          "required": ["w", "d", "h"],
+          "additionalProperties": false,
+          "properties": {
+            "w": { "type": "number", "exclusiveMinimum": 0 },
+            "d": { "type": "number", "exclusiveMinimum": 0 },
+            "h": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "assets": {
+          "type": "object",
+          "required": ["glb"],
+          "additionalProperties": false,
+          "properties": {
+            "glb": { "$ref": "#/$defs/relpath" },
+            "splat": { "oneOf": [{ "$ref": "#/$defs/relpath" }, { "type": "null" }] },
+            "thumb": { "oneOf": [{ "$ref": "#/$defs/relpath" }, { "type": "null" }] }
+          }
+        },
+        "default_render": { "enum": ["glb", "splat"] },
+        "source": {
+          "type": "object",
+          "required": ["engine", "input", "cost_usd", "created"],
+          "additionalProperties": false,
+          "properties": {
+            "engine": { "enum": ["sam3d", "trellis2", "glb", "fixture"] },
+            "input": { "type": "string" },
+            "prompt": { "type": ["string", "null"] },
+            "cost_usd": { "type": "number", "minimum": 0 },
+            "mock": { "type": "boolean" },
+            "created": { "type": "string", "format": "date-time" }
+          }
+        },
+        "fit": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "glb_error_pct": { "$ref": "#/$defs/axisErr" },
+            "splat_error_pct": { "oneOf": [{ "$ref": "#/$defs/axisErr" }, { "type": "null" }] }
+          }
+        },
+        "notes": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

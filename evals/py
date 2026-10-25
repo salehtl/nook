@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Run an eval helper with its own pinned deps, independent of pipeline/'s environment.
+exec uv run -q --no-project --python 3.12 --with trimesh --with numpy --with jsonschema --with pygltflib python -I "$@"

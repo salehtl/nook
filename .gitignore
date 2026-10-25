@@ -4,3 +4,9 @@ __pycache__/
 .env
 node_modules/
 *.log
+evals/out/
+# big binaries stay local; decisions (json/csv) are versioned
+room/*
+!room/room.json
+library/*/
+library/_inbox/
