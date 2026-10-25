@@ -117,6 +117,67 @@ interface Nook {
 - P7. Seated and standing views put the camera at 1.15 m and 1.6 m (±1 cm).
 - P8. Alignment edits (including pick-floor and two-point scale) persist through `PUT /api/room` and survive a reload.
 - P9. The measure tool shows the correct distance (e.g. between two placed items' known positions).
+- P11–P16: see §2.6.
+
+### 2.6 Realism and "Render this view"
+
+Goal: semi-realistic for $0 in the planner, plus an optional paid photoreal pass of the current view.
+
+**Realism (free, in the planner)**
+
+1. **Tone and color**: ACES Filmic tone mapping, sRGB output. A **Look** control (in the Room & alignment panel) sets `exposure` (0.25–4, default 1) and `warmth` (−1 cool … +1 warm, default 0, a gentle white-balance tint applied to the whole frame). Saved with **Save room** as `look` in the room config (room.schema.json).
+2. **Room-lit furniture**: when a splat room is loaded, bake an environment map from the room splat. Render a cube map of the splat (furniture hidden) from a probe point, PMREM it, and set it as `scene.environment`, so GLB furniture is lit by the room's own light. The default probe is the room's center at 1.0 m height. **Relight here** re-bakes from the selected item's position (at 1.0 m). Re-bake automatically after a room loads or its alignment is saved. The placeholder room uses a neutral studio environment (three.js `RoomEnvironment`).
+3. **Contact shadows**: every placed item (GLB or splat) gets a soft blob shadow on the floor: a radial-gradient quad slightly larger than its footprint, just above y = 0, which follows the item's position and rotation. It can be toggled.
+4. Splat furniture already matches the scan's look. Nothing changes there beyond the contact shadow.
+
+**Render this view (paid, about $0.04)**
+
+5. A **Render** button (top bar) captures the current view (the canvas only, no UI) as a JPEG and asks for confirmation, showing the model and its price. It then `POST`s to `/api/render` and shows the result side by side with the input. A **Renders** panel lists past renders, newest first.
+6. The FAL key never reaches the browser. The server makes the fal call.
+
+**Server additions (`planner/serve.py`, still stdlib only)**
+
+```
+python3 planner/serve.py ... [--renders-dir renders] [--costs-file library/costs.csv]
+```
+
+- `POST /api/render` with body `{ "image": "data:image/jpeg;base64,...", "model"?: "kontext" | "nano-banana" | "qwen", "prompt"?: string, "view"?: string, "layout"?: string }`:
+  - Calls fal synchronously (`https://fal.run/<endpoint>`, header `Authorization: Key $FAL_KEY`), passing the image as a data URI. FAL_KEY comes from the environment or `.env`, the same rules as the pipeline (§3.3, including `NOOK_NO_DOTENV`).
+  - Saves `<renders>/<name>.jpg` (the result), `<name>-input.jpg` and `<name>.json` (metadata). `<name>` is `render-YYYYMMDD-HHMMSS` (UTC), plus a numeric suffix on collision.
+  - Appends a row to the costs file (`date,id,engine,cost_usd,mock,input` with `engine` = `render:<model>` and `input` = the view name).
+  - Responds `200 { name, url, input_url, model, cost_usd, mock, prompt, created }`. URLs are site paths, e.g. `/renders/<name>.jpg`; renders are served statically.
+  - Errors: `400` for a bad or missing image or unknown model, `503 {"error": "FAL_KEY not set: add FAL_KEY=... to nook/.env"}` when there's no key (outside mock mode), and `502 {"error": ...}` when fal fails. No cost row is written on failure before fal returns.
+- `GET /api/renders` responds `{ "renders": [metadata, ...] }`, newest first.
+- **Mock**: with `NOOK_FAL_MOCK` set, there are no network calls. The "result" is a copy of the input, `mock: true` and `cost_usd: 0`.
+
+| model | fal endpoint | arguments | cost recorded |
+|---|---|---|---|
+| `kontext` (default) | `fal-ai/flux-pro/kontext` | `image_url`, `prompt`, `output_format: "jpeg"` | $0.04 |
+| `nano-banana` | `fal-ai/nano-banana/edit` | `image_urls: [image]`, `prompt`, `output_format: "jpeg"` | $0.0398 |
+| `qwen` | `fal-ai/qwen-image-edit` | `image_url`, `prompt`, `output_format: "jpeg"` | $0.03 × megapixels of the input |
+
+Default prompt: *"Turn this 3D planning render into a photorealistic interior photograph. Keep the exact camera angle, room geometry, and every piece of furniture with its position, size, shape and color. Realistic materials, soft natural daylight, subtle contact shadows. Do not add, remove or move anything."*
+
+**Hook additions (`window.nook`)**
+
+```ts
+getRenderSettings(): { toneMapping: 'aces', exposure: number, warmth: number, envSource: 'splat' | 'neutral', contactShadows: boolean, shadowCount: number }
+setRenderSettings(s: Partial<{ exposure: number, warmth: number, contactShadows: boolean }>): void   // live; persisted only via Save room
+relight(position?: [number, number, number]): Promise<void>   // re-bake the environment; resolves when the new map is applied
+renderView(opts?: { model?: string, prompt?: string }): Promise<RenderMeta>   // no confirmation dialog when called from the hook
+listRenders(): Promise<RenderMeta[]>
+```
+
+`shadowCount` is the number of contact shadows in the scene: it equals the number of placed items when shadows are on, and 0 when they're off.
+
+**Acceptance criteria**
+
+- P11. Tone mapping is ACES. Exposure and warmth change the image live, and `look` round-trips through Save room and a reload.
+- P12. With a splat room, `relight()` resolves and `envSource` is `'splat'`. With the placeholder, it's `'neutral'`. A GLB item under a splat room is visibly lit by the room's colors, not flat grey.
+- P13. Every placed item has a contact shadow that follows it when moved or rotated. Toggling them off sets `shadowCount` to 0.
+- P14. In mock mode, `renderView()` writes the jpg/input/json files, appends a mock cost row, and returns a URL that serves the image. The render shows up in `listRenders()` and in the Renders panel.
+- P15. Without a key (and not in mock mode), `/api/render` returns 503 with the FAL_KEY message, and the UI shows it as a toast.
+- P16. Performance: with the fixture splat room and 3 items, orbiting stays interactive. Baking happens only on load, on save, or when asked, never per frame.
 - P10. A missing or corrupt asset shows an error message and the rest of the app keeps working.
 
 ---

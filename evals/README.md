@@ -4,7 +4,7 @@ Written before the planner and pipeline existed, against [contract/CONTRACT.md](
 
 | Command | Checks | Cost |
 |---|---|---|
-| `npm run eval:planner` | `evals/planner_smoke.mjs`: starts `planner/serve.py` on port 8799 with scratch room/layout paths, opens the planner in headless Helium, and drives `window.nook` through the §2.5 criteria it can check without a human (P1–P4, P6–P8, P10). Screenshots go to `evals/out/planner/*.png` for visual review. | $0 |
+| `npm run eval:planner` | `evals/planner_smoke.mjs`: starts `planner/serve.py` on port 8799 with scratch room/layout paths, opens the planner in headless Helium, and drives `window.nook` through the §2.5 and §2.6 criteria it can check without a human (P1–P4, P6–P8, P10–P15). Screenshots go to `evals/out/planner/*.png` for visual review. | $0 |
 | `npm run eval:pipeline` | `evals/pipeline_offline.sh`: runs `nook-add` against the recorded fal responses in `fixtures/fal/` with network blocked, covering §3.6 L1–L7. Output goes to `evals/out/pipeline/`. | $0 |
 | `evals/py evals/validate_library.py <library.json>` | The §1 normalized-asset rules and `library.schema.json`, for any library (fixtures, eval output, or your real `library/`). | $0 |
 | `evals/py evals/glb_info.py <model.glb>` | Helper: image and material counts, bounds, vertex centroid. | $0 |

@@ -34,9 +34,11 @@ fs.rmSync(OUT, { recursive: true, force: true })
 fs.mkdirSync(path.join(OUT, 'layouts'), { recursive: true })
 fs.copyFileSync(path.join(REPO, 'fixtures/room/placeholder.json'), path.join(OUT, 'room.json'))
 
-const server = spawn('python3', ['planner/serve.py', '--port', String(PORT),
-  '--room-file', 'evals/out/planner/room.json', '--layouts-dir', 'evals/out/planner/layouts'],
-  { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] })
+const SERVE_ARGS = ['--room-file', 'evals/out/planner/room.json', '--layouts-dir', 'evals/out/planner/layouts',
+  '--renders-dir', 'evals/out/planner/renders', '--costs-file', 'evals/out/planner/costs.csv']
+const childEnv = (extra) => { const e = { ...process.env, NOOK_NO_DOTENV: '1', ...extra }; delete e.FAL_KEY; if (!extra.NOOK_FAL_MOCK) delete e.NOOK_FAL_MOCK; return e }
+const server = spawn('python3', ['planner/serve.py', '--port', String(PORT), ...SERVE_ARGS],
+  { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], env: childEnv({ NOOK_FAL_MOCK: 'fixtures/fal' }) })
 let serverLog = ''
 server.stdout.on('data', (d) => { serverLog += d })
 server.stderr.on('data', (d) => { serverLog += d })
@@ -102,6 +104,10 @@ const cube = lib.items.find((i) => i.id === 'test-cube').dims_cm
 
 let page = await openPlanner(LIB_URL)
 let s = await state(page)
+let rs = await page.evaluate(() => window.nook.getRenderSettings())
+check('P11 tone mapping is ACES with default exposure 1 and warmth 0', rs.toneMapping === 'aces' && rs.exposure === 1 && rs.warmth === 0, fmt(rs))
+check('P12 placeholder room uses the neutral environment', rs.envSource === 'neutral', fmt(rs))
+check('P13 contact shadows on by default, none before items', rs.contactShadows === true && rs.shadowCount === 0, fmt(rs))
 check('nook.ready resolves with placeholder room', s.room.kind === 'placeholder' && s.room.loaded, fmt(s.room))
 check('getLibrary returns the fixture items', (await page.evaluate(() => window.nook.getLibrary().map((i) => i.id))).join() === 'sheen-chair,test-cube')
 await settle(page); await shot(page, '01-placeholder-empty')
@@ -135,7 +141,34 @@ check('default_render splat is used when render not given', cs?.render === 'spla
 check('splat item height matches dims_cm within 5%', cs && relNear(size(cs.worldBounds)[1], cube.h / 100, 0.05), cs && fmt(size(cs.worldBounds)))
 check('render: glb is honoured', cg?.render === 'glb' && relNear(size(cg.worldBounds)[0], cube.w / 100, 0.02), fmt(cg))
 check('addItem with unknown id rejects', await page.evaluate(() => window.nook.addItem('no-such-item').then(() => false, () => true)))
+const nItems = (await state(page)).items.length
+rs = await page.evaluate(() => window.nook.getRenderSettings())
+check('P13 one contact shadow per placed item', rs.shadowCount === nItems, `shadows ${rs.shadowCount} items ${nItems}`)
+await page.evaluate(() => window.nook.setRenderSettings({ contactShadows: false }))
+const off = (await page.evaluate(() => window.nook.getRenderSettings())).shadowCount
+await page.evaluate(() => window.nook.setRenderSettings({ contactShadows: true }))
+const on = (await page.evaluate(() => window.nook.getRenderSettings())).shadowCount
+check('P13 toggling contact shadows', off === 0 && on === nItems, `off ${off} on ${on}`)
+await page.evaluate(() => window.nook.setRenderSettings({ exposure: 1.4, warmth: 0.3 }))
+rs = await page.evaluate(() => window.nook.getRenderSettings())
+check('P11 setRenderSettings applies exposure and warmth live', near(rs.exposure, 1.4, 1e-6) && near(rs.warmth, 0.3, 1e-6), fmt(rs))
+await page.evaluate(() => window.nook.setRenderSettings({ exposure: 1, warmth: 0 }))
 await settle(page); await shot(page, '02-placeholder-items')
+
+// P14: render this view (mock mode: no network, $0)
+const meta = await page.evaluate(() => window.nook.renderView({ model: 'kontext' }).then((m) => m, (e) => ({ error: String(e) })))
+check('P14 renderView resolves with metadata', meta && !meta.error && meta.mock === true && meta.cost_usd === 0 && /^\/renders\//.test(meta.url), fmt(meta))
+if (meta && !meta.error) {
+  const img = await fetch(BASE + meta.url)
+  check('P14 render image is served', img.ok && /image\//.test(img.headers.get('content-type') || ''), `${img.status} ${img.headers.get('content-type')}`)
+  check('P14 render files written (jpg, input, json)', ['.jpg', '-input.jpg', '.json'].every((x) => fs.existsSync(path.join(OUT, 'renders', meta.name + x))))
+  const costs = fs.existsSync(path.join(OUT, 'costs.csv')) ? fs.readFileSync(path.join(OUT, 'costs.csv'), 'utf8') : ''
+  check('P14 render logs a mock cost row', /^date,id,engine,cost_usd,mock,input/.test(costs) && costs.split('\n').some((l) => l.includes(meta.name) && l.includes('render:kontext') && l.includes(',true,')), costs.slice(-300))
+  check('P14 listRenders includes it', (await page.evaluate(() => window.nook.listRenders())).some((r) => r.name === meta.name))
+}
+check('P14 unknown render model rejects', await page.evaluate(() => window.nook.renderView({ model: 'nope' }).then(() => false, () => true)))
+const badRender = await fetch(`${BASE}/api/render`, { method: 'POST', body: JSON.stringify({ image: 'nope' }), headers: { 'content-type': 'application/json' } })
+check('P14 POST /api/render with a bad image is 400', badRender.status === 400, `status ${badRender.status}`)
 
 // P6: layouts round-trip
 await page.evaluate(() => window.nook.saveLayout('smoke'))
@@ -177,10 +210,13 @@ check('orbit view restores', (await state(page)).camera.view === 'orbit')
 await page.evaluate((room) => window.nook.loadRoom(room), readJson('fixtures/room/splat.json'))
 s = await state(page)
 check('loadRoom with a splat renders a splat room', s.room.kind === 'splat' && s.room.loaded && s.room.splatCount > 0, fmt(s.room))
+await page.evaluate(() => window.nook.relight())
+rs = await page.evaluate(() => window.nook.getRenderSettings())
+check('P12 relight() bakes the environment from the splat room', rs.envSource === 'splat', fmt(rs))
 await settle(page); await shot(page, '04-splat-room')
 
 // P8 (server side): a saved alignment is applied on reload
-const aligned = { version: 1, splat: 'fixtures/room/test.spz', transform: { position: [0.1, 0.5, -0.2], quaternion: [1, 0, 0, 0], scale: 1.5 } }
+const aligned = { version: 1, splat: 'fixtures/room/test.spz', transform: { position: [0.1, 0.5, -0.2], quaternion: [1, 0, 0, 0], scale: 1.5 }, look: { exposure: 1.5, warmth: -0.2 } }
 const put = await fetch(`${BASE}/api/room`, { method: 'PUT', body: JSON.stringify(aligned), headers: { 'content-type': 'application/json' } })
 check('PUT /api/room accepts a room config', put.ok, `status ${put.status}`)
 await page.reload()
@@ -189,6 +225,8 @@ await page.evaluate(() => window.nook.ready)
 s = await state(page)
 const t = s.room.transform
 check('room transform from /api/room is applied on load', s.room.kind === 'splat' && near(t.scale, 1.5, 1e-6) && t.position.every((v, i) => near(v, aligned.transform.position[i], 1e-6)), fmt(s.room))
+rs = await page.evaluate(() => window.nook.getRenderSettings())
+check('P11 look from /api/room is applied on load', near(rs.exposure, 1.5, 1e-6) && near(rs.warmth, -0.2, 1e-6), fmt(rs))
 await settle(page); await shot(page, '05-splat-room-aligned')
 fs.copyFileSync(path.join(REPO, 'fixtures/room/placeholder.json'), path.join(OUT, 'room.json'))
 
@@ -207,5 +245,19 @@ const stillWorks = await broken.evaluate(() => window.nook.addItem('sheen-chair'
 check('app keeps working after a failed asset', stillWorks)
 check('no uncaught page errors after a failed asset', brokenPageErrors.length === 0, brokenPageErrors.join(' | '))
 await shot(broken, '06-broken-asset')
+
+// P15: no key and not in mock mode -> 503 with an actionable message
+const keyless = spawn('python3', ['planner/serve.py', '--port', String(PORT + 1), ...SERVE_ARGS], { cwd: REPO, stdio: 'ignore', env: childEnv({}) })
+process.on('exit', () => keyless.kill())
+let r503 = null
+for (let i = 0; i < 50 && !r503; i++) {
+  try {
+    const tiny = 'data:image/jpeg;base64,' + fs.readFileSync(path.join(REPO, 'fixtures/fal/sam-3-3d-objects/input.jpg')).toString('base64')
+    r503 = await fetch(`http://127.0.0.1:${PORT + 1}/api/render`, { method: 'POST', body: JSON.stringify({ image: tiny }), headers: { 'content-type': 'application/json' } })
+  } catch { await new Promise((r) => setTimeout(r, 200)) }
+}
+const body503 = r503 ? await r503.json().catch(() => ({})) : {}
+check('P15 /api/render without FAL_KEY is 503 with a FAL_KEY hint', r503?.status === 503 && /FAL_KEY/.test(body503.error || ''), `${r503?.status} ${fmt(body503)}`)
+keyless.kill()
 
 await finish()
