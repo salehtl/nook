@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# nook-scan iOS eval (contract §4.7 I1, I3): generate, build (simulator + generic device), test, validate the replay
+# capture, check release settings. No signing, no network to Apple. Output lands in evals/out/ios/.
+# Usage: bash evals/ios_build.sh   (or npm run eval:ios)
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+OUT=evals/out/ios
+DD="$OUT/dd"
+SIM="${NOOK_SIM:-iPhone 18 Pro}"
+mkdir -p "$OUT"
+pass=0; fail=0
+ok()  { echo "ok   $1"; pass=$((pass + 1)); }
+bad() { echo "FAIL $1"; fail=$((fail + 1)); }
+check() { if eval "$2"; then ok "$1"; else bad "$1${3:+ — $3}"; fi; }
+
+[ -f ios/project.yml ] || { echo "FAIL ios/project.yml not found (app not built yet)"; exit 1; }
+check "xcodegen generates the project" 'xcodegen generate --spec ios/project.yml --project ios >"$OUT/xcodegen.log" 2>&1' "$(tail -n 3 "$OUT/xcodegen.log")"
+PROJ=$(ls -d ios/*.xcodeproj 2>/dev/null | head -n 1)
+[ -n "$PROJ" ] || { echo "FAIL no .xcodeproj generated"; exit 1; }
+
+# Unit tests on the simulator (includes ReplayCaptureTests.testReplayWritesValidCapture).
+UDID=$(xcrun simctl list devices available -j | node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8')).devices; const all=Object.values(d).flat(); const m=all.find(x=>x.name===process.argv[1]); console.log(m?m.udid:'')" "$SIM")
+[ -n "$UDID" ] || { echo "FAIL no available simulator named '$SIM' (set NOOK_SIM)"; exit 1; }
+marker="$OUT/.test-start"; : >"$marker"
+if xcodebuild test -project "$PROJ" -scheme NookScan -destination "id=$UDID" -derivedDataPath "$DD" >"$OUT/test.log" 2>&1; then
+  ok "unit tests pass on $SIM ($(grep -Eo 'Executed [0-9]+ tests?' "$OUT/test.log" | tail -n 1))"
+else
+  bad "unit tests pass on $SIM — $(grep -E 'error:|failed|FAILED' "$OUT/test.log" | head -n 5 | tr '\n' ' ' | cut -c1-600)"
+fi
+check "ReplayCaptureTests.testReplayWritesValidCapture ran" 'grep -q "testReplayWritesValidCapture.*passed" "$OUT/test.log"'
+
+# The capture the replay test wrote, found in the simulator's data container.
+CAP=$(find "$HOME/Library/Developer/CoreSimulator/Devices/$UDID/data" -path '*nook-eval-capture/transforms.json' -newer "$marker" 2>/dev/null | head -n 1)
+if [ -n "$CAP" ]; then
+  CAPDIR=$(dirname "$CAP"); rm -rf "$OUT/replay-capture"; cp -R "$CAPDIR" "$OUT/replay-capture"
+  check "replay capture passes validate_capture.py (≥ 20 frames)" 'evals/py evals/validate_capture.py "$OUT/replay-capture" --min-frames 20 >"$OUT/validate.out" 2>&1' "$(cat "$OUT/validate.out" | head -n 5 | tr '\n' ' ')"
+else
+  bad "replay test wrote <tmp>/nook-eval-capture/transforms.json in the simulator"
+fi
+
+# Device build (unsigned): catches ARKit/LiDAR APIs that only exist for real devices.
+check "builds for generic iOS device (unsigned)" 'xcodebuild build -project "$PROJ" -scheme NookScan -destination "generic/platform=iOS" -derivedDataPath "$DD" CODE_SIGNING_ALLOWED=NO >"$OUT/device.log" 2>&1' "$(grep -E 'error:' "$OUT/device.log" | head -n 3 | tr '\n' ' ' | cut -c1-400)"
+
+# Release settings (I3), read from the built device app and the build settings.
+APP=$(ls -d "$DD"/Build/Products/Release-iphoneos/*.app "$DD"/Build/Products/Debug-iphoneos/*.app 2>/dev/null | head -n 1)
+if [ -n "$APP" ]; then
+  P="$APP/Info.plist"
+  pl() { plutil -extract "$1" raw -o - "$P" 2>/dev/null; }
+  check "bundle id com.salehtl.nookscan" '[ "$(pl CFBundleIdentifier)" = "com.salehtl.nookscan" ]' "$(pl CFBundleIdentifier)"
+  check "version 0.1.0 (build 1)" '[ "$(pl CFBundleShortVersionString)" = "0.1.0" ] && [ "$(pl CFBundleVersion)" = "1" ]' "$(pl CFBundleShortVersionString) ($(pl CFBundleVersion))"
+  check "NSCameraUsageDescription is set" '[ -n "$(pl NSCameraUsageDescription)" ]'
+  check "ITSAppUsesNonExemptEncryption is false" '[ "$(pl ITSAppUsesNonExemptEncryption)" = "false" ]'
+  check "UIRequiredDeviceCapabilities includes arkit" 'plutil -extract UIRequiredDeviceCapabilities json -o - "$P" 2>/dev/null | grep -q arkit'
+  check "deployment target iOS 18.0" '[ "$(pl MinimumOSVersion)" = "18.0" ]' "$(pl MinimumOSVersion)"
+  check "app icon compiled (Assets.car + CFBundleIcons)" '[ -f "$APP/Assets.car" ] && plutil -extract CFBundleIcons json -o - "$P" >/dev/null 2>&1'
+else
+  bad "built device .app found for Info.plist checks"
+fi
+SETTINGS=$(xcodebuild -showBuildSettings -project "$PROJ" -scheme NookScan -configuration Release 2>/dev/null)
+check "DEVELOPMENT_TEAM 8CFG28JHP3 with automatic signing" 'echo "$SETTINGS" | grep -qE "^\s*DEVELOPMENT_TEAM = 8CFG28JHP3$" && echo "$SETTINGS" | grep -qE "^\s*CODE_SIGN_STYLE = Automatic$"'
+
+echo
+echo "$pass/$((pass + fail)) checks passed"
+[ "$fail" -eq 0 ]

@@ -14,3 +14,7 @@ deploy/dist/
 deploy/.published.json
 deploy/.wrangler/
 renders/
+scan/.tools/
+scan/.venv/
+ios/*.xcodeproj/
+ios/build/

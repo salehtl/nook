@@ -246,3 +246,87 @@ A thumbnail is made from the input image (center crop, 256 × 256 JPEG). For `gl
 - L5. GLB textures and materials survive normalization (an input with images still has images).
 - L6. Mock mode makes zero network requests.
 - L7. `--yaw 90` rotates the result 90° around Y (so W and D of the source are swapped before fitting).
+
+---
+
+## 4. nook-scan: capture format (iOS app → Mac trainer)
+
+The only thing `ios/` (the capture app) and `scan/` (the trainer) share. Plan: [docs/plans/nook-scan.md](../docs/plans/nook-scan.md). Schema: [capture.schema.json](capture.schema.json).
+
+### 4.1 Layout
+
+A capture is a folder named `scan-YYYYMMDD-HHMMSS`, shared as a `.zip` whose single top-level entry is that folder:
+
+```
+scan-20261025-153000/
+  transforms.json     cameras + frames (Nerfstudio-compatible)
+  meta.json           capture metadata
+  images/000001.jpg   keyframes: JPEG, quality ≥ 0.85, long side ≤ 1920 px, sensor orientation (landscape, as ARKit delivers it)
+  depth/000001.png    optional, LiDAR only: 16-bit grayscale PNG, millimeters, 0 = no data, at depth resolution (e.g. 256 × 192)
+  points.ply          optional: seed points in world space (x y z float, red green blue uchar), binary_little_endian or ascii
+```
+
+### 4.2 World and cameras
+
+- **World**: ARKit world space with gravity alignment: meters, **+Y up**, right-handed, origin wherever the session started (usually the phone's starting position, so the floor sits at about y = −1.2 … −1.5).
+- `transform_matrix` is **camera-to-world**, 4 × 4, row-major nested arrays, in the **OpenGL camera convention**: +X right, +Y up, and the camera looks along −Z. That's exactly ARKit's `ARCamera.transform` and three.js's `camera.matrixWorld`, so no axis flip is needed.
+- Intrinsics `fl_x, fl_y, cx, cy` are in pixels for the stored image size `w × h`. They're top-level for a single camera, and a frame may override them. `camera_model` is `"OPENCV"` with no distortion terms (ARKit images are treated as undistorted).
+- Depth intrinsics are the image intrinsics scaled by `depth_w / w` and `depth_h / h`.
+
+### 4.3 transforms.json
+
+```json
+{
+  "camera_model": "OPENCV",
+  "fl_x": 1440.2, "fl_y": 1440.2, "cx": 960.1, "cy": 719.6, "w": 1920, "h": 1440,
+  "ply_file_path": "points.ply",
+  "frames": [
+    { "file_path": "images/000001.jpg", "depth_file_path": "depth/000001.png",
+      "transform_matrix": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]], "timestamp": 12.345 }
+  ]
+}
+```
+
+### 4.4 meta.json
+
+`{ "version": 1, "app": "nook-scan", "app_version": "0.1.0", "device": "iPhone17,1", "lidar": true, "world": "arkit-gravity-y-up-meters", "created": "<ISO-8601 UTC>", "frame_count": 212, "floor_y": -1.32 | null }`.
+
+`floor_y` is the height of the lowest large horizontal ARKit plane (the floor) if one was detected, otherwise null.
+
+### 4.5 Validity (what `evals/validate_capture.py` and `nook-scan check` enforce)
+
+- `transforms.json` and `meta.json` match the schema. `meta.frame_count` equals the number of frames, and there are at least 30.
+- Every referenced file exists, with a relative path that stays inside the capture. Image size equals `w × h` (or the frame's override).
+- Every `transform_matrix` is finite. Its rotation part is orthonormal (‖RᵀR − I‖ < 1e-3, det ≈ +1), and its bottom row is `[0,0,0,1]`.
+- Camera positions span at least 0.5 m (a capture taken standing still can't be trained).
+
+### 4.6 Trainer CLI (`scan/`, uv project, console script `nook-scan`)
+
+```
+uv run --project scan nook-scan check <capture.zip|dir>
+uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-dir room] [--steps N] [--holdout-every N] [--max-image-size 1280]
+```
+
+- `train` writes `<room-dir>/<name>.ply`, a standard 3DGS PLY (the §1 property set) **in capture world coordinates**. It's cropped (floaters outside the captured volume are removed) but not moved.
+- It then writes or updates `<room-dir>/room.json` (room.schema.json): `splat` is the path of the PLY relative to the repo root (or to `<room-dir>`'s parent when outside the repo), and `transform` is `position [0, −floor_y, 0]`, `quaternion [0,0,0,1]`, `scale 1`. Other existing keys, such as `look` and `placeholder`, are kept.
+  - `floor_y` comes from `meta.floor_y`. Otherwise it's estimated from seed or depth points (a low percentile of the y values of near-horizontal dense regions).
+- `--holdout-every N` (default 0) excludes frames with `index % N == 0` from training, so that evals can score them.
+- The last stdout line is JSON: `{ "name", "ply", "room_json", "splats", "floor_y", "steps", "seconds", "trainer": "<name and version>" }`.
+- Failures exit non-zero with one actionable stderr line (no traceback), and write nothing into `<room-dir>`.
+
+### 4.7 Acceptance: nook-scan
+
+- S1. `bash evals/scan_offline.sh` passes. On the synthetic ground-truth capture (`fixtures/make_capture.mjs`), it trains in under 15 minutes on the M3 Max with default steps. The PLY renders at **mean PSNR ≥ 26 dB on held-out frames, and at least 4 dB above the untrained seed-point baseline** (`evals/seed_splat.py`, which scores about 21 dB on the fixture). Both are judged by `evals/psnr_judge.mjs`, which renders with Spark, the floor lands at 0 ± 5 cm, and room.json validates.
+- S2. Bad captures fail cleanly: missing files, a NaN pose, too few frames, a static camera, or a zip with no top-level folder.
+- I1. `bash evals/ios_build.sh` passes:
+  - XcodeGen generates the project.
+  - The app builds for the simulator and for a generic iOS device (unsigned).
+  - The unit tests pass.
+  - The capture written by the replay test (`ReplayCaptureTests.testReplayWritesValidCapture`, to `<tmp>/nook-eval-capture/`) passes `validate_capture.py` with at least 20 frames.
+- I2. The app launches in the simulator with no crash and shows the captures list. Replay mode can produce a capture that appears in the list and can be shared.
+- I3. Release basics:
+  - bundle id `com.salehtl.nookscan`, team `8CFG28JHP3`, automatic signing
+  - version 0.1.0 (build 1)
+  - `NSCameraUsageDescription`, `ITSAppUsesNonExemptEncryption = NO`, `UIRequiredDeviceCapabilities` containing `arkit`
+  - a 1024 px app icon
+  - deployment target iOS 18.0

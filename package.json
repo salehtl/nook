@@ -7,7 +7,9 @@
     "eval:planner": "node evals/planner_smoke.mjs",
     "eval:pipeline": "bash evals/pipeline_offline.sh",
     "cf:publish": "node deploy/publish.mjs",
-    "cf:pull": "node deploy/pull.mjs"
+    "cf:pull": "node deploy/pull.mjs",
+    "eval:scan": "bash evals/scan_offline.sh",
+    "eval:ios": "bash evals/ios_build.sh"
   },
   "devDependencies": {
     "ajv": "^8.20.0",

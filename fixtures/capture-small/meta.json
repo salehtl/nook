@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "app": "nook-scan",
+  "app_version": "fixture",
+  "device": "synthetic",
+  "lidar": true,
+  "world": "arkit-gravity-y-up-meters",
+  "created": "2026-10-25T00:00:00Z",
+  "frame_count": 40,
+  "floor_y": -1.35
+}
