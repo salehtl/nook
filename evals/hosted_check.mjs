@@ -8,6 +8,15 @@ let fails = 0
 const check = (name, ok, detail = '') => { if (!ok) fails++; console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${!ok && detail ? ` — ${detail}` : ''}`) }
 const get = (p, o = {}) => fetch(BASE + p, { ...o, headers: { ...hdr, ...(o.headers || {}) } })
 
+if (!hdr['CF-Access-Client-Id']) {
+  // Behind Cloudflare Access: without a service token, all we can check is that the lock holds.
+  for (const p of ['/', '/planner/', '/api/layouts', '/library/library.json']) {
+    const r = await get(p, { redirect: 'manual' })
+    check(`${p} is behind Access`, r.status === 302 && /cloudflareaccess\.com/.test(r.headers.get('location') || ''), `${r.status} ${r.headers.get('location')}`)
+  }
+  console.log(fails ? `\n${fails} failing` : '\nlocked (set CF_ACCESS_CLIENT_ID/SECRET for the full check)')
+  process.exit(fails ? 1 : 0)
+}
 const root = await get('/', { redirect: 'manual' })
 check('/ redirects to /planner/', [301, 302, 307, 308].includes(root.status) && /\/planner\/?$/.test(root.headers.get('location') || ''), `${root.status} ${root.headers.get('location')}`)
 check('GET /api/room', (await get('/api/room')).ok)

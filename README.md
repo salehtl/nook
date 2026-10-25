@@ -25,13 +25,15 @@ uv run --project pipeline nook-add photo.jpg --name "Reading chair" --dims 76x89
 
 https://nook-3mk.pages.dev: the same planner. Layouts and room alignment are stored in KV, and furniture and scans in R2.
 
+**Private:** Cloudflare Access (app "nook planner") guards the site and every preview URL (`*.nook-3mk.pages.dev`). Only salehtl@icloud.com can sign in, with a one-time code by email, and a session lasts 30 days. `cf:publish` / `cf:pull` use wrangler's own login, so Access doesn't affect them. Rendering on the hosted copy needs the fal key as a Pages secret: `cd deploy && npx wrangler pages secret put FAL_KEY --project-name nook`.
+
 ```bash
 npm run cf:publish                 # upload new/changed library + room files to R2, deploy the planner
 npm run cf:publish -- --push-room  # also overwrite the hosted room alignment with room/room.json
 npm run cf:pull                    # bring hosted layouts back to layouts/ (add -- --room for the alignment)
 ```
 
-Adding furniture still happens locally (the pipeline is Python). Publish afterwards to see it on the hosted copy. Code lives in `deploy/`: `functions/` mirrors `planner/serve.py`, and `wrangler.toml` holds the bindings. Check it with `node evals/hosted_check.mjs`.
+Adding furniture still happens locally (the pipeline is Python). Publish afterwards to see it on the hosted copy. Code lives in `deploy/`: `functions/` mirrors `planner/serve.py`, and `wrangler.toml` holds the bindings. Check it with `node evals/hosted_check.mjs`. Behind Access it needs a service token in `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`; without one, it only confirms the lock.
 
 ## Evals
 
