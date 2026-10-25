@@ -1,0 +1,78 @@
+# nook-scan iPhone capture app. Generate with:
+#   xcodegen generate --spec ios/project.yml --project ios
+# The .xcodeproj is git-ignored; this file is the source of truth.
+name: NookScan
+options:
+  bundleIdPrefix: com.salehtl
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: 8CFG28JHP3
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: 0.1.0
+    CURRENT_PROJECT_VERSION: 1
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    SWIFT_VERSION: "5.0"
+
+targets:
+  NookScan:
+    type: application
+    platform: iOS
+    sources:
+      - path: NookScan
+      # Bundled only in Debug, for the "Replay sample" action (excluded from Release below).
+      - path: ../fixtures/capture-small
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.salehtl.nookscan
+        PRODUCT_NAME: NookScan
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_PREVIEWS: YES
+      configs:
+        Release:
+          EXCLUDED_SOURCE_FILE_NAMES: capture-small
+    info:
+      path: NookScan/Info.plist
+      properties:
+        CFBundleDisplayName: Nook Scan
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        NSCameraUsageDescription: Nook Scan uses the camera and LiDAR to capture your room for 3D reconstruction.
+        ITSAppUsesNonExemptEncryption: false
+        UIRequiredDeviceCapabilities: [arkit]
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+    scheme:
+      testTargets: [NookScanTests]
+
+  NookScanTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: NookScanTests
+      - path: ../fixtures/capture-small
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: NookScan
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.salehtl.nookscan.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/NookScan.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/NookScan

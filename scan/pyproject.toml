@@ -1,0 +1,17 @@
+[project]
+name = "nook-scan"
+version = "0.1.0"
+description = "nook-scan: train a nook-scan capture (iPhone, ARKit poses) into the room splat with Brush"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "jsonschema>=4.23",
+    "numpy>=2.0",
+    "pillow>=11.0",
+]
+
+[project.scripts]
+nook-scan = "nook_scan.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
