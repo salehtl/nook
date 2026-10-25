@@ -15,3 +15,14 @@
 Screenshot: `evals/out/e2e/real-lib.png` (regenerate with `node evals/library_in_planner.mjs <library.json>` after replaying the capture).
 
 Still to test: a styled-room photo (SAM 3D's strength is pulling one object out of clutter) and thin or complex pieces such as a floor lamp or a cane chair.
+
+## 2026-10-25: "Render this view" models (planner orbit view, 2 Morris chairs, placeholder room)
+
+| Model | Price | Time | Camera and layout | Changes |
+|---|---|---|---|---|
+| `nano-banana` | $0.0398 | 9.8 s | **kept exactly** | added a rug; soft, believable shadows |
+| `kontext` | $0.04 | 8.8 s | **re-framed**: zoomed in and re-angled | none beyond the camera |
+| `qwen` | $0.0307 | 55.5 s | kept | turned the floor to wood; chairs shifted slightly |
+
+**Default: `nano-banana`.** Layout fidelity is the point of a planning render. The test view is a hard case (a "dollhouse" against a black void), so re-check with a seated view inside the real scanned room.
+Images: `renders/render-20261025-1446*.jpg`. Comparison grid: [render-models.jpg](render-models.jpg).

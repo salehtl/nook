@@ -25,7 +25,7 @@ export async function onRequestPost({ env, request }) {
   try { body = await readJson(request) } catch (res) { return res }
   const m = /^data:image\/(jpeg|png);base64,([A-Za-z0-9+/=]+)$/.exec(body?.image || '')
   if (!m) return error(400, 'image must be a data:image/jpeg or data:image/png base64 URL')
-  const modelName = body.model || 'kontext'
+  const modelName = body.model || 'nano-banana'
   const model = MODELS[modelName]
   if (!model) return error(400, `unknown model '${modelName}' (choose from ${Object.keys(MODELS).join(', ')})`)
   if (!env.FAL_KEY) return error(503, 'FAL_KEY not set on the hosted copy: run `npx wrangler pages secret put FAL_KEY --project-name nook` from nook/deploy')

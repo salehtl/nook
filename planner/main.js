@@ -1266,9 +1266,11 @@ async function refreshLayoutList() {
 }
 
 // --- render this view (contract §2.6.5) ---------------------------------------------------
+// First entry is the default. Nano Banana kept the camera and layout exactly in the live comparison (evals/golden/RESULTS.md);
+// Kontext re-framed the shot and Qwen restyled the floor (and is ~6x slower).
 const RENDER_MODELS = {
-  kontext: { label: 'FLUX.1 Kontext [pro]', price: () => 0.04 },
   'nano-banana': { label: 'Nano Banana edit', price: () => 0.0398 },
+  kontext: { label: 'FLUX.1 Kontext [pro]', price: () => 0.04 },
   qwen: { label: 'Qwen Image Edit', price: (mp) => 0.03 * mp },
 }
 const DEFAULT_RENDER_PROMPT = 'Turn this 3D planning render into a photorealistic interior photograph. Keep the exact camera angle, room geometry, and every piece of furniture with its position, size, shape and color. Realistic materials, soft natural daylight, subtle contact shadows. Do not add, remove or move anything.'
@@ -1322,7 +1324,7 @@ async function postRender(shot, model, prompt) {
 
 async function renderViewInternal(opts = {}) {
   const o = opts || {}
-  const model = o.model ?? 'kontext'
+  const model = o.model ?? 'nano-banana'
   if (!Object.hasOwn(RENDER_MODELS, model)) throw reportError(`Unknown render model "${model}" (use ${Object.keys(RENDER_MODELS).join(', ')})`)
   if (o.prompt != null && typeof o.prompt !== 'string') throw reportError('Render prompt must be a string')
   await env.chain // never capture mid-bake (the splats are sorted for the probe then)

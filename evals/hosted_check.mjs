@@ -25,7 +25,7 @@ for (const it of items) {
 }
 check('dotfiles and traversal are 404', (await get('/library/.env')).status === 404)
 
-const browser = await chromium.launch({ executablePath: '/Applications/Helium.app/Contents/MacOS/Helium', headless: true, args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] })
+const browser = await chromium.launch({ executablePath: '/Applications/Helium.app/Contents/MacOS/Helium', headless: true, args: process.env.NOOK_SOFTWARE_GL ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] : ['--use-angle=metal', '--ignore-gpu-blocklist'] }) // real GPU by default: the look pass + env bake crawl in SwiftShader
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, extraHTTPHeaders: hdr })
 const page = await ctx.newPage()
 const errors = []

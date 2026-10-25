@@ -12,5 +12,7 @@ export async function onRequestPut({ env, params, request }) {
   try { data = await readJson(request) } catch (res) { return res }
   if (!data || typeof data !== 'object' || Array.isArray(data)) return error(400, 'layout must be a JSON object')
   await env.NOOK_KV.put(`layout:${params.name}`, JSON.stringify(data))
+  const index = new Set((await env.NOOK_KV.get('layouts', 'json')) || [])
+  if (!index.has(params.name)) await env.NOOK_KV.put('layouts', JSON.stringify([...index, params.name].sort()))
   return json(200, { ok: true, name: params.name })
 }

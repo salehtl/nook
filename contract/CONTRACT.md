@@ -130,7 +130,7 @@ Goal: semi-realistic for $0 in the planner, plus an optional paid photoreal pass
 3. **Contact shadows**: every placed item (GLB or splat) gets a soft blob shadow on the floor: a radial-gradient quad slightly larger than its footprint, just above y = 0, which follows the item's position and rotation. It can be toggled.
 4. Splat furniture already matches the scan's look. Nothing changes there beyond the contact shadow.
 
-**Render this view (paid, about $0.04)**
+**Render this view (paid, about $0.04)**. The default model is `nano-banana`, picked by a live comparison (evals/golden/RESULTS.md).
 
 5. A **Render** button (top bar) captures the current view (the canvas only, no UI) as a JPEG and asks for confirmation, showing the model and its price. It then `POST`s to `/api/render` and shows the result side by side with the input. A **Renders** panel lists past renders, newest first.
 6. The FAL key never reaches the browser. The server makes the fal call.
@@ -152,8 +152,8 @@ python3 planner/serve.py ... [--renders-dir renders] [--costs-file library/costs
 
 | model | fal endpoint | arguments | cost recorded |
 |---|---|---|---|
-| `kontext` (default) | `fal-ai/flux-pro/kontext` | `image_url`, `prompt`, `output_format: "jpeg"` | $0.04 |
-| `nano-banana` | `fal-ai/nano-banana/edit` | `image_urls: [image]`, `prompt`, `output_format: "jpeg"` | $0.0398 |
+| `kontext` | `fal-ai/flux-pro/kontext` | `image_url`, `prompt`, `output_format: "jpeg"` | $0.04 |
+| `nano-banana` (default) | `fal-ai/nano-banana/edit` | `image_urls: [image]`, `prompt`, `output_format: "jpeg"` | $0.0398 |
 | `qwen` | `fal-ai/qwen-image-edit` | `image_url`, `prompt`, `output_format: "jpeg"` | $0.03 × megapixels of the input |
 
 Default prompt: *"Turn this 3D planning render into a photorealistic interior photograph. Keep the exact camera angle, room geometry, and every piece of furniture with its position, size, shape and color. Realistic materials, soft natural daylight, subtle contact shadows. Do not add, remove or move anything."*

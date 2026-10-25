@@ -412,7 +412,7 @@ class Handler(SimpleHTTPRequestHandler):
                 data = None
         if not data or data[:3] != b"\xff\xd8\xff":
             return self.error_json(HTTPStatus.BAD_REQUEST, "image must be a JPEG data URI (data:image/jpeg;base64,...)")
-        model = body.get("model") or "kontext"
+        model = body.get("model") or "nano-banana"
         if model not in RENDER_MODELS:
             return self.error_json(HTTPStatus.BAD_REQUEST, f"unknown model {model!r} (choose from {', '.join(RENDER_MODELS)})")
         prompt = body.get("prompt") or DEFAULT_RENDER_PROMPT
