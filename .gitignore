@@ -18,3 +18,4 @@ scan/.tools/
 scan/.venv/
 ios/*.xcodeproj/
 ios/build/
+build/
