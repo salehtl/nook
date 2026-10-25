@@ -193,12 +193,12 @@ def run(argv: list[str] | None) -> None:
         source_name = f"source{ext}"
         shutil.copy2(local, staging / source_name)
 
-        model_src, splat_src = local, None
+        model_src, splat_src, splat_to_glb = local, None, np.eye(3)
         if image_engine:
             fal = engines.MockFal(mock_dir) if mock else engines.LiveFal()
             say(f"{engine}{' (mock, $0)' if mock else f' (${cost:.2f})'}: {raw_input}")
             outputs = engines.run(fal, engine, local, prompt, resolution, staging / "raw")
-            model_src, splat_src = outputs["glb"], outputs["splat"]
+            model_src, splat_src, splat_to_glb = outputs["glb"], outputs["splat"], outputs["splat_to_glb"]
         elif ext == ".gltf":
             say("note: a .gltf input is packed into a single GLB; source.gltf is kept without its side files")
 
@@ -208,8 +208,8 @@ def run(argv: list[str] | None) -> None:
             f"{glb_fit['w']}/{glb_fit['d']}/{glb_fit['h']})")
         splat_fit = None
         if splat_src:
-            splat_fit, notes = splat.normalize(splat_src, orientation(engine, "splat", args.yaw), dims_m,
-                                               staging / "splat.ply")
+            splat_fit, notes = splat.normalize(splat_src, orientation(engine, "splat", args.yaw) @ splat_to_glb,
+                                               dims_m, staging / "splat.ply")
             for n in notes:
                 say(f"note: {n}")
             say(f"splat.ply scaled uniformly to h = {num(h)} cm (error % w/d/h: "

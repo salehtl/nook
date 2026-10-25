@@ -4,8 +4,8 @@ The item frame is Y-up with the front facing +Z (see CLAUDE.md). Each engine's n
 as (up axis, front axis) in the engine's own coordinates. Normalization rotates up -> +Y and front -> +Z,
 then applies --yaw.
 
-SOURCE: fixtures/fal/NOTES.md. Those fixtures are SYNTHETIC, so every row here is an assumption. After a
-real capture, copy the measured up/front axes into the matching row (and into NOTES.md). One line each.
+SOURCE: fixtures/fal/NOTES.md, measured on a real capture (2026-10-25). The sam3d splat row is the GLB's frame:
+the splat arrives in camera space and sam3d_splat_to_glb() maps it there first.
 """
 import math
 
@@ -24,6 +24,33 @@ _AXES = {
     "+Y": (0, 1, 0), "-Y": (0, -1, 0),
     "+Z": (0, 0, 1), "-Z": (0, 0, -1),
 }
+
+
+# SAM 3D returns its GLB in a canonical object frame but its splat in the photo's camera space, posed by
+# metadata[0] (rotation is a unit quaternion [w, x, y, z]). Measured on a real capture (2026-10-25): the splat
+# lands on the GLB, median 1.6 cm apart, with p_glb = Rx(-90 deg) . R(q) . (p_scene - t) / s. Translation and
+# scale are dropped here because normalization re-centers and re-scales anyway.
+_RX_NEG_90 = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], float)
+
+
+def quat_wxyz_matrix(q) -> np.ndarray:
+    w, x, y, z = np.asarray(q, float) / np.linalg.norm(q)
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ])
+
+
+def sam3d_splat_to_glb(response: dict) -> np.ndarray:
+    """Rotation taking a SAM 3D splat from camera space into its GLB's frame (identity if no pose is given)."""
+    try:
+        q = response["metadata"][0]["rotation"][0]
+        if len(q) != 4:
+            raise ValueError
+    except (KeyError, IndexError, TypeError, ValueError):
+        return np.eye(3)
+    return _RX_NEG_90 @ quat_wxyz_matrix(q)
 
 
 def frame_rotation(up: str, front: str) -> np.ndarray:

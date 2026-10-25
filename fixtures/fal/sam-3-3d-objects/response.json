@@ -1,44 +1,48 @@
 {
   "gaussian_splat": {
-    "url": "https://v3b.fal.media/files/mock/scene_splat.ply",
-    "content_type": "application/octet-stream",
-    "file_name": "scene_splat.ply",
-    "file_size": 1360415
+    "url": "https://v3b.fal.media/files/b/0aafcab1/EUTMnLYG9yc9KFx-Nr1em_combined_splat.ply",
+    "content_type": "model/ply",
+    "file_name": "combined_splat.ply",
+    "file_size": 51930656
   },
   "model_glb": {
-    "url": "https://v3b.fal.media/files/mock/scene.glb",
+    "url": "https://v3b.fal.media/files/b/0aafcab1/8QtTgrBPh92h7ch-RUYhw_combined_scene.glb",
     "content_type": "model/gltf-binary",
-    "file_name": "scene.glb",
-    "file_size": 4127032
+    "file_name": "combined_scene.glb",
+    "file_size": 1621740
   },
   "metadata": [
     {
       "object_index": 0,
       "scale": [
         [
-          0.8,
-          0.8,
-          0.8
+          1.142938494682312,
+          1.142938494682312,
+          1.142938494682312
         ]
       ],
       "rotation": [
         [
-          1,
-          0,
-          0,
-          0
+          0.16566739976406097,
+          0.24110709130764008,
+          -0.8062993288040161,
+          -0.5141293406486511
         ]
       ],
       "translation": [
         [
-          0.3,
-          0.2,
-          -0.1
+          -0.013114631175994873,
+          0.05511820316314697,
+          2.5581746101379395
         ]
-      ]
+      ],
+      "camera_pose": null
     }
   ],
-  "individual_splats": null,
-  "individual_glbs": null,
-  "artifacts_zip": null
+  "artifacts_zip": {
+    "url": "https://v3b.fal.media/files/b/0aafcab1/gAuY8L7Bli1xHUHTaZJjK_objects_bundle.zip",
+    "content_type": "application/zip",
+    "file_name": "objects_bundle.zip",
+    "file_size": 41207663
+  }
 }

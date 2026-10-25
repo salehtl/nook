@@ -54,7 +54,7 @@ for (const item of items) {
 }
 await page.waitForTimeout(2500)
 const shot = path.join(OUT, `${path.basename(path.dirname(libFile))}.png`)
-await page.screenshot({ path: shot })
+await page.screenshot({ path: shot, timeout: 240000 }) // software WebGL is slow with large splats
 if (errors.length) { failed++; console.log(`FAIL errors: ${errors.join(' | ')}`) }
 console.log(`\n${items.length} items, ${failed} failing · screenshot ${path.relative(REPO, shot)}`)
 await browser.close()

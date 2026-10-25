@@ -7,7 +7,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import NookError
+import numpy as np
+
+from . import NookError, frames
 
 ENDPOINTS = {"sam3d": "fal-ai/sam-3/3d-objects", "trellis2": "fal-ai/trellis-2"}
 TRELLIS_COST = {512: 0.25, 1024: 0.30, 1536: 0.35}
@@ -140,9 +142,10 @@ def run(fal, engine: str, image: Path, prompt: str, resolution: int, raw_dir: Pa
         glb_url, splat_url = _file_url(resp, "model_glb"), None
     if not glb_url:
         raise NookError(f"{endpoint} returned no model_glb (live runs keep the response in <library>/_failed/)")
-    out = {"glb": fal.fetch(glb_url, raw_dir), "splat": None}
+    out = {"glb": fal.fetch(glb_url, raw_dir), "splat": None, "splat_to_glb": np.eye(3)}
     if splat_url:
         out["splat"] = fal.fetch(splat_url, raw_dir)
+        out["splat_to_glb"] = frames.sam3d_splat_to_glb(resp)
     elif engine == "sam3d":
         print("nook-add: warning: sam3d returned no gaussian_splat; the item will be GLB only", file=sys.stdout)
     return out

@@ -153,7 +153,7 @@ uv run --project pipeline nook-add INPUT --name NAME --dims WxDxH
 
 - Local images are uploaded with `fal_client.upload_file`.
 - `sam3d` produces both `model.glb` (from `model_glb`, or the first of `individual_glbs`) and `splat.ply` (from `gaussian_splat`, or the first of `individual_splats`). `trellis2` and `glb` produce `model.glb` only.
-- The engines' native orientation and frames are documented in `fixtures/fal/NOTES.md`. Until a real capture replaces them, the fixtures are synthetic and the frames are assumptions, so keep each engine's orientation in one obvious place in the code.
+- The engines' native orientation and frames are documented in `fixtures/fal/NOTES.md` (measured from a real capture). The SAM 3D splat arrives in camera space and must be mapped into its GLB's frame using `metadata[0]` before normalization.
 
 ### 3.3 Credentials and mock mode
 
