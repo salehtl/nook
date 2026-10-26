@@ -327,7 +327,7 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 - I2. The app launches in the simulator with no crash and shows the captures list. Replay mode can produce a capture that appears in the list and can be shared.
 - I3. Release basics:
   - bundle id `com.salehtl.nookscan`, team `8CFG28JHP3`, automatic signing
-  - version 0.1.0 (build 1)
+  - version 0.2.0 (the build number is set at release)
   - `NSCameraUsageDescription`, `ITSAppUsesNonExemptEncryption = NO`, `UIRequiredDeviceCapabilities` containing `arkit`
   - a 1024 px app icon
   - deployment target iOS 18.0
