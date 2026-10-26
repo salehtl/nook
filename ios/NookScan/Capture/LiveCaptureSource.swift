@@ -1,6 +1,7 @@
 import ARKit
 import AVFoundation
 import Foundation
+import os
 
 /// ARKit world tracking with gravity alignment, LiDAR scene depth when the device has it, and horizontal plane
 /// detection for floor_y. Frames are handled on a private delegate queue and never retained.
@@ -19,6 +20,11 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
     var onIssue: ((Issue) -> Void)?
     private let lock = NSLock()
     private var planes: [UUID: (y: Float, area: Float)] = [:]
+    /// What `lockCamera` locked, for checking stills against it. Guarded by `lock`.
+    private var cameraLock = CameraLock.none
+    /// Stills are copied and checked here, never on the delegate queue.
+    private let stillQueue = DispatchQueue(label: "nook.capture.stills", qos: .userInitiated)
+    private static let log = Logger(subsystem: "com.salehtl.nookscan", category: "stills")
 
     static var isSupported: Bool { ARWorldTrackingConfiguration.isSupported }
 
@@ -36,6 +42,11 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
         config.worldAlignment = .gravity
         config.planeDetection = [.horizontal]
         if hasDepth { config.frameSemantics.insert(.sceneDepth) }
+        // The format ARKit recommends for stills (e.g. 1920 × 1440 video with 12 MP stills). Without it a still may
+        // be no larger than the video frame.
+        if let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
+            config.videoFormat = format
+        }
         session.delegate = self
         session.delegateQueue = queue
         session.run(config, options: [.resetTracking, .removeExistingAnchors])
@@ -70,16 +81,99 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
             let g = device.deviceWhiteBalanceGains
             lock.whiteBalanceGains = WhiteBalanceGains(r: Double(g.redGain), g: Double(g.greenGain), b: Double(g.blueGain))
         }
+        self.lock.lock(); cameraLock = lock; self.lock.unlock()
         return lock
     }
 
     /// Back to continuous auto exposure and white balance.
     private func unlockCamera() {
+        lock.lock(); cameraLock = .none; lock.unlock()
         guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera,
               (try? device.lockForConfiguration()) != nil else { return }
         defer { device.unlockForConfiguration() }
         if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
         if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { device.whiteBalanceMode = .continuousAutoWhiteBalance }
+    }
+
+    // MARK: High-resolution stills (contract §4.10)
+    //
+    // ARKit takes stills through the same AVCaptureDevice it hands out as `configurableCaptureDeviceForPrimaryCamera`,
+    // and a photo capture on a device whose exposure and white balance are `.locked` doesn't run its own metering.
+    // What can still change a still's look is the photo pipeline itself: flash and multi-frame fusion (Smart HDR,
+    // Deep Fusion). On iOS 26 the still's photo settings turn both off. On every version each still is checked
+    // before it's used: the device must still be locked and the still's exposure time must match the lock. A still
+    // that fails is dropped (its keyframe keeps the video frame) and the lock is put back if something undid it.
+
+    var canCaptureStills: Bool {
+        ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing != nil
+    }
+
+    func captureStill(completion: @escaping (Keyframe?) -> Void) {
+        let handler: (ARFrame?, Error?) -> Void = { [weak self] frame, error in
+            // Possibly on the delegate queue: hop off before copying 12 MP.
+            guard let self, let frame else {
+                Self.log.info("still failed: \(error?.localizedDescription ?? "no frame", privacy: .public)")
+                return completion(nil)
+            }
+            stillQueue.async { completion(self.keyframe(fromStill: frame)) }
+        }
+        if #available(iOS 26, *), let format = session.configuration?.videoFormat {
+            let settings = format.defaultPhotoSettings
+            settings.flashMode = .off
+            settings.photoQualityPrioritization = .speed
+            session.captureHighResolutionFrame(using: settings, completion: handler)
+        } else {
+            session.captureHighResolutionFrame(completion: handler)
+        }
+    }
+
+    /// The keyframe for a still, or nil if the still can't be trusted (tracking, exposure lock) or copied.
+    private func keyframe(fromStill frame: ARFrame) -> Keyframe? {
+        guard frame.camera.trackingState == .normal else {
+            Self.log.info("still dropped: tracking not normal")
+            return nil
+        }
+        if let reason = lockViolation(frame) {
+            Self.log.error("still dropped: \(reason, privacy: .public)")
+            reassertLock()
+            return nil
+        }
+        guard var kf = ARCaptureFrame(frame: frame).makeKeyframe() else { return nil }
+        if case .pixelBuffer(let image) = kf.image { kf.still = Still(image: image, intrinsics: kf.intrinsics) }
+        return kf
+    }
+
+    /// Why a still isn't under the exposure and white-balance lock, or nil if it is (or nothing was locked).
+    private func lockViolation(_ frame: ARFrame) -> String? {
+        lock.lock(); let locked = cameraLock; lock.unlock()
+        guard locked.isAnyLocked, let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else { return nil }
+        if locked.exposureLocked {
+            guard device.exposureMode == .locked || device.exposureMode == .custom else { return "exposure no longer locked" }
+            if let d = locked.exposureDuration, d > 0, abs(frame.camera.exposureDuration - d) > 0.05 * d {
+                return "exposure \(frame.camera.exposureDuration) s, locked at \(d) s"
+            }
+        }
+        if locked.whiteBalanceLocked, device.whiteBalanceMode != .locked { return "white balance no longer locked" }
+        return nil
+    }
+
+    /// Puts the recorded exposure and white-balance values back if a still knocked the device out of its lock.
+    private func reassertLock() {
+        lock.lock(); let locked = cameraLock; lock.unlock()
+        guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera,
+              (try? device.lockForConfiguration()) != nil else { return }
+        defer { device.unlockForConfiguration() }
+        if locked.exposureLocked, device.exposureMode != .locked, device.exposureMode != .custom,
+           device.isExposureModeSupported(.custom), let d = locked.exposureDuration, let iso = locked.iso {
+            let f = device.activeFormat
+            let duration = CMTimeClampToRange(CMTime(seconds: d, preferredTimescale: 1_000_000_000),
+                                              range: CMTimeRange(start: f.minExposureDuration, end: f.maxExposureDuration))
+            device.setExposureModeCustom(duration: duration, iso: min(max(Float(iso), f.minISO), f.maxISO))
+        }
+        if locked.whiteBalanceLocked, device.whiteBalanceMode != .locked, let g = locked.whiteBalanceGains {
+            let clamp = { (x: Double) in min(max(Float(x), 1), device.maxWhiteBalanceGain) }
+            device.setWhiteBalanceModeLocked(with: AVCaptureDevice.WhiteBalanceGains(redGain: clamp(g.r), greenGain: clamp(g.g), blueGain: clamp(g.b)))
+        }
     }
 
     // MARK: ARSessionDelegate (on `queue`)
@@ -146,8 +240,11 @@ private struct ARCaptureFrame: CaptureFrame {
         guard let image = ImageUtils.copyPixelBuffer(frame.capturedImage) else { return nil }
         let res = frame.camera.imageResolution
         let k = frame.camera.intrinsics   // column-major: [0][0] fx, [1][1] fy, [2][0] cx, [2][1] cy
+        // The camera's intrinsics are for `imageResolution`. For a still that should be the buffer's own size; if
+        // it ever isn't, scale them to the pixels actually stored.
         let intrinsics = Intrinsics(fx: Double(k[0][0]), fy: Double(k[1][1]), cx: Double(k[2][0]), cy: Double(k[2][1]),
                                     width: Int(res.width), height: Int(res.height))
+            .scaled(toWidth: CVPixelBufferGetWidth(image), height: CVPixelBufferGetHeight(image))
         return Keyframe(timestamp: frame.timestamp, transform: frame.camera.transform, intrinsics: intrinsics,
                         image: .pixelBuffer(image), depth: frame.sceneDepth.flatMap(Self.copyDepth),
                         exposureDuration: frame.camera.exposureDuration,

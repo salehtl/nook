@@ -13,14 +13,13 @@ enum FrameDecision: Equatable {
     case stopped
 }
 
-/// Decides which frames become keyframes (plan §2): the phone moved ≥ 8 cm or turned ≥ 6° since the last
-/// keyframe, tracking is normal, and the image isn't blurry.
+/// Decides which frames become keyframes: the phone moved ≥ 4 cm or turned ≥ 3° since the last keyframe
+/// (contract §4.10), tracking is normal, and the image isn't blurry.
 ///
 /// Blur is judged relative to recent frames (the median sharpness of the last candidates), with a small
 /// absolute floor. A fixed threshold would reject sharp shots of plain walls, which have little texture.
 struct KeyframeSelector {
-    var minTranslation: Float = 0.08
-    var minRotationDegrees: Float = 6
+    var spacing = KeyframeSpacing.standard
     var minSharpness: Float = 5
     var relativeSharpness: Float = 0.4
     var historySize = 30
@@ -34,7 +33,7 @@ struct KeyframeSelector {
         if let last = lastKeyframe {
             let moved = simd_distance(Pose.position(last), Pose.position(transform))
             let turned = Pose.angleDegrees(last, transform)
-            if moved < minTranslation && turned < minRotationDegrees { return .notMoved }
+            if moved < spacing.meters && turned < spacing.degrees { return .notMoved }
         }
         let s = sharpness()
         let threshold = max(minSharpness, relativeSharpness * median(history))

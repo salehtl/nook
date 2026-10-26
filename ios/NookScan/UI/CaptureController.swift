@@ -61,8 +61,10 @@ final class CaptureController: ObservableObject, Identifiable {
         let recorder: CaptureRecorder
         do {
             let lockCamera: (() -> CameraLock)? = source.canLockCamera ? { [weak source] in source?.lockCamera() ?? .none } : nil
+            let captureStill: ((@escaping (Keyframe?) -> Void) -> Void)? = source.canCaptureStills
+                ? { [weak source] done in source.map { $0.captureStill(completion: done) } ?? done(nil) } : nil
             recorder = try CaptureRecorder(folder: folder, info: CaptureInfo(device: source.deviceName, lidar: source.hasDepth),
-                                           lockCamera: lockCamera)
+                                           lockCamera: lockCamera, captureStill: captureStill)
         } catch {
             phase = .failed(error.localizedDescription)
             return

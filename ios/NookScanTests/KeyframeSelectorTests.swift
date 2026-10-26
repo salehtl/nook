@@ -19,11 +19,11 @@ final class KeyframeSelectorTests: XCTestCase {
     func testMovementThresholds() {
         var s = KeyframeSelector()
         XCTAssertEqual(feed(&s, pose()), .keep, "the first sharp, tracked frame is kept")
-        XCTAssertEqual(feed(&s, pose(x: 0.05)), .notMoved)
-        XCTAssertEqual(feed(&s, pose(x: 0.079)), .notMoved)
-        XCTAssertEqual(feed(&s, pose(x: 0.081)), .keep, "moved ≥ 8 cm")
-        XCTAssertEqual(feed(&s, pose(x: 0.081, yawDegrees: 5)), .notMoved)
-        XCTAssertEqual(feed(&s, pose(x: 0.081, yawDegrees: 6.1)), .keep, "turned ≥ 6°")
+        XCTAssertEqual(feed(&s, pose(x: 0.02)), .notMoved)
+        XCTAssertEqual(feed(&s, pose(x: 0.039)), .notMoved)
+        XCTAssertEqual(feed(&s, pose(x: 0.041)), .keep, "moved ≥ 4 cm")
+        XCTAssertEqual(feed(&s, pose(x: 0.041, yawDegrees: 2.5)), .notMoved)
+        XCTAssertEqual(feed(&s, pose(x: 0.041, yawDegrees: 3.1)), .keep, "turned ≥ 3°")
     }
 
     func testTrackingMustBeNormal() {

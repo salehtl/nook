@@ -52,6 +52,21 @@ enum FrameImage {
     case cgImage(CGImage)
 }
 
+/// A high-resolution still (contract §4.10): ARKit's `captureHighResolutionFrame`, in sensor orientation, with
+/// intrinsics for its own pixel size. Owned memory, like FrameImage.
+struct Still {
+    let image: CVPixelBuffer
+    let intrinsics: Intrinsics
+}
+
+/// Minimum movement between keyframes (contract §4.10: 4 cm or 3°), recorded in meta.json `keyframe_spacing`.
+struct KeyframeSpacing: Equatable {
+    var meters: Float
+    var degrees: Float
+
+    static let standard = KeyframeSpacing(meters: 0.04, degrees: 3)
+}
+
 /// Everything the writer needs for one keyframe, copied out of the source frame.
 struct Keyframe {
     let timestamp: Double
@@ -66,6 +81,8 @@ struct Keyframe {
     var exposureOffset: Double? = nil
     /// Guided pass (1–3) the frame was taken in, set by CaptureRecorder.
     var pass: ScanPass? = nil
+    /// The high-resolution still taken at this frame's moment, if any. Its pose is `transform`.
+    var still: Still? = nil
 }
 
 /// A frame as a source delivers it. It is only valid during the `onFrame` callback: anything kept must be
@@ -99,11 +116,19 @@ protocol CaptureSource: AnyObject {
     /// Locks exposure and white balance at their current values and reports what was locked.
     /// Called on the frame queue, once tracking has settled.
     func lockCamera() -> CameraLock
+    /// Whether the source can take high-resolution stills (contract §4.10).
+    var canCaptureStills: Bool { get }
+    /// Takes one still without blocking the caller. `completion` runs once, on any queue, with a keyframe built
+    /// from the high-resolution frame (its own pose, timestamp and depth, image and `still` set), or nil if the
+    /// still failed or can't be trusted (e.g. it left the exposure lock).
+    func captureStill(completion: @escaping (Keyframe?) -> Void)
 }
 
 extension CaptureSource {
     var canLockCamera: Bool { false }
     func lockCamera() -> CameraLock { .none }
+    var canCaptureStills: Bool { false }
+    func captureStill(completion: @escaping (Keyframe?) -> Void) { completion(nil) }
 }
 
 enum FloorEstimator {

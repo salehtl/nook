@@ -8,12 +8,14 @@ struct CaptureInfo {
     var lidar: Bool
     var appVersion: String = DeviceInfo.appVersion
     var created: Date = Date()
+    var spacing = KeyframeSpacing.standard
 }
 
 struct CaptureSummary: Equatable {
     let folder: URL
     let frameCount: Int
     let depthCount: Int
+    let stillCount: Int
     let pointCount: Int
     let floorY: Float?
 }
@@ -30,10 +32,12 @@ enum CaptureError: LocalizedError {
     }
 }
 
-/// Writes the contract §4 capture folder. All encoding and file I/O happens on a private serial queue.
+/// Writes the contract §4 capture folder. Keyframes are encoded on a private serial queue; high-resolution stills
+/// (§4.10) on a second one, so a slow 12 MP encode doesn't hold up the keyframes behind it.
 final class CaptureWriter {
     static let maxLongSide = 1920
     static let jpegQuality = 0.9
+    static let stillQuality = 0.9
     static let seedStride = 8           // depth pixels between seed points, both axes
     static let maxSeedPoints = 400_000
     static let seedDepthRange: ClosedRange<Float> = 0.1...8
@@ -42,16 +46,22 @@ final class CaptureWriter {
     let info: CaptureInfo
     /// Keyframes allowed in flight before new ones are dropped as `.busy`.
     var maxPending = 6
+    /// Stills allowed waiting for their encode before new ones are skipped (each holds a ~18 MB buffer).
+    var maxPendingStills = 2
 
     private let queue = DispatchQueue(label: "nook.capture.writer", qos: .userInitiated)
+    private let stillQueue = DispatchQueue(label: "nook.capture.writer.stills", qos: .utility)
     private let pendingLock = NSLock()
     private var pending = 0
+    private var pendingStills = 0
     private lazy var ciContext = CIContext(options: [.cacheIntermediates: false])
+    private lazy var stillContext = CIContext(options: [.cacheIntermediates: false])
 
     // Touched only on `queue`.
     private var frames: [[String: Any]] = []
     private var camera: Intrinsics?
     private var depthCount = 0
+    private var stillCount = 0
     private var positions: [Float] = []
     private var colors: [UInt8] = []
     private var error: Error?
@@ -71,6 +81,12 @@ final class CaptureWriter {
         return pending >= maxPending
     }
 
+    /// Whether a still taken now could be written without growing the queues past their limits.
+    var canTakeStill: Bool {
+        pendingLock.lock(); defer { pendingLock.unlock() }
+        return pending < maxPending - 1 && pendingStills < maxPendingStills
+    }
+
     /// Queues a keyframe. `index` is 1-based; `time` is seconds since the first keyframe.
     func append(_ kf: Keyframe, index: Int, time: Double) {
         pendingLock.lock(); pending += 1; pendingLock.unlock()
@@ -84,9 +100,15 @@ final class CaptureWriter {
     /// Waits for queued keyframes, then writes points.ply, transforms.json and meta.json.
     /// `cameraLock` is what the exposure and white-balance lock achieved (contract §4.8).
     func finish(floorY: Float?, cameraLock: CameraLock = .none) throws -> CaptureSummary {
-        try queue.sync {
+        // Keyframes first (they queue still encodes), then the stills (a failed one queues a fix-up on `queue`),
+        // then the JSON on `queue`, after those fix-ups.
+        queue.sync {}
+        stillQueue.sync {}
+        return try queue.sync {
             if let error { throw CaptureError.write(error.localizedDescription) }
             guard let camera, !frames.isEmpty else { throw CaptureError.noFrames }
+            // A keyframe that waited for its still can land after the ones behind it: list frames in index order.
+            let frames = frames.sorted { ($0["file_path"] as? String ?? "") < ($1["file_path"] as? String ?? "") }
             do {
                 var transforms: [String: Any] = [
                     "camera_model": "OPENCV",
@@ -115,6 +137,7 @@ final class CaptureWriter {
                     "floor_y": floorY.map { Self.num($0) as Any } ?? NSNull(),
                     "exposure_locked": cameraLock.exposureLocked,
                     "white_balance_locked": cameraLock.whiteBalanceLocked,
+                    "keyframe_spacing": ["meters": Self.num(info.spacing.meters), "degrees": Self.num(info.spacing.degrees)],
                 ]
                 if cameraLock.exposureLocked {
                     if let iso = cameraLock.iso, iso.isFinite { meta["lock_iso"] = Self.decimal(iso, 3) }
@@ -125,7 +148,7 @@ final class CaptureWriter {
                 }
                 try writeJSON(meta, to: "meta.json")
                 return CaptureSummary(folder: folder, frameCount: frames.count, depthCount: depthCount,
-                                      pointCount: pointCount, floorY: floorY)
+                                      stillCount: stillCount, pointCount: pointCount, floorY: floorY)
             } catch {
                 throw CaptureError.write(error.localizedDescription)
             }
@@ -135,6 +158,7 @@ final class CaptureWriter {
     /// Waits for queued work and drops everything (used when a capture is discarded).
     func cancel() {
         queue.sync { error = CaptureError.noFrames }
+        stillQueue.sync {}
     }
 
     // MARK: - Per keyframe (on `queue`)
@@ -147,8 +171,14 @@ final class CaptureWriter {
         switch kf.image {
         case .cgImage(let cg): image = cg
         case .pixelBuffer(let pb):
-            let ci = CIImage(cvPixelBuffer: pb)
-            guard let cg = ciContext.createCGImage(ci, from: ci.extent, format: .RGBA8, colorSpace: ImageUtils.sRGB) else {
+            // A still's 12 MP buffer is scaled down on the GPU first, never expanded to a full-size RGBA image.
+            var ci = CIImage(cvPixelBuffer: pb)
+            let s = Double(Self.maxLongSide) / Double(max(ci.extent.width, ci.extent.height))
+            if s < 1 {
+                ci = ci.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1])
+            }
+            let rect = CGRect(x: 0, y: 0, width: ci.extent.width.rounded(.down), height: ci.extent.height.rounded(.down))
+            guard let cg = ciContext.createCGImage(ci, from: rect, format: .RGBA8, colorSpace: ImageUtils.sRGB) else {
                 throw ImageError.encode("images/\(name).jpg")
             }
             image = cg
@@ -171,6 +201,7 @@ final class CaptureWriter {
         if let d = kf.exposureDuration, d.isFinite, d > 0 { frame["exposure_duration"] = Self.decimal(d, 7) }
         if let ev = kf.exposureOffset, ev.isFinite { frame["exposure_offset"] = Self.decimal(ev, 4) }
         if let pass = kf.pass { frame["pass"] = pass.rawValue }
+        if let still = kf.still { frame.merge(queueStill(still, name: name)) { $1 } }
         if let camera {
             if abs(k.fx - camera.fx) > 1e-3 || abs(k.fy - camera.fy) > 1e-3 || abs(k.cx - camera.cx) > 1e-3 || abs(k.cy - camera.cy) > 1e-3 {
                 frame["fl_x"] = k.fx; frame["fl_y"] = k.fy; frame["cx"] = k.cx; frame["cy"] = k.cy
@@ -196,6 +227,35 @@ final class CaptureWriter {
         }
         frames.append(frame)
     }
+
+    /// Queues the full-size JPEG of a still (contract §4.10) and returns its frame keys. If the encode fails, the keys
+    /// are taken off the frame again; the frame itself stays, with its video-resolution image.
+    private func queueStill(_ still: Still, name: String) -> [String: Any] {
+        let path = "images_hi/\(name).jpg"
+        let k = still.intrinsics
+        pendingLock.lock(); pendingStills += 1; pendingLock.unlock()
+        stillCount += 1
+        stillQueue.async { [self] in
+            defer { pendingLock.lock(); pendingStills -= 1; pendingLock.unlock() }
+            do {
+                let url = folder.appendingPathComponent(path)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let ci = CIImage(cvPixelBuffer: still.image)
+                let quality = kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption
+                try stillContext.writeJPEGRepresentation(of: ci, to: url, colorSpace: ImageUtils.sRGB, options: [quality: Self.stillQuality])
+            } catch {
+                queue.async { [self] in
+                    stillCount -= 1
+                    guard let i = frames.firstIndex(where: { $0["hires_file_path"] as? String == path }) else { return }
+                    for key in Self.stillKeys { frames[i][key] = nil }
+                }
+            }
+        }
+        return ["hires_file_path": path, "hires_w": k.width, "hires_h": k.height,
+                "hires_fl_x": k.fx, "hires_fl_y": k.fy, "hires_cx": k.cx, "hires_cy": k.cy]
+    }
+
+    static let stillKeys = ["hires_file_path", "hires_w", "hires_h", "hires_fl_x", "hires_fl_y", "hires_cx", "hires_cy"]
 
     /// Back-projects every `seedStride`-th depth pixel into world space (OpenGL camera: +Y up, looking along −Z).
     private func addSeeds(depth: DepthMap, image: CGImage, intrinsics k: Intrinsics, transform: simd_float4x4) {

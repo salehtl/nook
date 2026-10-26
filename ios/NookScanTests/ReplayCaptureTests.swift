@@ -24,7 +24,7 @@ final class ReplayCaptureTests: XCTestCase {
         let meta = try json(out.appendingPathComponent("meta.json"))
         let frames = try XCTUnwrap(t["frames"] as? [[String: Any]])
 
-        // Every fixture frame moved ≥ 8 cm and is sharp, so all of them are keyframes.
+        // Every fixture frame moved ≥ 4 cm and is sharp, so all of them are keyframes.
         XCTAssertEqual(frames.count, srcFrames.count)
         XCTAssertGreaterThanOrEqual(frames.count, 30)
         XCTAssertEqual(summary.frameCount, frames.count)
@@ -81,11 +81,12 @@ final class ReplayCaptureTests: XCTestCase {
         // meta.json
         XCTAssertEqual(meta["version"] as? Int, 1)
         XCTAssertEqual(meta["app"] as? String, "nook-scan")
-        XCTAssertEqual(meta["app_version"] as? String, "0.2.0")
+        XCTAssertEqual(meta["app_version"] as? String, "0.3.0")
         XCTAssertEqual(meta["exposure_locked"] as? Bool, false, "replay has no camera to lock")
         XCTAssertEqual(meta["white_balance_locked"] as? Bool, false)
         XCTAssertNil(meta["lock_iso"])
         XCTAssertEqual(meta["world"] as? String, "arkit-gravity-y-up-meters")
+        XCTAssertEqual(meta["keyframe_spacing"] as? [String: Double], ["meters": 0.04, "degrees": 3])
         XCTAssertEqual(meta["lidar"] as? Bool, true)
         XCTAssertEqual(meta["frame_count"] as? Int, frames.count)
         XCTAssertEqual(try XCTUnwrap(meta["floor_y"] as? Double), -1.35, accuracy: 1e-6)
