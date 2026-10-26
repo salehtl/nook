@@ -212,6 +212,7 @@ MIME = {
     ".csv": "text/csv; charset=utf-8",
     ".txt": "text/plain; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".webmanifest": "application/manifest+json",
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -600,7 +601,11 @@ class Handler(SimpleHTTPRequestHandler):
             if scan is None:
                 return self.no_room(name)
             current = self.current_room(scans)
-            config = dict(data, splat=splat_url(scan, self.room_dir), saved=iso_utc())
+            # A rename (only `title` differs) keeps the old `saved` time, so it doesn't mark the room aligned.
+            before = self.room_config(name, scan, current)
+            same = lambda c: {k: v for k, v in c.items() if k not in ("title", "saved", "splat")}
+            saved = before.get("saved") if same(data) == same(before) else iso_utc()
+            config = dict(data, splat=splat_url(scan, self.room_dir), saved=saved)
             atomic_write_json(self.room_dir / f"{name}.room.json", config)
             if name == current:
                 atomic_write_json(self.room_file, config)

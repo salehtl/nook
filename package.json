@@ -12,6 +12,7 @@
     "eval:ios": "bash evals/ios_build.sh",
     "eval:server": "bash evals/server_api.sh",
     "eval:rooms": "bash evals/rooms_api.sh",
+    "eval:rooms-ui": "node evals/planner_rooms_smoke.mjs",
     "eval:quality": "bash evals/scan_quality.sh"
   },
   "devDependencies": {

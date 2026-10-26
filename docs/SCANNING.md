@@ -18,8 +18,8 @@ About 20 minutes. You need the iPhone (with LiDAR) with **Nook Scan** from TestF
 
 ## 3. Send to kakapo
 
-On the saved scan, tap **Send to kakapo**. The app uploads it (it keeps going in the background), kakapo trains it on its GPU (about 16 minutes), and the room appears in the web app by itself. **Open room** opens `https://nook.salehtl.com/planner/`. Your phone needs the home Wi-Fi or Tailscale.
+On the saved scan, tap **Send to kakapo**. The app uploads it (it keeps going in the background), kakapo trains it on its GPU (about 16 minutes), and the room appears in the planner by itself. **Open room** opens it (`https://nook.salehtl.com/planner/?room=<name>`). Every room you've scanned stays in **Rooms** (tap the room name at the top). Your phone needs the home Wi-Fi or Tailscale.
 
 ## 4. Check the alignment
 
-The room arrives level and at real height (ARKit knows gravity and the floor). If the walls aren't square to the grid, adjust **yaw** under Room & alignment and press **Save room**. The standing and seated views start where the phone was during the scan; `[` and `]` step through those positions.
+The room arrives level and at real height (ARKit knows gravity and the floor). The first time a room opens, **Check room** shows its measured size and whether the floor is level. Use **Pick floor** or **Check size** (two points a known distance apart) if it's off, or **Fine-tune** (yaw if the walls aren't square to the grid), then **Save room**. The seated and standing views start where the phone was during the scan; the arrows in the walk bar (or `[` and `]`) step through those positions.

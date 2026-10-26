@@ -83,14 +83,17 @@ browser = await chromium.launch({
 })
 const consoleErrors = []
 const pageErrors = []
-const openPlanner = async (library, { track = true } = {}) => {
+// Expected 404s: no jobs server behind these test servers (/api/scan/* is "no scans"), and the unknown-room check.
+const expected404 = (m) => /\/api\/scan\/|\/api\/rooms\/no-such-room$/.test(m.location()?.url || '')
+const openPlanner = async (library, { track = true, base = BASE, query = '' } = {}) => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+  page.setDefaultTimeout(120000) // SwiftShader takes seconds per splat frame and environment bake
   if (track) {
-    page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()) })
+    page.on('console', (m) => { if (m.type() === 'error' && !expected404(m)) consoleErrors.push(`${m.text()} ${m.location()?.url || ''}`) })
     page.on('pageerror', (e) => pageErrors.push(String(e)))
   }
-  await page.goto(`${BASE}/planner/?library=${encodeURIComponent(library)}`)
-  await page.waitForFunction(() => window.nook && window.nook.ready, null, { timeout: 30000 })
+  await page.goto(`${base}/planner/?library=${encodeURIComponent(library)}${query}`)
+  await page.waitForFunction(() => window.nook && window.nook.ready, null, { timeout: 120000 })
   await page.evaluate(() => window.nook.ready)
   return page
 }
@@ -233,6 +236,125 @@ fs.copyFileSync(path.join(REPO, 'fixtures/room/placeholder.json'), path.join(OUT
 check('no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '))
 check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '))
 await page.close()
+
+// --- P17–P19: rooms (contract §2.7), on a second server with its own room dir and layouts ----------------------
+const RPORT = PORT + 2
+const RBASE = `http://127.0.0.1:${RPORT}`
+const RDIR = 'evals/out/planner/rooms'
+const RLAYOUTS = 'evals/out/planner/rooms-layouts'
+fs.mkdirSync(path.join(REPO, RDIR), { recursive: true })
+fs.mkdirSync(path.join(REPO, RLAYOUTS), { recursive: true })
+const now = Date.now() / 1000
+for (const [name, age] of [['hall-old', 3], ['reading-room', 2], ['study-new', 1]]) {
+  const f = path.join(REPO, RDIR, `${name}.spz`)
+  fs.copyFileSync(path.join(REPO, 'fixtures/room/test.spz'), f)
+  fs.utimesSync(f, now - age * 86400, now - age * 86400)
+}
+// A v1 room.json (before per-room files) pointing at reading-room, with alignment and viewpoints (P19)
+const v1Room = {
+  version: 1, splat: `${RDIR}/reading-room.spz`,
+  transform: { position: [0.25, 0.9, -0.5], quaternion: [0, 0.3826834, 0, 0.9238795], scale: 1.25 },
+  look: { exposure: 1.3, warmth: -0.2 },
+  viewpoints: [{ position: [0.1, 1.5, 0.2], quaternion: [0, 0, 0, 1], fov_y_deg: 60 }, { position: [-1, 1.4, 0.8], quaternion: [0, 0.7071068, 0, 0.7071068], fov_y_deg: 55 }],
+}
+fs.writeFileSync(path.join(REPO, RDIR, 'room.json'), JSON.stringify(v1Room, null, 2))
+// A v1 layout made for reading-room (still listed and loadable there, P18)
+fs.writeFileSync(path.join(REPO, RLAYOUTS, 'old-v1.json'), JSON.stringify({ version: 1, name: 'old-v1', room: v1Room,
+  items: [{ uid: 'c1', id: 'sheen-chair', render: 'glb', position: [0.3, 0, 0.2], rotation_y_deg: 30 }] }))
+const roomsServer = spawn('python3', ['planner/serve.py', '--port', String(RPORT), '--room-dir', RDIR, '--layouts-dir', RLAYOUTS,
+  '--renders-dir', 'evals/out/planner/renders', '--costs-file', 'evals/out/planner/costs.csv'],
+  { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], env: childEnv({ NOOK_FAL_MOCK: 'fixtures/fal' }) })
+roomsServer.stdout.on('data', (d) => { serverLog += d })
+roomsServer.stderr.on('data', (d) => { serverLog += d })
+process.on('exit', () => roomsServer.kill())
+let rup = false
+for (let i = 0; i < 50 && !rup; i++) {
+  try { rup = (await fetch(`${RBASE}/api/rooms`)).ok } catch { await new Promise((r) => setTimeout(r, 200)) }
+}
+check('rooms server starts', rup)
+const roomFile = (name) => path.join(REPO, RDIR, `${name}.room.json`)
+const readMaybe = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null)
+const waitFor = async (fn, ms = 15000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await fn()) return true; await new Promise((r) => setTimeout(r, 200)) } return false }
+
+// First visit, no ?room and nothing remembered: /api/room as in v1, named after the room it points at (P19)
+let rp = await openPlanner(LIB_URL, { base: RBASE })
+s = await state(rp)
+check('P19 v1 room.json opens with its alignment, named after its room', s.room.name === 'reading-room' && s.room.kind === 'splat' &&
+  near(s.room.transform.scale, 1.25, 1e-6) && s.room.transform.position.every((v, i) => near(v, v1Room.transform.position[i], 1e-6)) && s.room.viewpoints === 2, fmt(s.room))
+const listed = await rp.evaluate(() => window.nook.listRooms())
+check('P17 listRooms() returns the rooms newest first', listed.map((r) => r.name).join() === 'study-new,reading-room,hall-old', fmt(listed.map((r) => r.name)))
+check('P17 listRooms() marks the current room', listed.find((r) => r.current)?.name === 'reading-room', fmt(listed))
+for (const name of ['study-new', 'hall-old', 'reading-room']) {
+  await rp.evaluate((n) => window.nook.openRoom(n), name)
+  s = await state(rp)
+  check(`P17 openRoom("${name}") loads it`, s.room.name === name && s.room.kind === 'splat' && s.room.loaded && s.room.splatCount > 0, fmt(s.room))
+}
+check('P19 reading-room keeps its alignment and viewpoints after a switch', near(s.room.transform.scale, 1.25, 1e-6) && s.room.viewpoints === 2, fmt(s.room))
+check('openRoom of an unknown room rejects', await rp.evaluate(() => window.nook.openRoom('no-such-room').then(() => false, () => true)))
+// (SwiftShader takes seconds per splat frame and per environment bake, so this waits a while.)
+check('a first open saves a thumbnail', await waitFor(() => fs.existsSync(path.join(REPO, RDIR, 'reading-room.jpg')), 120000))
+check('the thumbnail is listed', (await rp.evaluate(() => window.nook.listRooms())).find((r) => r.name === 'reading-room')?.thumb_url === '/room/reading-room.jpg')
+await settle(rp); await shot(rp, '07-rooms-reading-room')
+
+// Save the alignment of one room through the hook; the others' configs stay as they were (P17)
+await rp.evaluate(() => window.nook.openRoom('study-new'))
+const cfgBefore = { hall: readMaybe(roomFile('hall-old')), reading: readMaybe(roomFile('reading-room')), v1: readMaybe(path.join(REPO, RDIR, 'room.json')) }
+const studyAligned = { version: 1, splat: `${RDIR}/study-new.spz`, transform: { position: [0.2, 0.4, 0.1], quaternion: [0, 0, 0, 1], scale: 1.1 }, look: { exposure: 1.2, warmth: 0.1 } }
+await rp.evaluate((cfg) => window.nook.loadRoom(cfg), studyAligned)
+check('loadRoom() with the open room\'s scan keeps its name', (await state(rp)).room.name === 'study-new')
+await rp.evaluate(() => window.nook.saveRoom())
+const studyCfg = JSON.parse(readMaybe(roomFile('study-new')) || '{}')
+check('P17 saveRoom() writes the open room\'s config', near(studyCfg.transform?.scale, 1.1, 1e-6) && typeof studyCfg.saved === 'string', fmt(studyCfg))
+check('P17 the other rooms\' configs are unchanged', readMaybe(roomFile('hall-old')) === cfgBefore.hall && readMaybe(roomFile('reading-room')) === cfgBefore.reading &&
+  readMaybe(path.join(REPO, RDIR, 'room.json')) === cfgBefore.v1, `hall ${!!cfgBefore.hall} reading ${!!cfgBefore.reading}`)
+check('P17 listRooms() shows it aligned', (await rp.evaluate(() => window.nook.listRooms())).find((r) => r.name === 'study-new')?.aligned === true)
+
+// Layouts belong to a room (P18)
+await rp.evaluate(() => window.nook.addItem('sheen-chair', { position: [0.4, 0, -0.3] }))
+await rp.evaluate(() => window.nook.saveLayout('a-only'))
+check('P18 a room layout is written under layouts/<room>/', fs.existsSync(path.join(REPO, RLAYOUTS, 'study-new/a-only.json')) &&
+  JSON.parse(fs.readFileSync(path.join(REPO, RLAYOUTS, 'study-new/a-only.json'), 'utf8')).room_name === 'study-new')
+check('P18 it is listed in its room', (await rp.evaluate(() => window.nook.listLayouts())).includes('a-only'))
+await rp.evaluate(() => window.nook.openRoom('hall-old'))
+check('P18 opening another room clears the placed items', (await state(rp)).items.length === 0)
+check('P18 a layout saved in room A is not listed in room B', !(await rp.evaluate(() => window.nook.listLayouts())).includes('a-only'))
+await rp.evaluate(() => window.nook.openRoom('reading-room'))
+check('P18 a v1 layout is listed under the room it was made for', (await rp.evaluate(() => window.nook.listLayouts())).includes('old-v1'))
+await rp.evaluate(() => window.nook.loadLayout('old-v1'))
+s = await state(rp)
+check('P18 a v1 layout still loads', s.room.name === 'reading-room' && s.items.length === 1 && s.items[0].id === 'sheen-chair' && near(s.items[0].rotation_y_deg, 30, 0.1), fmt(s.items))
+
+// The last room opened on this device opens next time; ?room=<name> wins
+await rp.evaluate(() => window.nook.openRoom('hall-old'))
+await rp.reload()
+await rp.waitForFunction(() => window.nook && window.nook.ready, null, { timeout: 120000 })
+await rp.evaluate(() => window.nook.ready)
+check('a reload opens the room last opened on this device', (await state(rp)).room.name === 'hall-old', fmt((await state(rp)).room))
+await rp.close()
+rp = await openPlanner(LIB_URL, { base: RBASE, query: '&room=study-new' })
+s = await state(rp)
+check('P17 ?room=<name> opens that room on load', s.room.name === 'study-new' && s.room.kind === 'splat' && near(s.room.transform.scale, 1.1, 1e-6), fmt(s.room))
+await rp.close()
+rp = await openPlanner(LIB_URL, { base: RBASE, query: '&room=gone-room' })
+s = await state(rp)
+check('?room=<unknown> shows the placeholder, no room name', s.room.name === null && s.room.kind === 'placeholder', fmt(s.room))
+await rp.close()
+// A server without the rooms API (the hosted build): v1 behaviour
+rp = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+rp.setDefaultTimeout(120000)
+const noRoomsErrors = []
+rp.on('pageerror', (e) => noRoomsErrors.push(String(e)))
+await rp.route('**/api/rooms**', (r) => r.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"no"}' }))
+await rp.goto(`${RBASE}/planner/?library=${encodeURIComponent(LIB_URL)}&room=study-new`)
+await rp.waitForFunction(() => window.nook && window.nook.ready, null, { timeout: 120000 })
+await rp.evaluate(() => window.nook.ready)
+s = await state(rp)
+check('without /api/rooms the planner loads /api/room as in v1', s.room.name === null && s.room.kind === 'splat' && near(s.room.transform.scale, 1.25, 1e-6) && noRoomsErrors.length === 0, fmt(s.room))
+check('without /api/rooms layouts use the flat v1 list', (await rp.evaluate(() => window.nook.listLayouts())).includes('old-v1'))
+await rp.close()
+check('no uncaught page errors (rooms)', pageErrors.length === 0, pageErrors.join(' | '))
+check('no console errors (rooms)', consoleErrors.length === 0, consoleErrors.join(' | '))
+roomsServer.kill()
 
 // P10: broken asset doesn't take the app down (console 404s are expected here, so not tracked)
 const broken = await openPlanner('/fixtures/library-broken/library.json', { track: false })

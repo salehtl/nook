@@ -119,7 +119,7 @@ interface Nook {
 - P5. Dragging an item keeps y = 0, and rotation is around Y only.
 - P6. Layouts round-trip: positions within 1 mm, rotation within 0.1°.
 - P7. Seated and standing views put the camera at 1.15 m and 1.6 m (±1 cm).
-- P8. Alignment edits (including pick-floor and two-point scale) persist through `PUT /api/room` and survive a reload.
+- P8. Alignment edits (including pick-floor and two-point scale) persist through `PUT /api/room` (or `PUT /api/rooms/<name>`, §2.7) and survive a reload. Pick floor moves the picked point to y = 0 and, when the floor around it is tilted by 0.3–12°, also levels the scan.
 - P9. The measure tool shows the correct distance (e.g. between two placed items' known positions).
 - P11–P16: see §2.6. P17–P20: see §2.7.
 
@@ -208,7 +208,7 @@ layouts/<layout>.json            v1 layouts (no room), still listed and loadable
 |---|---|
 | `GET /api/rooms` | `200 {"rooms": [room, ...], "current": "<name>" \| null}`, newest first. `current` is the room `room.json` points at. |
 | `GET /api/rooms/<name>` | `200` the room's config (as above, with `splat` set), or `404`. |
-| `PUT /api/rooms/<name>` | Body: a room config. Writes `<name>.room.json` (`splat` forced to the room's file, `saved` stamped). When `room.json` points at this room, it's updated too. `404` for an unknown room. |
+| `PUT /api/rooms/<name>` | Body: a room config. Writes `<name>.room.json` (`splat` forced to the room's file, `saved` stamped unless only `title` changed, so a rename doesn't mark the room aligned). When `room.json` points at this room, it's updated too. `404` for an unknown room. |
 | `PUT /api/rooms/<name>/thumb` | Body: `{"image": "data:image/jpeg;base64,..."}` (≤ 2 MB). Writes `<name>.jpg`. |
 | `DELETE /api/rooms/<name>` | Moves all of the room's files (scan, config, thumbnail, `layouts/<name>/`) to `.trash/`. If `room.json` pointed at it, `room.json` is repointed at the newest remaining room (its config), or removed when none is left. `200 {"ok": true, "trash": "<dir>"}`. |
 | `GET /api/layouts?room=<name>` | `200 {"layouts": ["name", ...], "details": [{"name", "items", "updated", "legacy"}]}`: the room's layouts, plus v1 layouts whose `room.splat` is this room's scan (`legacy: true`). |
@@ -238,6 +238,7 @@ The room object in `GET /api/rooms`:
 listRooms(): Promise<Room[]>                 // GET /api/rooms
 openRoom(name: string): Promise<void>        // loads the room, its config and layouts; resolves when the scan has loaded
 getState().room.name: string | null          // the open room, null for the placeholder or a dropped file
+saveRoom(): Promise<void>                    // Save room: PUT /api/rooms/<name>, or PUT /api/room when no named room is open
 ```
 
 **Acceptance**

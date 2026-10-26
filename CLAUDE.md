@@ -38,6 +38,7 @@ Only the main session commits.
 ## Evals
 
 - `npm run eval:planner` runs `evals/planner_smoke.mjs`.
+- `npm run eval:rooms` runs `evals/rooms_api.sh` (the rooms API, §2.7); `npm run eval:rooms-ui` runs `evals/planner_rooms_smoke.mjs` (several rooms, a training scan, phone and desktop).
 - `npm run eval:pipeline` runs `evals/pipeline_offline.sh` (offline, mocked fal, $0).
 - `evals/validate_library.py <library.json>` checks any library against the contract.
 

@@ -106,6 +106,9 @@ check "splat forced to the room's scan, saved stamped by the server" 'py "(lambd
 check "P17 saving one room leaves the others' configs and room.json unchanged" 'cmp -s "$OUT/rr.before.json" "$ROOM/reading-room.room.json" && cmp -s "$OUT/roomjson.before.json" "$ROOM/room.json" && [ ! -e "$ROOM/study-new.room.json" ]'
 call list2 GET /api/rooms >/dev/null
 check "listing shows the title and aligned after a save" 'py "[(x[\"title\"], x[\"aligned\"]) for x in r(\"list2\")[\"rooms\"] if x[\"name\"] == \"hall-old\"] == [(\"Hall, old scan\", True)]"'
+code=$(call renstudy PUT /api/rooms/study-new "$(body renstudy '{"version": 1, "title": "Study"}')")
+call list2b GET /api/rooms >/dev/null
+check "a rename (title only) doesn't mark the room aligned" '[ "$code" = 200 ] && py "[(x[\"title\"], x[\"aligned\"]) for x in r(\"list2b\")[\"rooms\"] if x[\"name\"] == \"study-new\"] == [(\"Study\", False)]"' "$code"
 code=$(call putrr PUT /api/rooms/reading-room "$(body putrr '{"version": 1, "transform": {"position": [0, 0.8, 0], "quaternion": [0, 0, 0, 1], "scale": 1.1}, "look": {"exposure": 0.9, "warmth": 0.3}, "viewpoints": null}')")
 check "saving the current room updates room.json too" '[ "$code" = 200 ] && py "f(ROOM + \"/room.json\") == f(ROOM + \"/reading-room.room.json\") and f(ROOM + \"/room.json\")[\"transform\"][\"scale\"] == 1.1"' "$code"
 call v1room2 GET /api/room >/dev/null
@@ -177,7 +180,7 @@ check "every written room config is room.schema.json-valid" 'evals/py -c "
 import glob, json, jsonschema
 s = json.load(open(\"contract/room.schema.json\"))
 files = glob.glob(\"$ROOM/*.room.json\") + [\"$ROOM/room.json\"]
-assert len(files) == 3, files
+assert len(files) == 4, files
 for p in files: jsonschema.validate(json.load(open(p)), s)"'
 
 # --- delete rooms --------------------------------------------------------------------------------------------------------------

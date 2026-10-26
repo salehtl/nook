@@ -1,11 +1,23 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-mode="desktop">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>nook planner</title>
-  <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="./style.css">
+  <meta name="theme-color" content="#131417">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="nook">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon-180.png">
+  <link rel="stylesheet" href="./styles/kit.css">
+  <link rel="stylesheet" href="./styles/workspace.css">
+  <link rel="stylesheet" href="./styles/panels.css">
+  <link rel="stylesheet" href="./styles/rooms.css">
   <script type="importmap">
   {
     "imports": {
@@ -17,164 +29,20 @@
   </script>
 </head>
 <body>
-  <div id="viewport"></div>
-
-  <aside id="sidebar">
-    <header class="side-head">
-      <span class="brand">nook</span>
-      <span id="room-status" class="muted">loading…</span>
-      <button id="collapse" class="icon" title="Hide panel">‹</button>
-    </header>
-
-    <div class="side-body">
-      <details id="sec-library" open>
-        <summary>Library <span id="lib-count" class="muted"></span></summary>
-        <ul id="library-list" class="list"></ul>
-        <p id="library-empty" class="muted small" hidden>No items. Add some with <code>nook-add</code>.</p>
-      </details>
-
-      <details id="sec-placed" open>
-        <summary>In the room <span id="placed-count" class="muted"></span></summary>
-        <ul id="placed-list" class="list compact"></ul>
-      </details>
-
-      <details id="sec-layouts" open>
-        <summary>Layouts</summary>
-        <div class="row">
-          <input id="layout-name" type="text" placeholder="layout-name" spellcheck="false" autocomplete="off">
-          <button id="layout-save">Save</button>
-          <button id="layout-load">Load</button>
-        </div>
-        <ul id="layout-list" class="chips"></ul>
-      </details>
-
-      <details id="sec-room">
-        <summary>Room &amp; alignment</summary>
-        <div class="row">
-          <input id="scan-url" type="text" placeholder="room/scan.spz (or drop a file)" spellcheck="false" autocomplete="off">
-          <button id="scan-load" title="Load this scan for the session">Load</button>
-        </div>
-        <div class="grid3">
-          <label>yaw°<input id="al-yaw" type="number" step="1"></label>
-          <label>pitch°<input id="al-pitch" type="number" step="1"></label>
-          <label>roll°<input id="al-roll" type="number" step="1"></label>
-          <label>x m<input id="al-x" type="number" step="0.01"></label>
-          <label>y m<input id="al-y" type="number" step="0.01"></label>
-          <label>z m<input id="al-z" type="number" step="0.01"></label>
-          <label>scale<input id="al-scale" type="number" step="0.01" min="0.001"></label>
-          <button id="al-flip" class="span2" title="Rotate the scan 180° about X (scans often arrive upside down)">Flip upside down</button>
-        </div>
-        <div class="row">
-          <button id="al-floor" class="grow" title="Click a floor point on the scan; it becomes y = 0">Pick floor</button>
-          <button id="al-two" class="grow" title="Click two points on the scan, then enter their real distance">Two-point scale</button>
-        </div>
-        <div id="al-two-row" class="row" hidden>
-          <span id="al-two-measured" class="muted small"></span>
-          <input id="al-two-dist" type="number" step="0.01" min="0.01" placeholder="real m">
-          <button id="al-two-apply">Apply</button>
-        </div>
-        <div class="grid3" id="ph-row">
-          <label>room w m<input id="ph-w" type="number" step="0.05" min="0.5"></label>
-          <label>d m<input id="ph-d" type="number" step="0.05" min="0.5"></label>
-          <label>h m<input id="ph-h" type="number" step="0.05" min="0.5"></label>
-        </div>
-        <div class="look">
-          <div class="look-head"><span>Look</span><span id="look-env" class="muted small"></span></div>
-          <label class="slider" title="Exposure, 0.25× to 4×">exposure
-            <input id="look-exposure" type="range" min="-2" max="2" step="0.05" value="0"><output id="look-exposure-val">1.00×</output></label>
-          <label class="slider" title="White balance, cool to warm">warmth
-            <input id="look-warmth" type="range" min="-1" max="1" step="0.05" value="0"><output id="look-warmth-val">neutral</output></label>
-          <div class="row">
-            <label class="check grow"><input id="look-shadows" type="checkbox" checked> contact shadows</label>
-            <button id="look-reset" title="Exposure 1×, warmth neutral">Reset</button>
-            <button id="look-relight" title="Bake the scan's light again, from the room center">Relight</button>
-          </div>
-        </div>
-        <div class="row">
-          <button id="room-save" class="primary grow" title="Saves the alignment and the look">Save room</button>
-          <button id="room-revert" title="Reload the saved room">Revert</button>
-        </div>
-      </details>
-
-      <details id="sec-renders">
-        <summary>Renders <span id="render-count" class="muted"></span></summary>
-        <ul id="render-list" class="list"></ul>
-        <p id="render-empty" class="muted small">None yet. <b>Render</b> (top right) sends this view to fal for a photoreal pass (about $0.04).</p>
-      </details>
-    </div>
-    <footer id="help" class="muted small">
-      Click an item to select it, drag the gizmo to move. <b>R</b> / <b>Shift+R</b> rotate 15° · <b>G</b> move/rotate gizmo ·
-      <b>Del</b> remove · <b>Esc</b> clear · <b>M</b> measure · <b>F</b> frame · <b>1 2 3</b> views · <b>[ ]</b> scan views · <b>WASD</b> walk, drag to look ·
-      hold <b>Shift</b> to snap · drop a scan file to use it as the room
-    </footer>
-  </aside>
-  <button id="expand" class="icon floating" title="Show panel" hidden>›</button>
-
-  <nav id="toolbar">
-    <div class="seg" role="group" aria-label="View">
-      <button data-view="orbit" class="on" title="Orbit view (1)">Orbit</button>
-      <button data-view="seated" title="Seated eye height 1.15 m (2)">Seated</button>
-      <button data-view="standing" title="Standing eye height 1.6 m (3)">Standing</button>
-    </div>
-    <button id="tool-measure" title="Measure: click two points (M)">Measure</button>
-    <button id="tool-frame" title="Frame the room (F)">Frame</button>
-    <button id="tool-render" class="primary" title="Photoreal render of this view with fal (asks first; about $0.04)">Render</button>
-  </nav>
-
-  <div id="selbar" hidden>
-    <span id="sel-name"></span>
-    <div class="seg">
-      <button id="sel-move" class="on" title="Move on the floor (G toggles)">Move</button>
-      <button id="sel-rotate" title="Rotate around Y (G toggles)">Rotate</button>
-    </div>
-    <button id="sel-ccw" title="Rotate +15°, counterclockwise from above (R)">+15°</button>
-    <button id="sel-cw" title="Rotate −15° (Shift+R)">−15°</button>
-    <div class="seg" id="sel-render-seg">
-      <button id="sel-glb" title="Show the mesh">GLB</button>
-      <button id="sel-splat" title="Show the splat">Splat</button>
-    </div>
-    <button id="sel-relight" title="Light the furniture from the scan as seen from here (1.0 m up)" hidden>Relight here</button>
-    <button id="sel-remove" class="danger" title="Remove (Delete)">Remove</button>
-  </div>
-
-  <div id="item-label" class="tag" hidden></div>
-  <div id="measure-label" class="tag measure" hidden></div>
-  <div id="mode-hint" hidden></div>
+  <!-- Mount points (ui/shell.js): the 3D view, in-view overlays (labels, loupe), the workspace chrome (top bar, phone
+       tool rail, mode bars), the panel hosts (desktop side panel, phone dock + sheet), pages (Rooms), toasts and the
+       layer for dialogs, menus and tooltips. -->
+  <div id="view"></div>
+  <div id="overlays"></div>
+  <header id="topbar"></header>
+  <div id="rail"></div>
+  <div id="modebar"></div>
+  <aside id="panel"></aside>
+  <nav id="dock" aria-label="Panels"></nav>
+  <section id="sheet"></section>
+  <div id="pages"></div>
   <div id="toasts" aria-live="polite"></div>
-  <div id="render-confirm" class="modal" hidden>
-    <div class="card">
-      <header class="card-head"><b>Render this view</b><span id="rc-price" class="muted"></span></header>
-      <img id="rc-preview" class="preview" alt="The view that will be sent">
-      <div class="row">
-        <label for="rc-model" class="muted small">Model</label>
-        <select id="rc-model" class="grow"></select>
-      </div>
-      <details class="prompt">
-        <summary class="small">Prompt</summary>
-        <textarea id="rc-prompt" rows="5" spellcheck="false"></textarea>
-      </details>
-      <p id="rc-note" class="muted small"></p>
-      <div class="row end">
-        <button id="rc-cancel">Cancel</button>
-        <button id="rc-go" class="primary">Render</button>
-      </div>
-    </div>
-  </div>
-  <div id="render-view" class="modal" hidden>
-    <div class="card wide">
-      <header class="card-head">
-        <b id="rv-title"></b><span id="rv-meta" class="muted small grow"></span>
-        <a id="rv-open" target="_blank" rel="noopener" class="small">open image</a>
-        <button id="rv-close" class="icon" title="Close (Esc)">×</button>
-      </header>
-      <div class="pair">
-        <figure><img id="rv-input" alt="Planner view"><figcaption class="muted small">Planner view</figcaption></figure>
-        <figure><img id="rv-result" alt="Render"><figcaption class="muted small">Render</figcaption></figure>
-      </div>
-    </div>
-  </div>
-  <div id="drop" hidden><div>Drop a .spz / .ply / .splat / .ksplat / .sog to use it as the room</div></div>
-
+  <div id="layer"></div>
   <script type="module" src="./main.js"></script>
 </body>
 </html>
