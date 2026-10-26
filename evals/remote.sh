@@ -44,7 +44,7 @@ scan() {
   [ -n "$room_remote" ] && "${_SSH[@]}" "rm -rf ~/$room_remote"
   local quoted="" rc
   for a in "${args[@]}"; do quoted+=" $(printf %q "$a")"; done
-  "${_SSH[@]}" "cd ~ && ~/src/nook/result-nook/bin/nook-scan$quoted"
+  "${_SSH[@]}" "cd ~ && NOOK_GSPLAT_ARGS=$(printf %q "${NOOK_GSPLAT_ARGS:-}") ~/src/nook/result-nook/bin/nook-scan$quoted"
   rc=$?
   if [ -n "$room_local" ] && "${_SSH[@]}" "test -d ~/$room_remote"; then
     mkdir -p "$room_local" && rsync -a -e "$_RSH" "$NOOK_SCAN_HOST:$room_remote/" "$room_local/" >/dev/null

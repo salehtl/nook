@@ -49,7 +49,8 @@ def train(data_dir: Path, out_dir: Path, steps: int, max_image_size: int, sh_deg
     out_dir.mkdir(parents=True, exist_ok=True)
     ply = out_dir / "trained.ply"
     cmd = [binary(), str(data_dir), "--out", str(ply), "--steps", str(steps), "--max-splats", str(max_splats),
-           "--max-image-size", str(max_image_size), "--sh-degree", str(sh_degree)]
+           "--max-image-size", str(max_image_size), "--sh-degree", str(sh_degree),
+           *os.environ.get("NOOK_GSPLAT_ARGS", "").split()]  # experiments, e.g. "--pose-opt"
     log = train_log()
     log.parent.mkdir(parents=True, exist_ok=True)
     say(f"training with {NAME}: {steps} steps, up to {max_splats:,} splats, SH degree {sh_degree} (log: {log})")

@@ -250,6 +250,48 @@ def write_ply(path: Path, splats, sh_degree: int) -> int:
     return len(data)
 
 
+def rot6d_to_matrix(d6: torch.Tensor) -> torch.Tensor:
+    """[N, 6] continuous rotation representation (Zhou et al. 2019) to [N, 3, 3] rotation matrices."""
+    a1, a2 = d6[..., :3], d6[..., 3:]
+    b1 = F.normalize(a1, dim=-1)
+    b2 = F.normalize(a2 - (b1 * a2).sum(-1, keepdim=True) * b1, dim=-1)
+    return torch.stack((b1, b2, torch.cross(b1, b2, dim=-1)), dim=-2)
+
+
+class PoseCorrection(torch.nn.Module):
+    """A learnable correction per training camera (simple_trainer's --pose_opt): a small translation and rotation in
+    the camera's own frame, starting at zero. ARKit's poses drift by centimeters over a room walk; splat training
+    needs the views to agree to millimeters, so the drift shows up as blur and ghosting unless the poses can move."""
+
+    IDENTITY_6D = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+
+    def __init__(self, camtoworlds: torch.Tensor):
+        super().__init__()
+        self.register_buffer("c2w", camtoworlds)
+        self.register_buffer("ident", torch.tensor(self.IDENTITY_6D, device=camtoworlds.device))
+        self.embed = torch.nn.Embedding(len(camtoworlds), 9, device=camtoworlds.device)
+        torch.nn.init.zeros_(self.embed.weight)
+
+    def delta(self, idx: torch.Tensor) -> torch.Tensor:
+        d = self.embed(idx)
+        t = torch.eye(4, device=d.device).repeat(len(idx), 1, 1)
+        t[:, :3, :3] = rot6d_to_matrix(d[:, 3:] + self.ident)
+        t[:, :3, 3] = d[:, :3]
+        return t
+
+    def viewmats(self, idx: torch.Tensor) -> torch.Tensor:
+        return torch.linalg.inv(self.c2w[idx] @ self.delta(idx))
+
+    @torch.no_grad()
+    def stats(self) -> dict:
+        t = self.delta(torch.arange(len(self.c2w), device=self.c2w.device))
+        shift_cm = t[:, :3, 3].norm(dim=-1) * 100
+        cos = ((t[:, 0, 0] + t[:, 1, 1] + t[:, 2, 2] - 1) / 2).clamp(-1, 1)
+        deg = torch.rad2deg(torch.acos(cos))
+        return {"shift_cm_median": round(shift_cm.median().item(), 2), "shift_cm_max": round(shift_cm.max().item(), 2),
+                "rot_deg_median": round(deg.median().item(), 3), "rot_deg_max": round(deg.max().item(), 3)}
+
+
 def train(args) -> dict:
     started = time.time()
     if not torch.cuda.is_available():
@@ -297,6 +339,12 @@ def train(args) -> dict:
         ssim = SSIM(dev)
     max_log_scale = math.log(MAX_SCALE * scene_scale)
     viewmats, Ks = viewmats.to(dev), Ks.to(dev)
+    poses = None
+    if args.pose_opt:
+        poses = PoseCorrection(torch.linalg.inv(viewmats))
+        # weight decay keeps corrections small, so the poses can't wander off together with the splats
+        pose_optim = torch.optim.Adam(poses.parameters(), lr=args.pose_opt_lr, weight_decay=1e-6)
+        say(f"refining camera poses (lr {args.pose_opt_lr:g}); held-out frames keep their ARKit poses")
 
     say(f"training {args.steps} steps, up to {args.max_splats:,} splats of at most {MAX_SCALE * scene_scale:.2f} m, "
         f"SH degree {args.sh_degree} (gsplat {gsplat_version}, {torch.cuda.get_device_name(0)})")
@@ -316,7 +364,8 @@ def train(args) -> dict:
         renders, _, info = rasterization(
             means=splats["means"], quats=splats["quats"], scales=torch.exp(splats["scales"]),
             opacities=torch.sigmoid(splats["opacities"]), colors=colors,
-            viewmats=viewmats[i:i + 1], Ks=Ks[i:i + 1], width=w, height=h,
+            viewmats=poses.viewmats(torch.tensor([i], device=dev)) if poses is not None else viewmats[i:i + 1],
+            Ks=Ks[i:i + 1], width=w, height=h,
             sh_degree=sh_deg, packed=False, near_plane=0.01, far_plane=1e10, rasterize_mode="classic")
         pred = renders[0]  # [H, W, 3]
         target = img.float() / 255.0
@@ -331,6 +380,9 @@ def train(args) -> dict:
         for opt in optimizers.values():
             opt.step(visible)
             opt.zero_grad(set_to_none=True)
+        if poses is not None:
+            pose_optim.step()
+            pose_optim.zero_grad(set_to_none=True)
         means_sched.step()
         with torch.no_grad():
             splats["scales"].clamp_(max=max_log_scale)
@@ -361,13 +413,17 @@ def train(args) -> dict:
     written = write_ply(out, splats, args.sh_degree)
     total = time.time() - started
     say(f"wrote {written:,} splats to {out} ({train_secs / 60:.1f} min training, {total / 60:.1f} min total)")
+    pose_stats = poses.stats() if poses is not None else None
+    if pose_stats:
+        say(f"pose corrections: shift median {pose_stats['shift_cm_median']} cm (max {pose_stats['shift_cm_max']}), "
+            f"rotation median {pose_stats['rot_deg_median']} deg (max {pose_stats['rot_deg_max']})")
     return {"ply": str(out), "splats": written, "steps": args.steps, "seconds": round(total, 1),
             "train_seconds": round(train_secs, 1), "steps_per_s": round(args.steps / train_secs, 2),
             "frames": {"train": n, "held_out": n_frames - n}, "sh_degree": args.sh_degree,
             "max_splats": args.max_splats, "max_image_size": args.max_image_size,
             "peak_vram_gib": {"allocated": round(torch.cuda.max_memory_allocated() / 2**30, 2),
                               "reserved": round(torch.cuda.max_memory_reserved() / 2**30, 2)},
-            "trainer": f"gsplat {gsplat_version} (MCMC)"}
+            "trainer": f"gsplat {gsplat_version} (MCMC)", "pose_opt": pose_stats}
 
 
 def main(argv=None) -> None:
@@ -380,6 +436,8 @@ def main(argv=None) -> None:
     p.add_argument("--sh-degree", type=int, default=1, choices=range(4))
     p.add_argument("--holdout-every", type=int, default=0, help="skip frames with index %% N == 0 (0: train on all)")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--pose-opt", action="store_true", help="refine the training cameras' poses along with the splats")
+    p.add_argument("--pose-opt-lr", type=float, default=1e-5, help="learning rate of the pose corrections")
     args = p.parse_args(argv)
     if args.steps < 1 or args.max_splats < 1000 or args.max_image_size < 16 or args.holdout_every < 0:
         p.error("--steps >= 1, --max-splats >= 1000, --max-image-size >= 16, --holdout-every >= 0")
