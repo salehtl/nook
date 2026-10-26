@@ -31,8 +31,14 @@ const cam = new THREE.PerspectiveCamera(2 * Math.atan(h / 2 / fl_y) * 180 / Math
 const c2 = document.createElement('canvas'); c2.width = w; c2.height = h
 const g = c2.getContext('2d', { willReadFrequently: true })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-window.judge = async (m, imgUrl) => {
+// Per-frame pinhole intrinsics (ARKit autofocus changes them frame to frame) as an exact projection matrix.
+function setIntrinsics(fx, fy, cx, cy, n = 0.02, f = 50) {
+  cam.projectionMatrix.set(2 * fx / w, 0, 1 - 2 * cx / w, 0,  0, 2 * fy / h, 2 * cy / h - 1, 0,  0, 0, -(f + n) / (f - n), -2 * f * n / (f - n),  0, 0, -1, 0)
+  cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert()
+}
+window.judge = async (m, imgUrl, K) => {
   new THREE.Matrix4().set(...m.flat()).decompose(cam.position, cam.quaternion, cam.scale); cam.updateMatrixWorld(true)
+  setIntrinsics(...K)
   for (let k = 0; k < 12; k++) { renderer.render(scene, cam); await sleep(60) }   // let Spark's async sort settle
   g.drawImage(renderer.domElement, 0, 0); const a = g.getImageData(0, 0, w, h).data
   const img = new Image(); img.src = imgUrl; await img.decode()
@@ -65,7 +71,8 @@ await page.waitForFunction(() => window.READY, null, { timeout: 180000 })
 if (SAVE) fs.mkdirSync(SAVE, { recursive: true })
 const frames = []
 for (const f of pick) {
-  const r = await page.evaluate(([m, u]) => window.judge(m, u), [f.transform_matrix, `/f${path.resolve(capture, f.file_path)}`])
+  const K = ['fl_x', 'fl_y', 'cx', 'cy'].map((k) => f[k] ?? t[k])
+  const r = await page.evaluate(([m, u, K]) => window.judge(m, u, K), [f.transform_matrix, `/f${path.resolve(capture, f.file_path)}`, K])
   frames.push({ index: f.index, psnr: +r.psnr.toFixed(2) })
   if (SAVE) fs.writeFileSync(path.join(SAVE, `render-${String(f.index).padStart(4, '0')}.jpg`), Buffer.from(r.render.split(',')[1], 'base64'))
 }
