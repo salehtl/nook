@@ -11,6 +11,21 @@
     "version": {
       "const": 1
     },
+    "title": {
+      "description": "Display name set by rename (contract \u00a72.7); the file name never changes.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 120
+    },
+    "saved": {
+      "description": "When the planner last saved this room (ISO-8601 UTC, contract \u00a72.7).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "splat": {
       "description": "URL path of the scan, relative to the repo root (e.g. room/scan.spz) or absolute URL. Null/absent means placeholder room.",
       "type": [

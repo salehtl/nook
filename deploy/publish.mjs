@@ -38,7 +38,7 @@ function assetFiles() {
 // 1. Static site
 fs.rmSync(DIST, { recursive: true, force: true })
 fs.mkdirSync(path.join(DIST, 'planner'), { recursive: true })
-for (const f of ['index.html', 'main.js', 'style.css']) fs.copyFileSync(path.join(REPO, 'planner', f), path.join(DIST, 'planner', f))
+for (const f of ['index.html', 'main.js', 'engine.js', 'input.js', 'ui-v1.js', 'style.css']) fs.copyFileSync(path.join(REPO, 'planner', f), path.join(DIST, 'planner', f))
 fs.writeFileSync(path.join(DIST, '_redirects'), '/ /planner/ 302\n')
 fs.writeFileSync(path.join(DIST, '_headers'), '/planner/*\n  Cache-Control: no-cache\n')
 

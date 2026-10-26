@@ -72,7 +72,7 @@ check "job 1 trains to done" '[ "$st" = done ]' "$st: $(j 'd["message"]' <"$OUT/
 check "progress never goes down and ends at 1" 'python3 -c "
 import sys; v=[float(x) for x in open(\"$OUT/progress-$J1.txt\") if x.strip()]
 sys.exit(0 if v and all(b >= a - 1e-9 for a, b in zip(v, v[1:])) and v[-1] == 1 else 1)"'
-check "done job carries result with room_url and ply_url" 'job "$J1" | j "d[\"result\"][\"room_url\"] == \"/planner/\" and d[\"result\"][\"ply_url\"].endswith(\".ply\") and d[\"finished\"] is not None" | grep -q True'
+check "done job carries result with room_url and ply_url" 'job "$J1" | j "d[\"result\"][\"room_url\"] == \"/planner/?room=\" + d[\"name\"] and d[\"result\"][\"ply_url\"].endswith(\".ply\") and d[\"finished\"] is not None" | grep -q True'
 if [ "$OWN" = 1 ]; then
   check "room.json written, schema-valid, with viewpoints ≥ 0.95 m above the floor" 'evals/py -c "
 import json, jsonschema
@@ -81,6 +81,11 @@ vp = r.get(\"viewpoints\") or []
 assert 1 <= len(vp) <= 24, len(vp)
 assert all(v[\"position\"][1] >= 0.95 for v in vp), [v[\"position\"][1] for v in vp]
 "' "$(head -c 400 "$OUT/room/room.json" 2>/dev/null)"
+  check "<name>.room.json written next to room.json, same config" 'evals/py -c "
+import json
+r = json.load(open(\"$OUT/room/room.json\")); name = r[\"splat\"].rsplit(\"/\", 1)[-1].rsplit(\".\", 1)[0]
+assert json.load(open(f\"$OUT/room/{name}.room.json\")) == r
+"' "$(ls "$OUT/room" 2>/dev/null | tr '\n' ' ')"
   check "trained PLY exists in room-dir" 'ls "$OUT"/room/*.ply >/dev/null 2>&1'
 fi
 check "GET /api/scan/jobs lists the job, newest first" 'curl -s "$BASE/api/scan/jobs" | j "[x[\"id\"] for x in d[\"jobs\"]][0] == \"$J1\"" | grep -q True'

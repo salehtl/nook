@@ -288,7 +288,7 @@ class Server:
             if job["status"] != "training" or self.stopping:  # cancelled, or the server is going down
                 return
             if rc == 0 and result:
-                result = dict(result, room_url="/planner/", ply_url=f"/room/{job['name']}.ply", spz_url=f"/room/{job['name']}.spz")
+                result = dict(result, room_url=f"/planner/?room={job['name']}", ply_url=f"/room/{job['name']}.ply", spz_url=f"/room/{job['name']}.spz")
                 job.update(status="done", stage="done", progress=1.0, step=result.get("steps", job["total_steps"]),
                            total_steps=result.get("steps", job["total_steps"]), eta_s=0, finished=now(),
                            message="room ready", result=result)
