@@ -9,6 +9,7 @@ cd "$(dirname "$0")/.."
 CAP=${1:-${NOOK_REAL_CAPTURE:-$HOME/Downloads/scan-20261026-093654.zip}}
 OUT=evals/out/quality
 BASELINE=20.76
+BAR=22.3   # contract §4.9 Q1 (baseline + 1.5, rounded as the contract states it)
 [ -f "$CAP" ] || { echo "SKIP no real capture at $CAP (set NOOK_REAL_CAPTURE)"; exit 0; }
 rm -rf "$OUT" && mkdir -p "$OUT"
 (cd "$OUT" && unzip -q "$CAP")
@@ -23,9 +24,9 @@ node evals/psnr_judge.mjs "$OUT/room/quality.ply" "$DIR" --every 10 --max 18 --s
 psnr=$(python3 -c "import json; print(json.load(open('$OUT/psnr.json'))['mean_psnr'])")
 summary=$(tail -n 1 "$OUT/train.out")
 echo "trained in ${secs}s: $summary"
-echo "held-out PSNR (Spark): $psnr dB  (baseline $BASELINE, need >= $(python3 -c "print(round($BASELINE + 1.5, 2))"))"
+echo "held-out PSNR (Spark): $psnr dB  (baseline $BASELINE, need >= $BAR)"
 fail=0
-python3 -c "import sys; sys.exit(0 if $psnr >= $BASELINE + 1.5 else 1)" && echo "ok   quality" || { echo "FAIL quality"; fail=1; }
+python3 -c "import sys; sys.exit(0 if $psnr >= $BAR else 1)" && echo "ok   quality" || { echo "FAIL quality"; fail=1; }
 [ "$secs" -lt 2400 ] && echo "ok   time (${secs}s < 2400s)" || { echo "FAIL time ${secs}s >= 2400s"; fail=1; }
 python3 -c "import json,sys; r=json.load(open('$OUT/room/room.json')); sys.exit(0 if r.get('viewpoints') else 1)" && echo "ok   viewpoints in room.json" || { echo "FAIL viewpoints in room.json"; fail=1; }
 exit $fail

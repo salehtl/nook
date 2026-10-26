@@ -48,7 +48,7 @@ def version() -> str:
     try:
         return metadata.version("nook-scan")
     except metadata.PackageNotFoundError:
-        return "unknown"
+        return os.environ.get("NOOK_VERSION", "unknown")  # the Nix package runs from source and sets this
 
 
 class Server:
@@ -57,7 +57,8 @@ class Server:
         self.data = Path(args.data_dir).expanduser().resolve()
         self.room_dir = Path(args.room_dir).expanduser().resolve()
         self.uploads, self.logs = self.data / "uploads", self.data / "logs"
-        for d in (self.uploads, self.logs):
+        self.work = self.data / "work"  # trainers' TMPDIR: only this server's jobs use it, so startup can sweep it
+        for d in (self.uploads, self.logs, self.work):
             d.mkdir(parents=True, exist_ok=True)
         self.state_path = self.data / "jobs.json"
         self.train_args = ["--room-dir", str(self.room_dir)]
@@ -93,6 +94,16 @@ class Server:
             elif j["status"] == "queued" and not self._upload_path(j["id"]).is_file():
                 j.update(status="failed", stage="done", finished=now(), message="the upload is gone from the server: upload again")
         self._save()
+        self._sweep()
+
+    def _sweep(self) -> None:
+        """Remove leftovers from a previous run: partial uploads (.incoming-*) and trainer work dirs (in <data>/work)
+        that a restart or a SIGKILL skipped cleaning. Runs at startup, before any job, so nothing is in use."""
+        leftovers = list(self.uploads.glob(".incoming-*")) + list(self.work.iterdir())
+        for p in leftovers:
+            shutil.rmtree(p, ignore_errors=True)
+        if leftovers:
+            print(f"nook-scan serve: removed {len(leftovers)} leftover upload/work dirs from a previous run", file=sys.stderr)
 
     def _save(self) -> None:
         """Atomically write jobs.json. Callers hold the lock (or run before the threads start)."""
@@ -222,7 +233,7 @@ class Server:
         # PYTHONPATH: the child must import the same nook_scan as this process, even when a wrapper script (e.g. Nix's)
         # put it on sys.path without telling the environment.
         env = dict(os.environ, PYTHONUNBUFFERED="1", NOOK_SCAN_TRAIN_LOG=str(self.logs / f"{jid}-brush.log"),
-                   PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+                   PYTHONPATH=os.pathsep.join(p for p in sys.path if p), TMPDIR=str(self.work))
         with self.lock:
             if job["status"] != "training" or self.stopping:
                 return
@@ -289,6 +300,7 @@ class Server:
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # so clients that send `Expect: 100-continue` get an answer before the body
+    timeout = 120  # seconds of silence before a stalled upload is dropped (its partial file is removed)
     server_version = "nook-scan"
     app: Server
 

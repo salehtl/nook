@@ -26,7 +26,7 @@ echo "not a zip" >"$OUT/zips/bad.zip"
 SERVER_PID=""
 start_server() {
   uv run -q --project scan nook-scan serve --port "$PORT" --data-dir "$OUT/data" --room-dir "$OUT/room" \
-    --quality draft --steps 300 >>"$OUT/server.log" 2>&1 &
+    --quality draft --steps "${STEPS:-300}" >>"$OUT/server.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 100); do curl -sf "$BASE/api/scan/health" >/dev/null && return 0; sleep 0.3; done
   return 1
@@ -108,8 +108,10 @@ check "non-slug X-Nook-Name is 400" '[ "$code" = 400 ]' "$code"
 
 # --- restart: running job fails cleanly, finished job persists ------------------------------------
 if [ "$OWN" = 1 ]; then
+  # A long job, so it is certainly still training when the server stops (300 steps can finish in ~1 s).
+  stop_server; STEPS=20000 start_server || bad "server restarts with a long job"
   upload c5.zip up5 >/dev/null; J5=$(j 'd["id"]' <"$OUT/up5.json")
-  wait_status "$J5" 'training' 120 >/dev/null; sleep 2
+  wait_status "$J5" 'training' 120 >/dev/null; sleep 3
   stop_server; sleep 2
   start_server || bad "server restarts"
   check "after restart, the interrupted job is failed with a restart message" 'job "$J5" | j "d[\"status\"] == \"failed\" and \"restart\" in d[\"message\"]" | grep -q True' "$(job "$J5" | head -c 300)"

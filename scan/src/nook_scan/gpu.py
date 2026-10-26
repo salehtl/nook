@@ -73,10 +73,11 @@ def trainer_env(base: dict | None = None) -> dict:
         return env
     given = env.get("VK_ICD_FILENAMES") or env.get("VK_DRIVER_FILES")
     if given:
-        missing = [p for p in given.split(os.pathsep) if p and not os.path.isfile(p)]
+        name = "VK_ICD_FILENAMES" if env.get("VK_ICD_FILENAMES") else "VK_DRIVER_FILES"
+        missing = [p for p in given.split(os.pathsep) if p and not os.path.exists(p)]  # files or (VK_DRIVER_FILES) folders
         if missing:
-            raise ScanError(f"VK_ICD_FILENAMES points at {missing[0]}, which does not exist: "
-                            f"set it to the NVIDIA ICD json (on NixOS {NIXOS_ICD_DIR}/nvidia_icd.x86_64.json or similar) or unset it")
+            raise ScanError(f"{name} points at {missing[0]}, which does not exist: "
+                            f"set it to the NVIDIA ICD json (on NixOS {NIXOS_ICD_DIR}/nvidia_icd.json) or unset it")
         return env
     if os.path.isdir(NIXOS_ICD_DIR):
         icds = sorted(glob.glob(os.path.join(NIXOS_ICD_DIR, "*.json")))
