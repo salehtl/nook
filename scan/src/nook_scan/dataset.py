@@ -27,9 +27,18 @@ class Prepared:
     seed_source: str         # "points.ply", "depth" or "none"
 
 
-def _frame_entry(cap: Capture, f: dict, name: str, scale: float) -> dict:
-    w, h = cap.size(f)
-    fx, fy, cx, cy = cap.intrinsics(f)
+def _source(cap: Capture, f: dict, hires: bool) -> tuple[Path, tuple[int, int], tuple[float, float, float, float]]:
+    """A frame's image, size and intrinsics: its high-resolution still (contract §4.10) when asked and present,
+    else the video frame."""
+    if hires and f.get("hires_file_path"):
+        return (cap.root / f["hires_file_path"], (int(f["hires_w"]), int(f["hires_h"])),
+                tuple(float(f[k]) for k in ("hires_fl_x", "hires_fl_y", "hires_cx", "hires_cy")))
+    return cap.root / f["file_path"], cap.size(f), cap.intrinsics(f)
+
+
+def _frame_entry(cap: Capture, f: dict, name: str, scale: float, size=None, intr=None) -> dict:
+    w, h = size or cap.size(f)
+    fx, fy, cx, cy = intr or cap.intrinsics(f)
     nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
     sx, sy = nw / w, nh / h
     return {"file_path": f"images/{name}", "transform_matrix": f["transform_matrix"],
@@ -153,12 +162,19 @@ def prepare(cap: Capture, work: Path, holdout_every: int, max_image_size: int,
         say(f"downscaling images to a long side of {round(long_side * scale)} px (from {long_side})")
 
     jobs, train, held = [], [], []
+    stills = 0
     for i, f in enumerate(cap.frames):
         name = f"{i:06d}.jpg"
-        gain = gains.get(i) if gains and not is_held_out(i, holdout_every) else None
-        jobs.append((cap.root / f["file_path"], data / "images" / name, cap.size(f), scale,
-                     photometric.lut(gain) if gain is not None else None))
-        (held if is_held_out(i, holdout_every) else train).append(_frame_entry(cap, f, name, scale))
+        out = is_held_out(i, holdout_every)
+        gain = gains.get(i) if gains and not out else None
+        # Training frames use the high-res still when there is one; held-out frames stay video, as judged.
+        src, size, intr = _source(cap, f, hires=not out)
+        stills += src.parent.name == "images_hi"
+        fscale = min(1.0, max_image_size / max(size))
+        jobs.append((src, data / "images" / name, size, fscale, photometric.lut(gain) if gain is not None else None))
+        (held if out else train).append(_frame_entry(cap, f, name, fscale, size, intr))
+    if stills:
+        say(f"using {stills} high-resolution stills in place of their video frames")
     if len(train) < 10:
         raise ScanError(f"--holdout-every {holdout_every} leaves only {len(train)} training frames: use a larger value (or 0)")
     with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as pool:  # PIL decodes/encodes outside the GIL
