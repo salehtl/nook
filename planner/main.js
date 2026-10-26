@@ -206,6 +206,9 @@ function normalizeRoomConfig(cfg) {
   if (typeof out.splat !== 'string' || !out.splat.trim()) out.splat = null
   const l = out.look && typeof out.look === 'object' ? out.look : {}
   out.look = { exposure: clampNum(l.exposure, 0.25, 4, LOOK_DEFAULT.exposure), warmth: clampNum(l.warmth, -1, 1, LOOK_DEFAULT.warmth) }
+  const vec = (a, n) => Array.isArray(a) && a.length === n && a.every(isNum)
+  out.viewpoints = (Array.isArray(out.viewpoints) ? out.viewpoints : [])
+    .filter((v) => v && vec(v.position, 3) && vec(v.quaternion, 4)).slice(0, 64)
   return out
 }
 
@@ -298,6 +301,8 @@ async function loadRoomInternal(cfg, { fileBytes = null, fileName = null, frame 
   // A failed drop must leave the working room (and what Save room would write) as it was.
   const prev = { config: roomConfig, dropped: room.dropped, hadSplat: room.kind === 'splat' && !!room.mesh }
   roomConfig = next
+  vpBase = transformMatrix(roomConfig.transform)
+  vpIndex = -1
   room.loaded = false
   room.dropped = fileBytes ? fileName : null
   if (!roomConfig.splat && !fileBytes) {
@@ -826,6 +831,58 @@ function applyFpRotation() {
   camera.rotation.set(fp.pitch, fp.yaw, 0)
 }
 
+// Scan viewpoints (contract §4.9): real camera poses from the capture, in room coordinates as of `vpBase` (the room
+// transform when they were loaded). Alignment edits since then move them along: world = now * vpBase^-1 * pose.
+let vpBase = new THREE.Matrix4()
+let vpIndex = -1
+const transformMatrix = (t) => new THREE.Matrix4().compose(new THREE.Vector3(...t.position),
+  new THREE.Quaternion(...t.quaternion), new THREE.Vector3(t.scale, t.scale, t.scale))
+const viewpoints = () => roomConfig.viewpoints || []
+
+function viewpointPose(v) {
+  const delta = transformMatrix(roomConfig.transform).multiply(vpBase.clone().invert())
+  const m = new THREE.Matrix4().compose(new THREE.Vector3(...v.position), new THREE.Quaternion(...v.quaternion),
+    new THREE.Vector3(1, 1, 1)).premultiply(delta)
+  const pos = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3()
+  m.decompose(pos, q, sc)
+  return { pos, q }
+}
+
+// Stand at a scan viewpoint (eye height stays the view's), looking where the phone looked.
+function applyViewpoint(i) {
+  const vps = viewpoints()
+  if (!vps.length) return false
+  vpIndex = ((i % vps.length) + vps.length) % vps.length
+  const { pos, q } = viewpointPose(vps[vpIndex])
+  const d = new THREE.Vector3(0, 0, -1).applyQuaternion(q)
+  camera.position.set(pos.x, camera.position.y, pos.z)
+  fp.yaw = Math.atan2(-d.x, -d.z)
+  fp.pitch = Math.max(-0.35, Math.min(0.15, Math.asin(Math.max(-1, Math.min(1, d.y)))))
+  return true
+}
+
+function nearestViewpointToCenter() {
+  const c = room.kind === 'splat' ? roomWorldBox().getCenter(new THREE.Vector3()) : new THREE.Vector3()
+  let best = 0, bestD = Infinity
+  viewpoints().forEach((v, i) => {
+    const { pos } = viewpointPose(v)
+    const d = (pos.x - c.x) ** 2 + (pos.z - c.z) ** 2
+    if (d < bestD) { bestD = d; best = i }
+  })
+  return best
+}
+
+function gotoViewpoint(i) {
+  const n = viewpoints().length
+  if (!n) { toast('This room has no scan viewpoints: retrain it with nook-scan v2.'); return false }
+  if (view === 'orbit') setViewInternal('standing')
+  applyViewpoint(i)
+  camera.position.y = EYE[view]
+  applyFpRotation()
+  toast(`Scan view ${vpIndex + 1} of ${n}`, 'info', 1500)
+  return true
+}
+
 function setViewInternal(v) {
   if (!VIEWS.includes(v)) { reportError(`Unknown view "${v}"`); return }
   if (v === 'orbit') {
@@ -840,10 +897,14 @@ function setViewInternal(v) {
     if (view === 'orbit') {
       orbitSaved = { pos: camera.position.clone(), target: orbit.target.clone() }
       const rec = selected && items.get(selected)
+      fp.pitch = v === 'seated' ? -0.05 : -0.12
       if (rec) {
         // Sit in (or stand at) the selected piece, looking where its front (+Z) faces.
         camera.position.set(rec.group.position.x, 0, rec.group.position.z)
         fp.yaw = rec.rotationDeg * DEG + Math.PI
+      } else if (viewpoints().length) {
+        // Start where the phone actually was: the splat is sharpest from there.
+        applyViewpoint(nearestViewpointToCenter())
       } else {
         const t = orbit.target
         const dir = new THREE.Vector3(camera.position.x - t.x, 0, camera.position.z - t.z)
@@ -853,7 +914,6 @@ function setViewInternal(v) {
         camera.position.set(t.x + dir.x * back, 0, t.z + dir.z * back)
         fp.yaw = Math.atan2(dir.x, dir.z)
       }
-      fp.pitch = v === 'seated' ? -0.05 : -0.12
     }
     view = v
     orbit.enabled = false
@@ -1148,6 +1208,8 @@ window.addEventListener('keydown', (e) => {
     if (view === 'orbit') frameRoom()
   } else if (k === '1' || k === '2' || k === '3') {
     setViewInternal(VIEWS[Number(k) - 1])
+  } else if (k === '[' || k === ']') {
+    gotoViewpoint(vpIndex < 0 ? nearestViewpointToCenter() : vpIndex + (k === ']' ? 1 : -1))
   }
   if (view !== 'orbit' && k.startsWith('arrow')) e.preventDefault()
 })
@@ -1518,7 +1580,7 @@ function syncRoomUI() {
   renderSelectionUI()
   if (!room.loaded) return
   setRoomStatus(isSplat
-    ? `${room.dropped || roomConfig.splat} · ${room.splatCount.toLocaleString()} splats`
+    ? `${room.dropped || roomConfig.splat} · ${room.splatCount.toLocaleString()} splats${viewpoints().length ? ` · ${viewpoints().length} scan views` : ''}`
     : `placeholder ${p.w} × ${p.d} × ${p.h} m`)
 }
 // Look (exposure, warmth) lives in roomConfig.look, so Save room persists it.
@@ -1583,6 +1645,13 @@ $('al-two').onclick = () => startPickMode('two')
 $('al-two-apply').onclick = () => applyTwoPointScale()
 $('al-two-dist').addEventListener('keydown', (e) => { if (e.key === 'Enter') applyTwoPointScale() })
 $('room-save').onclick = () => quiet((async () => {
+  if (viewpoints().length) {   // save viewpoints where the alignment has moved them, relative to the new transform
+    roomConfig.viewpoints = viewpoints().map((v) => {
+      const { pos, q } = viewpointPose(v)
+      return { ...v, position: pos.toArray().map((x) => round(x, 4)), quaternion: q.toArray().map((x) => round(x, 6)) }
+    })
+    vpBase = transformMatrix(roomConfig.transform)
+  }
   const body = clone(roomConfig)
   if (!body.splat) delete body.transform
   if (!body.measured) delete body.measured
@@ -1705,6 +1774,7 @@ function getState() {
       loaded: room.loaded,
       ...(room.kind === 'splat' ? { splatCount: room.splatCount } : {}),
       transform: { position: t.position.slice(), quaternion: t.quaternion.slice(), scale: t.scale },
+      viewpoints: viewpoints().length,
     },
     items: [...items.values()].map((r) => {
       const b = worldBounds(r)
@@ -1740,6 +1810,7 @@ window.nook = {
   loadLayout: (name) => loadLayoutInternal(name),
   listLayouts: () => listLayoutsInternal().catch((e) => { throw reportError('Could not list layouts', e) }),
   setView: (v) => setViewInternal(v),
+  gotoViewpoint: (i) => gotoViewpoint(i),
   getState,
   // §2.6
   getRenderSettings: () => ({

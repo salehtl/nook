@@ -11,6 +11,7 @@ Relative paths are resolved against the repo root. FAL_KEY comes from the enviro
 <repo>/.env (unless NOOK_NO_DOTENV=1). With NOOK_FAL_MOCK set, /api/render makes no network calls.
 """
 import argparse
+import http.client
 import base64
 import binascii
 import csv
@@ -197,11 +198,15 @@ def atomic_write_json(path: Path, data) -> None:
 class Handler(SimpleHTTPRequestHandler):
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, **MIME, "": "application/octet-stream"}
 
-    def __init__(self, *args, room_file: Path, layouts_dir: Path, renders_dir: Path, costs_file: Path, **kwargs):
+    def __init__(self, *args, room_file: Path, layouts_dir: Path, renders_dir: Path, costs_file: Path,
+                 room_dir: Path | None = None, library_dir: Path | None = None, scan_api: str | None = None, **kwargs):
         self.room_file = room_file
         self.layouts_dir = layouts_dir
         self.renders_dir = renders_dir
         self.costs_file = costs_file
+        # Writable data outside the code (on kakapo the code is in the read-only Nix store).
+        self.mounts = {"/room/": room_dir, "/library/": library_dir}
+        self.scan_api = scan_api
         super().__init__(*args, directory=str(REPO), **kwargs)
 
     def translate_path(self, path):
@@ -212,7 +217,51 @@ class Handler(SimpleHTTPRequestHandler):
             if not name or "/" in name or "\\" in name or name.startswith("."):
                 return str(self.renders_dir / ".missing")
             return str(self.renders_dir / name)
+        for prefix, base in self.mounts.items():
+            if base is not None and p.startswith(prefix):
+                parts = [x for x in p[len(prefix):].split("/") if x]
+                if any(x.startswith(".") or "\\" in x for x in parts):
+                    return str(base / ".missing")
+                return str(base.joinpath(*parts))
         return super().translate_path(path)
+
+    # --- /api/scan/* -> nook-scan jobs server (contract §2.1 --scan-api, §5) ---------------------
+    def is_scan(self) -> bool:
+        path = unquote(urlsplit(self.path).path)
+        return bool(self.scan_api) and (path == "/api/scan" or path.startswith("/api/scan/"))
+
+    def proxy_scan(self):
+        """Stream the request to the jobs server and its answer back (uploads are hundreds of MB)."""
+        target = urlsplit(self.scan_api)
+        length = self.headers.get("Content-Length")
+        if self.command == "POST" and length is None and urlsplit(self.path).path.rstrip("/").endswith("/captures"):
+            return self.error_json(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required: upload the zip as a file")
+        conn = http.client.HTTPConnection(target.hostname, target.port or 80, timeout=600)
+        try:
+            conn.putrequest(self.command, self.path, skip_accept_encoding=True)
+            for h in ("Content-Type", "Content-Length", "X-Nook-Name", "Accept"):
+                if self.headers.get(h) is not None:
+                    conn.putheader(h, self.headers[h])
+            conn.endheaders()
+            left = int(length or 0)
+            while left > 0:
+                chunk = self.rfile.read(min(left, 1 << 20))
+                if not chunk:
+                    break
+                conn.send(chunk)
+                left -= len(chunk)
+            resp = conn.getresponse()
+        except OSError as e:
+            conn.close()
+            return self.error_json(HTTPStatus.BAD_GATEWAY, f"the nook-scan jobs server at {self.scan_api} isn't answering ({e})")
+        self.send_response(resp.status)
+        for h in ("Content-Type", "Content-Length"):
+            if resp.getheader(h) is not None:
+                self.send_header(h, resp.getheader(h))
+        self.end_headers()
+        while chunk := resp.read(1 << 16):
+            self.wfile.write(chunk)
+        conn.close()
 
     # --- plumbing --------------------------------------------------------
     def end_headers(self):
@@ -262,6 +311,8 @@ class Handler(SimpleHTTPRequestHandler):
         return any(p.startswith(".") and p not in ("", ".", "..") for p in parts)
 
     def do_GET(self):
+        if self.is_scan():
+            return self.proxy_scan()
         api = self.api_path()
         if api is not None:
             return self.handle_api_get(api)
@@ -292,6 +343,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
 
     def do_POST(self):
+        if self.is_scan():
+            return self.proxy_scan()
         api = self.api_path()
         if api == "/api/render":
             try:
@@ -486,14 +539,20 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="nook planner server")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--room-file", default="room/room.json")
+    ap.add_argument("--room-file", default=None, help="default: <room-dir>/room.json")
+    ap.add_argument("--room-dir", default=None, help="serve /room/ from here (default: the repo's room/)")
+    ap.add_argument("--library-dir", default=None, help="serve /library/ from here (default: the repo's library/)")
+    ap.add_argument("--scan-api", default=None, help="proxy /api/scan/* to this nook-scan jobs server, e.g. http://127.0.0.1:8095")
     ap.add_argument("--layouts-dir", default="layouts")
     ap.add_argument("--renders-dir", default="renders")
     ap.add_argument("--costs-file", default="library/costs.csv")
     args = ap.parse_args(argv)
 
-    handler = partial(Handler, room_file=resolve(args.room_file), layouts_dir=resolve(args.layouts_dir),
-                      renders_dir=resolve(args.renders_dir), costs_file=resolve(args.costs_file))
+    room_dir = resolve(args.room_dir) if args.room_dir else None
+    room_file = resolve(args.room_file) if args.room_file else (room_dir or resolve("room")) / "room.json"
+    handler = partial(Handler, room_file=room_file, layouts_dir=resolve(args.layouts_dir),
+                      renders_dir=resolve(args.renders_dir), costs_file=resolve(args.costs_file), room_dir=room_dir,
+                      library_dir=resolve(args.library_dir) if args.library_dir else None, scan_api=args.scan_api)
     ThreadingHTTPServer.allow_reuse_address = True
     httpd = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"nook planner: http://{args.host}:{args.port}/planner/  (serving {REPO})", flush=True)
