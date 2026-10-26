@@ -5,7 +5,7 @@
   stdenvNoCC,
   python3,
   makeWrapper,
-  brush,
+  nook-gsplat,
 }:
 let
   py = python3.withPackages (ps: [
@@ -38,7 +38,7 @@ stdenvNoCC.mkDerivation {
       --add-flags "-c 'from nook_scan.cli import main; main()'" \
       --set PYTHONPATH $out/share/nook/scan/src \
       --set NOOK_VERSION 0.2.0 \
-      --set-default NOOK_BRUSH_BIN ${lib.getExe brush}
+      --set-default NOOK_GSPLAT_BIN ${lib.getExe nook-gsplat}
     makeWrapper ${py}/bin/python3 $out/bin/nook-web \
       --add-flags "$out/share/nook/planner/serve.py"
     runHook postInstall

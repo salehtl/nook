@@ -14,9 +14,11 @@ check() { if eval "$2"; then ok "$1"; else bad "$1${3:+ — $3}"; fi; }
 # Like check, but the failure detail is a command run after the check, so it can read logs the check just wrote.
 checkl() { if eval "$2"; then ok "$1"; else bad "$1 — $(eval "$3" 2>/dev/null | tr '\n' ' ' | cut -c1-600)"; fi; }
 last() { tail -n 1 "$1" 2>/dev/null; }
-scan() { uv run -q --project scan nook-scan "$@"; }
+# Training runs on kakapo (gsplat needs its NVIDIA GPU); the checks below run here. See evals/remote.sh.
+source evals/remote.sh
 
 [ -f scan/pyproject.toml ] || { echo "FAIL scan/pyproject.toml not found (trainer not built yet)"; exit 1; }
+remote_prepare || exit 1
 if [ ! -f "$GT/transforms.json" ]; then node fixtures/make_capture.mjs --out "$GT" >/dev/null || { echo "FAIL could not generate $GT"; exit 1; }; fi
 (cd "$(dirname "$GT")" && rm -f "$OLDPWD/$OUT/capture.zip" && zip -qr "$OLDPWD/$OUT/capture.zip" "$(basename "$GT")")
 

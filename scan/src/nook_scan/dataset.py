@@ -1,4 +1,4 @@
-"""Turn a validated capture into a Brush-ready Nerfstudio dataset in a temp workspace."""
+"""Turn a validated capture into the trainer's Nerfstudio-style dataset in a temp workspace."""
 
 import json
 import os
@@ -71,7 +71,7 @@ def _seeds_from_depth(cap: Capture, max_points: int) -> tuple[np.ndarray, np.nda
 
 def far_points(cap: Capture, frames: list[int], distance: float, max_points: int = 120_000) -> tuple[np.ndarray, np.ndarray]:
     """Seed points for what is seen through windows: bright pixels where LiDAR got no return (depth 0), placed
-    `distance` meters out along their rays. Without them Brush explains the view outside with floaters on the glass."""
+    `distance` meters out along their rays. Without them the trainer explains the view outside with floaters on the glass."""
     xyz_all, rgb_all = [], []
     for i in frames:
         f = cap.frames[i]
@@ -107,16 +107,6 @@ def far_points(cap: Capture, frames: list[int], distance: float, max_points: int
     return xyz.astype(np.float32), rgb.astype(np.uint8)
 
 
-BRUSH_MIN_IMAGE_BYTES = 16_400
-
-
-def _pad_for_brush(path: Path) -> None:
-    """Brush v0.3.0 can't load an image file under 16,387 bytes (it read_exact()s a fixed header buffer). Bytes after
-    a JPEG's end marker are ignored by decoders, so small (flat, dark, tiny) frames are padded with zeros."""
-    size = path.stat().st_size
-    if size < BRUSH_MIN_IMAGE_BYTES:
-        with open(path, "ab") as f:
-            f.write(b"\0" * (BRUSH_MIN_IMAGE_BYTES - size))
 
 
 def is_held_out(i: int, holdout_every: int) -> bool:
@@ -124,7 +114,7 @@ def is_held_out(i: int, holdout_every: int) -> bool:
 
 
 def seed_points(cap: Capture) -> tuple[np.ndarray, np.ndarray | None, str]:
-    """Seed points: the capture's points.ply, else back-projected LiDAR depth, else none (Brush inits randomly)."""
+    """Seed points: the capture's points.ply, else back-projected LiDAR depth, else none (the trainer starts from random splats)."""
     t = cap.transforms
     if t.get("ply_file_path"):
         xyz, rgb = read_points(cap.root / t["ply_file_path"])
@@ -149,12 +139,11 @@ def _write_image(src: Path, dst: Path, size: tuple[int, int], scale: float, tabl
             if scale < 1.0:
                 im = im.resize((max(1, round(size[0] * scale)), max(1, round(size[1] * scale))), Image.LANCZOS)
             im.save(dst, quality=95)
-    _pad_for_brush(dst)
 
 
 def prepare(cap: Capture, work: Path, holdout_every: int, max_image_size: int,
             seeds: tuple[np.ndarray, np.ndarray | None, str] | None = None, gains: dict | None = None) -> Prepared:
-    """Write the Brush dataset. `gains` (frame index -> RGB gain, from photometric.measure) divides each training
+    """Write the training dataset. `gains` (frame index -> RGB gain, from photometric.measure) divides each training
     image's linear light by its gain; held-out frames are copied untouched."""
     data = work / "data"
     (data / "images").mkdir(parents=True)

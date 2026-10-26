@@ -59,7 +59,7 @@ def crop(path, seeds: np.ndarray, cams: np.ndarray, cap=None, frames: list[int] 
     v = read_vertices(path)
     missing = [k for k in REQUIRED if k not in v.dtype.names]
     if missing:
-        raise ScanError(f"trained PLY lacks {', '.join(missing)}: the trainer output is not a 3DGS splat (see the Brush log)")
+        raise ScanError(f"trained PLY lacks {', '.join(missing)}: the trainer output is not a 3DGS splat (see the training log)")
     xyz = np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64)
     lo, hi = captured_bounds(seeds, cams)
     finite = np.all([np.isfinite(v[k]) for k in v.dtype.names], axis=0)

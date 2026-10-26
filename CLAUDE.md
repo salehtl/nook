@@ -32,6 +32,7 @@ Only the main session commits.
 
 - Browser: **Helium** (`/Applications/Helium.app/Contents/MacOS/Helium`), not Chrome. Headless WebGL needs `--use-angle=swiftshader --enable-unsafe-swiftshader --ignore-gpu-blocklist`.
 - Python: `uv` with Python 3.12 (system Python 3.15 is too new for some wheels). The pipeline is a uv project in `pipeline/`.
+- **Training runs on kakapo only** (gsplat on its RTX 2060, CUDA; the `nook` NixOS service there). The Mac doesn't train. Evals that train (`scan_offline`, `scan_quality`) run training on kakapo over the shared ssh link (`~/.ssh/cm-nook-kakapo`, see `evals/remote.sh`) and check the results here. The server eval uses a stand-in trainer (`evals/fake_gsplat.py`).
 - Node: only used for evals (`playwright-core`, `ajv`). The planner has no build step.
 
 ## Evals

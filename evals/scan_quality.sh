@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real-capture quality eval (contract §4.9, Q1): train a real iPhone scan with --quality high and held-out frames,
+# Real-capture quality eval (contract §4.9, Q1): train a real iPhone scan on kakapo with --quality high and held-out frames,
 # judge held-out views with Spark. Baseline (v1 defaults, 2026-10-26): 20.76 dB. Pass: >= 22.3 dB in < 40 min.
 # Usage: bash evals/scan_quality.sh [capture.zip]   (default: $NOOK_REAL_CAPTURE or ~/Downloads/scan-20261026-093654.zip)
 # Skips (exit 0) when the capture is absent: it is the user's private scan and never committed.
@@ -12,11 +12,14 @@ BASELINE=20.76
 BAR=22.3   # contract §4.9 Q1 (baseline + 1.5, rounded as the contract states it)
 [ -f "$CAP" ] || { echo "SKIP no real capture at $CAP (set NOOK_REAL_CAPTURE)"; exit 0; }
 rm -rf "$OUT" && mkdir -p "$OUT"
+# Training runs on kakapo (gsplat needs its NVIDIA GPU); judging runs here. See evals/remote.sh.
+source evals/remote.sh
+remote_prepare || exit 1
 (cd "$OUT" && unzip -q "$CAP")
 DIR=$(find "$OUT" -maxdepth 2 -name transforms.json -exec dirname {} \; | head -n 1)
 
 start=$(date +%s)
-if ! uv run -q --project scan nook-scan train "$CAP" --name quality --room-dir "$OUT/room" --quality high --holdout-every 10 >"$OUT/train.out" 2>"$OUT/train.err"; then
+if ! scan train "$CAP" --name quality --room-dir "$OUT/room" --quality high --holdout-every 10 >"$OUT/train.out" 2>"$OUT/train.err"; then
   echo "FAIL train --quality high — $(tail -n 2 "$OUT/train.err" | tr '\n' ' ')"; exit 1
 fi
 secs=$(( $(date +%s) - start ))

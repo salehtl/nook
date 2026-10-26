@@ -16,7 +16,6 @@ let
   hardening = {
     User = "nook";
     Group = "nook";
-    # Brush/Burn writes its GPU autotune cache under ./target: keep it in the state dir.
     WorkingDirectory = dir;
     NoNewPrivileges = true;
     PrivateTmp = true;
@@ -62,11 +61,6 @@ in
       default = null;
       description = "Cap on splats per room (VRAM); null keeps nook-scan's own default.";
     };
-    vulkanIcd = lib.mkOption {
-      type = lib.types.str;
-      default = "/run/opengl-driver/share/vulkan/icd.d/nvidia_icd.json";
-      description = "Vulkan driver manifest the trainer uses (the NVIDIA one on NixOS).";
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -96,7 +90,6 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
       environment = {
-        VK_ICD_FILENAMES = cfg.vulkanIcd;
         HOME = dir;
         TMPDIR = "${dir}/tmp";
       };

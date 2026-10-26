@@ -2,7 +2,7 @@
 
 Uploads stream to disk and are validated with the same code as `nook-scan check`. One worker thread trains queued
 jobs in FIFO order, each as a `python -m nook_scan train ...` subprocess in its own process group, and follows its
-`step X/Y` lines. Cancel and shutdown stop the whole group (the trainer and Brush). Job state lives in jobs.json.
+`step X/Y` lines. Cancel and shutdown stop the whole group (nook-scan and gsplat). Job state lives in jobs.json.
 """
 
 import json
@@ -23,7 +23,7 @@ from importlib import metadata
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import ScanError, brush, capture, gpu
+from . import ScanError, capture, gpu, trainer
 
 MAX_BODY = 4 * 1024 ** 3
 CHUNK = 1 << 20
@@ -33,7 +33,7 @@ TERMINAL = ("done", "failed", "cancelled")
 RESTART_MSG = "server restarted during training: upload again"
 SAVE_EVERY_S = 5.0
 KILL_GRACE_S = 5.0
-# Progress bands: preparing and building the trainer take the first few percent, Brush's steps most of it,
+# Progress bands: preparing and building the trainer take the first few percent, the training steps most of it,
 # cropping and writing the room the rest.
 P_PREP, P_TRAIN_END, P_FINISH = 0.03, 0.95, 0.97
 STEP = re.compile(r"\bstep (\d+)/(\d+)")
@@ -73,7 +73,7 @@ class Server:
         self.proc: subprocess.Popen | None = None
         self.stopping = False
         self.last_save = 0.0
-        self.trainer = brush.trainer_name()
+        self.trainer = trainer.NAME
         self.gpu = gpu.info()["name"]
         self._load()
 
@@ -169,7 +169,7 @@ class Server:
 
     @staticmethod
     def _kill(proc: subprocess.Popen, wait: bool = False) -> None:
-        """SIGTERM the trainer's process group (the trainer and Brush), then SIGKILL whatever is left after a grace period."""
+        """SIGTERM the trainer's process group (nook-scan and gsplat), then SIGKILL whatever is left after a grace period."""
         def signal_group(sig):
             try:
                 os.killpg(proc.pid, sig)
@@ -181,7 +181,7 @@ class Server:
                 proc.wait(KILL_GRACE_S)
             except subprocess.TimeoutExpired:
                 pass
-            signal_group(signal.SIGKILL)  # Brush may outlive its parent; the group still names it
+            signal_group(signal.SIGKILL)  # gsplat may outlive its parent; the group still names it
 
         signal_group(signal.SIGTERM)
         if wait:
@@ -232,7 +232,7 @@ class Server:
                *self.train_args, "--progress-every", "2"]
         # PYTHONPATH: the child must import the same nook_scan as this process, even when a wrapper script (e.g. Nix's)
         # put it on sys.path without telling the environment.
-        env = dict(os.environ, PYTHONUNBUFFERED="1", NOOK_SCAN_TRAIN_LOG=str(self.logs / f"{jid}-brush.log"),
+        env = dict(os.environ, PYTHONUNBUFFERED="1", NOOK_SCAN_TRAIN_LOG=str(self.logs / f"{jid}-train.log"),
                    PYTHONPATH=os.pathsep.join(p for p in sys.path if p), TMPDIR=str(self.work))
         with self.lock:
             if job["status"] != "training" or self.stopping:

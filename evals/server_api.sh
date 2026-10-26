@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# nook-scan jobs server eval (contract §5, A1): real `nook-scan serve` with tiny training runs on the 40-frame fixture.
+# nook-scan jobs server eval (contract §5, A1): real `nook-scan serve` on the 40-frame fixture, with a stand-in trainer.
 # Usage: bash evals/server_api.sh [base-url]   (or npm run eval:server). With a base URL (e.g. the mock server, or
 # the web app proxying /api/scan), it tests that server instead of starting one; the restart test is then skipped.
 # Output lands in evals/out/server/.
@@ -25,8 +25,11 @@ echo "not a zip" >"$OUT/zips/bad.zip"
 
 SERVER_PID=""
 start_server() {
-  uv run -q --project scan nook-scan serve --port "$PORT" --data-dir "$OUT/data" --room-dir "$OUT/room" \
-    --quality draft --steps "${STEPS:-300}" >>"$OUT/server.log" 2>&1 &
+  # The server's own logic is under test here, so a stand-in trainer (evals/fake_gsplat.py, same CLI and output)
+  # replaces gsplat: no GPU needed, and job length is set by FAKE_GSPLAT_SECONDS.
+  NOOK_GSPLAT_BIN="$PWD/evals/fake_gsplat.py" FAKE_GSPLAT_SECONDS="${FAKE_SECONDS:-1.5}" \
+    uv run -q --project scan nook-scan serve --port "$PORT" --data-dir "$OUT/data" --room-dir "$OUT/room" \
+    --quality draft >>"$OUT/server.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 100); do curl -sf "$BASE/api/scan/health" >/dev/null && return 0; sleep 0.3; done
   return 1
@@ -92,7 +95,7 @@ wait_status "$J2" 'training' 120 >/dev/null
 code=$(curl -s -o "$OUT/cancel2.json" -w '%{http_code}' -X POST "$BASE/api/scan/jobs/$J2/cancel")
 check "cancel a training job" '[ "$code" = 200 ] && [ "$(job "$J2" | j "d[\"status\"]")" = cancelled ]' "$code"
 sleep 3
-check "no trainer left running after cancel" '! pgrep -f "bin/brush-v" >/dev/null'
+check "no trainer left running after cancel" '! pgrep -f "evals/fake_gsplat.py" >/dev/null'
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/scan/jobs/$J1/cancel")
 check "cancel a finished job is 409" '[ "$code" = 409 ]' "$code"
 
@@ -108,8 +111,8 @@ check "non-slug X-Nook-Name is 400" '[ "$code" = 400 ]' "$code"
 
 # --- restart: running job fails cleanly, finished job persists ------------------------------------
 if [ "$OWN" = 1 ]; then
-  # A long job, so it is certainly still training when the server stops (300 steps can finish in ~1 s).
-  stop_server; STEPS=20000 start_server || bad "server restarts with a long job"
+  # A long job, so it is certainly still training when the server stops.
+  stop_server; FAKE_SECONDS=60 start_server || bad "server restarts with a long job"
   upload c5.zip up5 >/dev/null; J5=$(j 'd["id"]' <"$OUT/up5.json")
   wait_status "$J5" 'training' 120 >/dev/null; sleep 3
   stop_server; sleep 2

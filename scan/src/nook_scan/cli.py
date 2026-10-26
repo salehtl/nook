@@ -16,22 +16,20 @@ from pathlib import Path
 import numpy as np
 
 from . import REPO, ScanError, say
-from . import brush, capture, dataset, gpu, photometric, post, room
+from . import capture, dataset, gpu, photometric, post, room, trainer
 from .ply import write_splats
 from .spz import write_spz
 
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
-# Quality presets (contract §4.9). `draft` is the v1 behavior. `high` was tuned on the first real scan
-# (scan-20261026-093654: 517 frames, 1920x1440, auto exposure; M3 Max), judged by Spark on held-out frames exactly as
-# evals/scan_quality.sh does. Held-out PSNR: v1 (draft) 20.76 dB; 20k steps at full resolution 21.29; the same with
-# the crop keeping what the windows show 21.71; SH degree 3 with its learning rate at 1/5 of the base color's
-# instead of Brush's 1/20, plus window seeds 10 m out: 22.25 (34 min); the same with 1/8 and 19k steps: 22.38 (31 min).
-# Faster SH lets view-dependent color absorb the auto-exposure drift instead of semi-transparent layers, which Spark
-# sorts and quantizes differently from Brush; 1/1 overfits (17.9 dB at draft size).
+# Quality presets (contract §4.9), for gsplat on kakapo's RTX 2060. Tuned on the first real scan
+# (scan-20261026-093654: 517 frames, 1920x1440, auto exposure) and judged by Spark on held-out frames as
+# evals/scan_quality.sh does: high = 20k steps, full resolution, SH degree 3, window seeds 10 m out: 21.85 dB in
+# 16.4 min, 2.5 GB VRAM (Brush with its own tuning: 22.03 dB in 33.5 min, 3.8 GB). Exposure-locked captures (app 0.2)
+# remove most of the error that is left.
 PRESETS = {
-    "draft": {"steps": 10000, "max_image_size": 1280, "sh_degree": 1, "far_seeds": 0.0, "brush": []},
-    "high": {"steps": 19000, "max_image_size": 1920, "sh_degree": 3, "far_seeds": 10.0, "brush": ["--lr-coeffs-sh-scale", "8"]},
+    "draft": {"steps": 10000, "max_image_size": 1280, "sh_degree": 1, "far_seeds": 0.0},
+    "high": {"steps": 20000, "max_image_size": 1920, "sh_degree": 3, "far_seeds": 10.0},
 }
 
 
@@ -46,17 +44,17 @@ def build_parser() -> Parser:
     sub = p.add_subparsers(dest="cmd", required=True, parser_class=Parser)
     c = sub.add_parser("check", help="validate a capture (folder or .zip) against contract §4.5")
     c.add_argument("capture")
-    t = sub.add_parser("train", help="train a capture with Brush and write <room-dir>/<name>.ply and room.json")
+    t = sub.add_parser("train", help="train a capture with gsplat (kakapo's NVIDIA GPU) and write <room-dir>/<name>.spz/.ply and room.json")
     t.add_argument("capture", help="capture .zip (as AirDropped from the app) or its unzipped folder")
     t.add_argument("--name", default="scan", help="output name: <room-dir>/<name>.ply (default: scan)")
     t.add_argument("--room-dir", default=str(REPO / "room"), help="where room.json lives (default: the repo's room/)")
     t.add_argument("--quality", choices=sorted(PRESETS), default="high",
-                   help="draft: 10k steps at 1280 px (the v1 default, minutes); high: tuned for a sharp room (default, ~30 min on an M3 Max)")
+                   help="draft: 10k steps at 1280 px (minutes); high: tuned for a sharp room (default, ~16 min on kakapo's RTX 2060)")
     t.add_argument("--steps", type=int, help="training steps (default: from --quality)")
     t.add_argument("--holdout-every", type=int, default=0, help="leave out frames with index %% N == 0 from training (default: 0, use all)")
     t.add_argument("--max-image-size", type=int, help="downscale images to this long side before training (default: from --quality)")
-    t.add_argument("--max-splats", type=int, help=f"cap on the number of splats (default: {gpu.MAX_SPLATS_LARGE:,} on Apple silicon or a big GPU, "
-                                                  f"{gpu.MAX_SPLATS_SMALL:,} on a GPU with less than {gpu.SMALL_VRAM_GB} GB)")
+    t.add_argument("--max-splats", type=int, help=f"cap on the number of splats (default: {gpu.MAX_SPLATS_LARGE:,} on a GPU with "
+                                                  f"{gpu.SMALL_VRAM_GB} GB or more, {gpu.MAX_SPLATS_SMALL:,} below)")
     t.add_argument("--sh-degree", type=int, choices=range(4), metavar="{0-3}", help="spherical-harmonics degree of the splat (default: from --quality; 3 is ~2.5x bigger)")
     t.add_argument("--far-seeds", type=float, metavar="M",
                    help="seed what the windows show this many meters out, where LiDAR saw nothing (0 = off; default: from --quality)")
@@ -64,7 +62,6 @@ def build_parser() -> Parser:
                    help="even out exposure and white balance between frames before training (captures without exposure lock). "
                         "Off by default: the room looks more even, but held-out photos keep their own exposure, so it scores lower")
     # Tuning and server plumbing, not for everyday use.
-    t.add_argument("--brush-arg", action="append", default=[], help=argparse.SUPPRESS)
     t.add_argument("--keep-raw", help=argparse.SUPPRESS)
     t.add_argument("--progress-every", type=float, default=20.0, help=argparse.SUPPRESS)
     s = sub.add_parser("serve", help="run the jobs server (contract §5): upload captures, train them one at a time")
@@ -96,22 +93,6 @@ def cmd_check(args) -> int:
     return 0
 
 
-def merge_flags(base: list[str], extra: list[str]) -> list[str]:
-    """Brush options as `--flag value` pairs; a flag in `extra` replaces the same flag in `base` (Brush rejects repeats)."""
-    def pairs(args):
-        out, i = {}, 0
-        while i < len(args):
-            if i + 1 < len(args) and not args[i + 1].startswith("--"):
-                out[args[i]] = [args[i], args[i + 1]]
-                i += 2
-            else:
-                out[args[i]] = [args[i]]
-                i += 1
-        return out
-    merged = pairs(base) | pairs(extra)
-    return [a for pair in merged.values() for a in pair]
-
-
 def resolve(args) -> dict:
     """The effective training settings: the preset, overridden by explicit flags."""
     pre = PRESETS[args.quality]
@@ -121,7 +102,6 @@ def resolve(args) -> dict:
         "max_splats": args.max_splats if args.max_splats is not None else gpu.default_max_splats(),
         "sh_degree": args.sh_degree if args.sh_degree is not None else pre["sh_degree"],
         "far_seeds": args.far_seeds if args.far_seeds is not None else pre["far_seeds"],
-        "brush": merge_flags(pre["brush"], [a for arg in args.brush_arg for a in arg.split()]),
     }
     if cfg["steps"] < 100:
         raise ScanError(f"--steps {cfg['steps']} is too few: use at least 100 (--quality draft uses {PRESETS['draft']['steps']})")
@@ -173,7 +153,7 @@ def cmd_train(args) -> int:
         prep = dataset.prepare(cap, work, args.holdout_every, cfg["max_image_size"], seeds=seeds, gains=gains)
         say(f"dataset: {prep.n_train} training frames, {prep.n_eval} held out, {len(prep.seeds)} seed points ({prep.seed_source})")
         if not len(prep.seeds):
-            say("warning: no seed points or depth in this capture, Brush starts from random splats (expect a blurrier room)")
+            say("warning: no seed points or depth in this capture, the trainer starts from random splats (expect a blurrier room)")
         cams = cap.poses()[:, :3, 3]
         floor_y, floor_source = cap.meta.get("floor_y"), "ARKit floor plane in meta.json"
         if floor_y is None:
@@ -183,11 +163,8 @@ def cmd_train(args) -> int:
                             "scan again with the floor in view")
         say(f"floor at y = {floor_y:.3f} m ({floor_source})")
 
-        if not brush.override() and not brush.BIN.is_file():
-            say("building trainer: Brush is built once, on first use")
-        binary = brush.ensure()
-        result = brush.train(binary, prep.data_dir, work / "out", cfg["steps"], prep.long_side, cfg["sh_degree"],
-                             cfg["max_splats"], cfg["brush"], args.progress_every)
+        result = trainer.train(prep.data_dir, work / "out", cfg["steps"], prep.long_side, cfg["sh_degree"],
+                               cfg["max_splats"], args.progress_every)
         if args.keep_raw:
             shutil.copyfile(result["ply"], Path(args.keep_raw).expanduser())
         say("finishing: cropping floaters and writing the room")
@@ -234,7 +211,7 @@ def cmd_train(args) -> int:
     summary = {
         "name": args.name, "ply": str(ply_path), "spz": str(spz_path), "room_json": str(room_json), "splats": int(len(splats)),
         "floor_y": round(float(floor_y), 4), "steps": cfg["steps"], "seconds": round(time.time() - started, 1),
-        "trainer": brush.trainer_name(binary), "psnr": result["psnr"], "floor_source": floor_source,
+        "trainer": trainer.NAME, "psnr": result["psnr"], "floor_source": floor_source,
         "frames": {"train": prep.n_train, "held_out": prep.n_eval}, "seeds": prep.seed_source,
         "quality": args.quality, "max_image_size": prep.long_side, "max_splats": cfg["max_splats"],
         "photometric": gains is not None, "sh_degree": cfg["sh_degree"], "viewpoints": len(views),

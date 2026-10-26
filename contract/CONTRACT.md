@@ -317,7 +317,7 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 
 ### 4.7 Acceptance: nook-scan
 
-- S1. `bash evals/scan_offline.sh` passes. On the synthetic ground-truth capture (`fixtures/make_capture.mjs`), it trains in under 15 minutes on the M3 Max with default steps. The PLY renders at **mean PSNR ≥ 26 dB on held-out frames, and at least 4 dB above the untrained seed-point baseline** (`evals/seed_splat.py`, which scores about 21 dB on the fixture). Both are judged by `evals/psnr_judge.mjs`, which renders with Spark, the floor lands at 0 ± 5 cm, and room.json validates.
+- S1. `bash evals/scan_offline.sh` passes. On the synthetic ground-truth capture (`fixtures/make_capture.mjs`), it trains in under 15 minutes on kakapo's RTX 2060 with default steps (the eval trains there over ssh and checks here; see evals/remote.sh). The PLY renders at **mean PSNR ≥ 26 dB on held-out frames, and at least 4 dB above the untrained seed-point baseline** (`evals/seed_splat.py`, which scores about 21 dB on the fixture). Both are judged by `evals/psnr_judge.mjs`, which renders with Spark, the floor lands at 0 ± 5 cm, and room.json validates.
 - S2. Bad captures fail cleanly: missing files, a NaN pose, too few frames, a static camera, or a zip with no top-level folder.
 - I1. `bash evals/ios_build.sh` passes:
   - XcodeGen generates the project.
@@ -352,10 +352,10 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
   - `high` uses more steps and full resolution, with values set in `scan/` and tuned on a real capture (eval Q1).
   - Explicit `--steps`, `--max-image-size` and `--max-splats` override the preset.
 - `room.json` gains **`viewpoints`** (room.schema.json): up to 24 real camera poses from the capture, chosen spread out along the walking path and at least 1.0 m above the floor. They're in **room coordinates**, with the room transform already applied: `{ "position": [x,y,z], "quaternion": [x,y,z,w], "fov_y_deg": n }`. The camera looks along its local −Z, as in three.js.
-- Works on macOS (Metal) and on Linux with an NVIDIA GPU (Vulkan). On Linux the Vulkan driver is found through `VK_ICD_FILENAMES`, or `/run/opengl-driver/share/vulkan/icd.d` on NixOS.
+- Trains on **kakapo only** (Linux x86_64, NVIDIA, CUDA) with **gsplat**, through the `nook-gsplat` executable (`gsplat/nook_gsplat.py`, packaged in `nix/nook-gsplat.nix`; `NOOK_GSPLAT_BIN` overrides it). Brush, the earlier Metal/Vulkan trainer, was retired on 2026-10-26: gsplat gave the same held-out quality on the real scan in half the time (16 vs 33 min) and two thirds of the VRAM. The Mac no longer trains.
 
 **Acceptance**
-- **Q1.** `bash evals/scan_quality.sh` passes when the real capture is present (it's skipped, not failed, when absent). It trains `--quality high` with `--holdout-every 10`, and the Spark-judged held-out mean must be **≥ 22.3 dB**, which is the 20.8 dB baseline + 1.5. It must finish in under 40 minutes on the M3 Max.
+- **Q1.** `bash evals/scan_quality.sh` passes when the real capture is present (it's skipped, not failed, when absent). It trains `--quality high` with `--holdout-every 10`, and the Spark-judged held-out mean must be **≥ 22.3 dB**, which is the 20.8 dB baseline + 1.5. It must finish in under 40 minutes on kakapo.
 
 ---
 

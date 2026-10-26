@@ -1,5 +1,7 @@
 # nook-scan: build plan
 
+> **Superseded 2026-10-26:** scans now go from the app straight to kakapo ("Send to kakapo") and train there with gsplat. Brush, the Mac trainer and the AirDrop step are retired. See [nook-scan-v2.md](nook-scan-v2.md).
+
 A free replacement for Polycam/Scaniverse, built for this project: an **iPhone capture app** (shipped via TestFlight) plus a **Mac trainer** that turns a capture into the room splat the planner uses.
 
 ```
