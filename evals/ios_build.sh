@@ -25,12 +25,24 @@ PROJ=$(ls -d ios/*.xcodeproj 2>/dev/null | head -n 1)
 UDID=$(xcrun simctl list devices available -j | node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8')).devices; const all=Object.values(d).flat(); const m=all.find(x=>x.name===process.argv[1]); console.log(m?m.udid:'')" "$SIM")
 [ -n "$UDID" ] || { echo "FAIL no available simulator named '$SIM' (set NOOK_SIM)"; exit 1; }
 marker="$OUT/.test-start"; : >"$marker"
-if xcodebuild test -project "$PROJ" -scheme NookScan -destination "id=$UDID" -derivedDataPath "$DD" >"$OUT/test.log" 2>&1; then
+# Processing server for ServerClientTests (contract §5): the mock by default, or a real one via NOOK_SERVER_URL.
+# The simulator shares the Mac's network, so 127.0.0.1 here is reachable from the tests.
+if [ -z "${NOOK_SERVER_URL:-}" ]; then
+  python3 evals/mock_scan_server.py --port 8798 --seconds 4 >"$OUT/mock.log" 2>&1 &
+  MOCK_PID=$!; trap 'kill $MOCK_PID 2>/dev/null' EXIT
+  NOOK_SERVER_URL=http://127.0.0.1:8798
+  for _ in $(seq 1 30); do curl -sf "$NOOK_SERVER_URL/api/scan/health" >/dev/null && break; sleep 0.2; done
+fi
+if TEST_RUNNER_NOOK_SERVER_URL="$NOOK_SERVER_URL" xcodebuild test -project "$PROJ" -scheme NookScan -destination "id=$UDID" -derivedDataPath "$DD" >"$OUT/test.log" 2>&1; then
   ok "unit tests pass on $SIM ($(grep -Eo 'Executed [0-9]+ tests?' "$OUT/test.log" | tail -n 1))"
 else
   bad "unit tests pass on $SIM — $(grep -E 'error:|failed|FAILED' "$OUT/test.log" | head -n 5 | tr '\n' ' ' | cut -c1-600)"
 fi
 check "ReplayCaptureTests.testReplayWritesValidCapture ran" 'grep -q "testReplayWritesValidCapture.*passed" "$OUT/test.log"'
+# v0.2 (contract §4.8, §5): these must exist and pass.
+check "ExposureLockTests ran and passed" 'grep -E "ExposureLock" "$OUT/test.log" | grep -q passed && ! grep -E "ExposureLock" "$OUT/test.log" | grep -q failed'
+check "JobDecodingTests ran and passed" 'grep -E "JobDecoding" "$OUT/test.log" | grep -q passed && ! grep -E "JobDecoding" "$OUT/test.log" | grep -q failed'
+check "ServerClientTests.testUploadAndPollAgainstServer passed against $NOOK_SERVER_URL" 'grep -q "testUploadAndPollAgainstServer.*passed" "$OUT/test.log"'
 
 # The capture the replay test wrote, found in the simulator's data container.
 CAP=$(find "$HOME/Library/Developer/CoreSimulator/Devices/$UDID/data" -path '*nook-eval-capture/transforms.json' -newer "$marker" 2>/dev/null | head -n 1)

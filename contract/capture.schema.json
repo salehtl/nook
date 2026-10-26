@@ -3,40 +3,126 @@
   "$id": "nook/capture.schema.json",
   "title": "nook-scan capture (transforms.json + meta.json)",
   "type": "object",
-  "required": ["transforms", "meta"],
+  "required": [
+    "transforms",
+    "meta"
+  ],
   "properties": {
     "transforms": {
       "type": "object",
-      "required": ["camera_model", "fl_x", "fl_y", "cx", "cy", "w", "h", "frames"],
+      "required": [
+        "camera_model",
+        "fl_x",
+        "fl_y",
+        "cx",
+        "cy",
+        "w",
+        "h",
+        "frames"
+      ],
       "properties": {
-        "camera_model": { "const": "OPENCV" },
-        "fl_x": { "type": "number", "exclusiveMinimum": 0 },
-        "fl_y": { "type": "number", "exclusiveMinimum": 0 },
-        "cx": { "type": "number", "exclusiveMinimum": 0 },
-        "cy": { "type": "number", "exclusiveMinimum": 0 },
-        "w": { "type": "integer", "minimum": 16 },
-        "h": { "type": "integer", "minimum": 16 },
-        "ply_file_path": { "type": "string" },
+        "camera_model": {
+          "const": "OPENCV"
+        },
+        "fl_x": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "fl_y": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "cx": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "cy": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "w": {
+          "type": "integer",
+          "minimum": 16
+        },
+        "h": {
+          "type": "integer",
+          "minimum": 16
+        },
+        "ply_file_path": {
+          "type": "string"
+        },
         "frames": {
           "type": "array",
           "minItems": 30,
           "items": {
             "type": "object",
-            "required": ["file_path", "transform_matrix"],
+            "required": [
+              "file_path",
+              "transform_matrix"
+            ],
             "properties": {
-              "file_path": { "type": "string", "pattern": "^images/[^/]+\\.(jpg|jpeg)$" },
-              "depth_file_path": { "type": "string", "pattern": "^depth/[^/]+\\.png$" },
-              "transform_matrix": {
-                "type": "array", "minItems": 4, "maxItems": 4,
-                "items": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number" } }
+              "file_path": {
+                "type": "string",
+                "pattern": "^images/[^/]+\\.(jpg|jpeg)$"
               },
-              "timestamp": { "type": "number" },
-              "fl_x": { "type": "number", "exclusiveMinimum": 0 },
-              "fl_y": { "type": "number", "exclusiveMinimum": 0 },
-              "cx": { "type": "number", "exclusiveMinimum": 0 },
-              "cy": { "type": "number", "exclusiveMinimum": 0 },
-              "w": { "type": "integer", "minimum": 16 },
-              "h": { "type": "integer", "minimum": 16 }
+              "depth_file_path": {
+                "type": "string",
+                "pattern": "^depth/[^/]+\\.png$"
+              },
+              "transform_matrix": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": {
+                  "type": "array",
+                  "minItems": 4,
+                  "maxItems": 4,
+                  "items": {
+                    "type": "number"
+                  }
+                }
+              },
+              "timestamp": {
+                "type": "number"
+              },
+              "fl_x": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "fl_y": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "cx": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "cy": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "w": {
+                "type": "integer",
+                "minimum": 16
+              },
+              "h": {
+                "type": "integer",
+                "minimum": 16
+              },
+              "exposure_duration": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "exposure_offset": {
+                "type": "number"
+              },
+              "pass": {
+                "enum": [
+                  1,
+                  2,
+                  3
+                ]
+              }
             }
           }
         }
@@ -44,17 +130,73 @@
     },
     "meta": {
       "type": "object",
-      "required": ["version", "app", "app_version", "lidar", "world", "created", "frame_count"],
+      "required": [
+        "version",
+        "app",
+        "app_version",
+        "lidar",
+        "world",
+        "created",
+        "frame_count"
+      ],
       "properties": {
-        "version": { "const": 1 },
-        "app": { "const": "nook-scan" },
-        "app_version": { "type": "string" },
-        "device": { "type": "string" },
-        "lidar": { "type": "boolean" },
-        "world": { "const": "arkit-gravity-y-up-meters" },
-        "created": { "type": "string" },
-        "frame_count": { "type": "integer", "minimum": 30 },
-        "floor_y": { "type": ["number", "null"] }
+        "version": {
+          "const": 1
+        },
+        "app": {
+          "const": "nook-scan"
+        },
+        "app_version": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "lidar": {
+          "type": "boolean"
+        },
+        "world": {
+          "const": "arkit-gravity-y-up-meters"
+        },
+        "created": {
+          "type": "string"
+        },
+        "frame_count": {
+          "type": "integer",
+          "minimum": 30
+        },
+        "floor_y": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "exposure_locked": {
+          "type": "boolean"
+        },
+        "white_balance_locked": {
+          "type": "boolean"
+        },
+        "lock_iso": {
+          "type": "number"
+        },
+        "lock_exposure_duration": {
+          "type": "number"
+        },
+        "lock_white_balance_gains": {
+          "type": "object",
+          "properties": {
+            "r": {
+              "type": "number"
+            },
+            "g": {
+              "type": "number"
+            },
+            "b": {
+              "type": "number"
+            }
+          }
+        }
       }
     }
   }

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "splat": "room/reading-room.ply",
+  "transform": {
+    "position": [
+      0,
+      0.9052,
+      0
+    ],
+    "quaternion": [
+      0,
+      0,
+      0,
+      1
+    ],
+    "scale": 1
+  }
+}

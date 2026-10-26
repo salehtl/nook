@@ -126,6 +126,46 @@
           "maximum": 1
         }
       }
+    },
+    "viewpoints": {
+      "description": "Real camera poses from the scan, in room coordinates (contract \u00a74.9).",
+      "type": [
+        "array",
+        "null"
+      ],
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": [
+          "position",
+          "quaternion",
+          "fov_y_deg"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "position": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "quaternion": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "fov_y_deg": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "exclusiveMaximum": 180
+          }
+        }
+      }
     }
   }
 }

@@ -9,6 +9,9 @@ Written before the planner and pipeline existed, against [contract/CONTRACT.md](
 | `evals/py evals/validate_library.py <library.json>` | The §1 normalized-asset rules and `library.schema.json`, for any library (fixtures, eval output, or your real `library/`). | $0 |
 | `npm run eval:scan` | `evals/scan_offline.sh`: nook-scan trainer (contract §4.6–4.7). It trains on the synthetic ground-truth capture (`fixtures/make_capture.mjs` → `evals/out/capture-gt`), judges held-out frames with `psnr_judge.mjs` against the untrained `seed_splat.py` baseline (about 21 dB), and checks room.json and bad captures. | $0 |
 | `npm run eval:ios` | `evals/ios_build.sh`: nook-scan iOS app. XcodeGen, unit tests on the simulator, the replay capture validated, an unsigned device build, release settings. | $0 |
+| `npm run eval:server` | `evals/server_api.sh [base-url]`: the nook-scan jobs server (contract §5). It covers upload, idempotency, the one-at-a-time queue, cancel, bad input, restart recovery, and room.json with viewpoints. Given a base URL, it tests that server instead; the mock passes 17/17 by construction. | $0 |
+| `npm run eval:quality` | `evals/scan_quality.sh [capture.zip]`: real-scan quality (§4.9 Q1). It needs at least 22.3 dB on held-out views, and skips when no real capture is present. | $0, ~30 min |
+| `python3 evals/mock_scan_server.py` | The reference mock of §5, used by the iOS eval (`ServerClientTests`). | $0 |
 | `evals/py evals/validate_capture.py <dir\|zip>` | Capture format rules (contract §4.5). | $0 |
 | `node evals/psnr_judge.mjs <splat.ply> <capture>` | Renders a splat with Spark at held-out capture poses; prints PSNR. | $0 |
 | `evals/py evals/glb_info.py <model.glb>` | Helper: image and material counts, bounds, vertex centroid. | $0 |

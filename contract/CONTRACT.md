@@ -46,6 +46,7 @@ python3 planner/serve.py [--port 8765] [--room-file room/room.json] [--layouts-d
 - `GET /api/layouts` returns `{"layouts": ["name", ...]}`, sorted.
 - `GET /api/layouts/<name>` returns the layout, or `404 {"error": ...}`.
 - `PUT /api/layouts/<name>` writes the layout. Responds `400` if `<name>` isn't a slug.
+- `--scan-api URL` (optional, v2): reverse-proxy `/api/scan/*` to the nook-scan jobs server at `URL` (§5), streaming request and response bodies, so one origin serves both the web app and the jobs API.
 - All `/api` responses are JSON. Static files are served with correct MIME types (`.js` as `text/javascript`, `.wasm`, `.glb`, `.spz`, `.ply`). Cache headers are off so reloads pick up edits.
 
 ### 2.2 URL parameters
@@ -330,3 +331,80 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
   - `NSCameraUsageDescription`, `ITSAppUsesNonExemptEncryption = NO`, `UIRequiredDeviceCapabilities` containing `arkit`
   - a 1024 px app icon
   - deployment target iOS 18.0
+
+### 4.8 Capture v1.1 additions (all optional, v1 captures stay valid)
+
+- `meta.json`:
+  - `"exposure_locked": bool` and `"white_balance_locked": bool`: whether the app locked them for the whole capture. The app locks both once tracking has been `normal` for about 1 s. Keyframes are only kept after the locks are in place.
+  - `"lock_iso"`, `"lock_exposure_duration"` (s), and `"lock_white_balance_gains": {"r","g","b"}`: the locked values, for reference.
+- Each frame may carry `"exposure_duration"` (s) and `"exposure_offset"` (EV) from `ARCamera`.
+- **Guided passes:** each frame may carry `"pass": 1 | 2 | 3`:
+  1. loop at chest height
+  2. lower loop, phone tilted down
+  3. walk through the middle
+
+  The trainer ignores the pass number. It's only for diagnostics.
+
+### 4.9 Trainer v2
+
+- `--quality draft|high` (default `high`):
+  - `draft` is the v1 behavior: 10k steps at `--max-image-size 1280`.
+  - `high` uses more steps and full resolution, with values set in `scan/` and tuned on a real capture (eval Q1).
+  - Explicit `--steps`, `--max-image-size` and `--max-splats` override the preset.
+- `room.json` gains **`viewpoints`** (room.schema.json): up to 24 real camera poses from the capture, chosen spread out along the walking path and at least 1.0 m above the floor. They're in **room coordinates**, with the room transform already applied: `{ "position": [x,y,z], "quaternion": [x,y,z,w], "fov_y_deg": n }`. The camera looks along its local −Z, as in three.js.
+- Works on macOS (Metal) and on Linux with an NVIDIA GPU (Vulkan). On Linux the Vulkan driver is found through `VK_ICD_FILENAMES`, or `/run/opengl-driver/share/vulkan/icd.d` on NixOS.
+
+**Acceptance**
+- **Q1.** `bash evals/scan_quality.sh` passes when the real capture is present (it's skipped, not failed, when absent). It trains `--quality high` with `--holdout-every 10`, and the Spark-judged held-out mean must be **≥ 22.3 dB**, which is the 20.8 dB baseline + 1.5. It must finish in under 40 minutes on the M3 Max.
+
+---
+
+## 5. Processing server API (`nook-scan serve`)
+
+A job server that trains captures on the machine it runs on: kakapo in production, the Mac in evals. **Python stdlib only.** It listens on `127.0.0.1`, and remote access comes only through `tailscale serve`.
+
+```
+uv run --project scan nook-scan serve [--host 127.0.0.1] [--port 8095] [--data-dir DIR] [--room-dir DIR] [--steps N] [--quality draft|high] [--max-splats N]
+```
+
+- `--data-dir` (default `~/.nook-scan`): uploads, job state (`jobs.json`), logs.
+- `--room-dir`: where trained rooms go (`<room-dir>/<name>.ply`, plus `room.json` updated as in §4.6). It's the folder the web app serves as `/room/`.
+- `--steps`, `--quality` and `--max-splats` are passed to every training run (evals use tiny step counts).
+
+All endpoints are under `/api/scan`, and everything is JSON except the upload body. Errors return `{"error": "<one actionable sentence>"}` with a 4xx/5xx status.
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /api/scan/health` | | `200 {"ok": true, "version": "<nook-scan version>", "trainer": "<name version>", "gpu": "<name or null>", "busy": bool, "queued": n}` |
+| `POST /api/scan/captures` | Body: the capture `.zip` as produced by the app (contract §4.1), `Content-Type: application/zip`, `Content-Length` required. Optional header `X-Nook-Name: <slug>` for the room name (default: derived from the capture folder). | `202 {job}` for a new job. If a job for the same capture folder name already exists and isn't `failed` or `cancelled`, it's **idempotent**: `200 {job}` with that existing job. Errors: `400` for an invalid zip or capture (the message comes from `nook-scan check`), `411` with no length, `413` over 4 GB. The upload is fully on disk and validated before the response. |
+| `GET /api/scan/jobs` | | `200 {"jobs": [job, ...]}`, newest first |
+| `GET /api/scan/jobs/<id>` | | `200 {job}` or `404` |
+| `POST /api/scan/jobs/<id>/cancel` | | `200 {job}` (status becomes `cancelled`, and a running trainer is stopped), or `409` if already finished |
+
+The job object:
+
+```json
+{
+  "id": "j-20261026-101500-ab12",
+  "capture": "scan-20261026-093654",
+  "name": "scan-20261026-093654",
+  "status": "queued | training | done | failed | cancelled",
+  "stage": "waiting | preparing | building trainer | training | finishing | done",
+  "progress": 0.0,
+  "step": 0, "total_steps": 30000,
+  "eta_s": null,
+  "created": "<ISO-8601 UTC>", "started": null, "finished": null,
+  "message": "human-readable status line",
+  "result": null
+}
+```
+
+When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/planner/"` and `"ply_url": "/room/<name>.ply"`. These are site paths on the same origin the app talked to.
+
+- **One job at a time** (one GPU). The queue is FIFO.
+- **Restarts:** job state persists in `jobs.json`. On restart, a job that was running becomes `failed` with the message "server restarted during training: upload again", and queued jobs stay queued.
+- `progress` is between 0 and 1 and only goes up for a running job. The server updates it from the trainer's `step X/Y` lines at least every 5 s.
+
+**Acceptance**
+- **A1.** `bash evals/server_api.sh` passes.
+- **A2.** `evals/mock_scan_server.py` and the real server answer the same requests with the same shapes. The iOS integration test passes against both.

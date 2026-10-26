@@ -9,7 +9,9 @@
     "cf:publish": "node deploy/publish.mjs",
     "cf:pull": "node deploy/pull.mjs",
     "eval:scan": "bash evals/scan_offline.sh",
-    "eval:ios": "bash evals/ios_build.sh"
+    "eval:ios": "bash evals/ios_build.sh",
+    "eval:server": "bash evals/server_api.sh",
+    "eval:quality": "bash evals/scan_quality.sh"
   },
   "devDependencies": {
     "ajv": "^8.20.0",
