@@ -70,6 +70,12 @@ struct SendToServerView: View {
                 Text("\(Int((fraction * 100).rounded(.down)))% of \(ByteCountFormatter.string(fromByteCount: entry.sizeBytes, countStyle: .file)) · keeps going in the background")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                if processing.stalledUploads.contains(entry.id) {
+                    Label("No progress for a while: is Tailscale on and \(host) up? It resumes on its own once the server answers.",
+                          systemImage: "wifi.exclamationmark")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
             }
         case .processing(let job, let warning):
             JobProgress(job: job)

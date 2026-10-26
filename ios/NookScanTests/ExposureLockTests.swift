@@ -76,7 +76,8 @@ struct ExposureLockTests {
     }
 
     /// The whole path: recorder → policy → writer. Frames 0.1 s and 10 cm apart; tracking is limited for the first
-    /// half second, so the lock lands at t = 1.5 s and the first keyframe is that frame.
+    /// half second, so the lock lands at t = 1.5 s. Frames still in the camera pipeline then pass for
+    /// CaptureRecorder.lockSettle (0.3 s), so the first keyframe is the one at t = 1.8 s.
     @Test func recorderKeepsNoKeyframesBeforeTheLock() throws {
         let out = FileManager.default.temporaryDirectory.appendingPathComponent("lock-test-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: out) }
@@ -95,13 +96,13 @@ struct ExposureLockTests {
             decisions.append(recorder.handle(frame))
             Thread.sleep(forTimeInterval: 0.003)   // let the writer keep up, so no frame is dropped as busy
         }
-        #expect(decisions[..<15].allSatisfy { $0 == .waitingForLock })
-        #expect(decisions[15...].allSatisfy { $0 == .keep })
+        #expect(decisions[..<18].allSatisfy { $0 == .waitingForLock })
+        #expect(decisions[18...].allSatisfy { $0 == .keep })
         #expect(lockCalls == 1)
         #expect(recorder.lockState == .locked(lock))
 
         let summary = try recorder.finish(floorY: nil)
-        #expect(summary.frameCount == 25)
+        #expect(summary.frameCount == 22)
 
         let meta = try json(out.appendingPathComponent("meta.json"))
         #expect(meta["exposure_locked"] as? Bool == true)
@@ -112,10 +113,10 @@ struct ExposureLockTests {
         #expect(gains == ["r": 2.1, "g": 1, "b": 1.7])
 
         let frames = try #require(try json(out.appendingPathComponent("transforms.json"))["frames"] as? [[String: Any]])
-        #expect(frames.count == 25)
+        #expect(frames.count == 22)
         #expect(frames.allSatisfy { abs(($0["exposure_duration"] as? Double ?? 0) - 1.0 / 60) < 1e-6 })
         #expect(frames.allSatisfy { $0["exposure_offset"] as? Double == -0.5 })
-        #expect(frames.prefix(15).allSatisfy { $0["pass"] as? Int == 1 })
+        #expect(frames.prefix(12).allSatisfy { $0["pass"] as? Int == 1 })
         #expect(frames.suffix(10).allSatisfy { $0["pass"] as? Int == 2 })
         #expect(frames.first?["timestamp"] as? Double == 0, "time starts at the first kept keyframe")
     }

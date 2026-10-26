@@ -82,6 +82,13 @@ final class ProcessingStore {
     @ObservationIgnored private let recordsURL: URL
     @ObservationIgnored private let uploader: Uploader
     @ObservationIgnored private var polls: [String: Task<Void, Never>] = [:]
+    /// Uploads that made no progress for `stallAfter` seconds (server down, Tailscale off). They resume on their own.
+    private(set) var stalledUploads: Set<String> = []
+    static let stallAfter: TimeInterval = 90   // generous: the server validates a big capture before it answers
+    /// The latest send per capture: a check or zip from a cancelled send must not carry on after a new one starts.
+    @ObservationIgnored private var sendTokens: [String: UUID] = [:]
+    @ObservationIgnored private var lastProgress: [String: Date] = [:]
+    @ObservationIgnored private var watchdogs: [String: Task<Void, Never>] = [:]
 
     init(directory: URL = ProcessingStore.defaultDirectory, uploaderIdentifier: String = Uploader.appSessionIdentifier) {
         recordsURL = directory.appendingPathComponent("server-jobs.json")
@@ -124,21 +131,24 @@ final class ProcessingStore {
         let capture = folder.lastPathComponent
         guard phase(for: capture).canSend else { return }
         let client = ServerClient(base: server)
+        let token = UUID()
+        sendTokens[capture] = token
         phases[capture] = .preparing("Checking \(client.host)…")
         Task {
             // A background upload to an unreachable host waits instead of failing, so fail fast here instead.
             do { _ = try await client.health() } catch {
-                phases[capture] = .failed(error.localizedDescription)
+                if sendTokens[capture] == token { phases[capture] = .failed(error.localizedDescription) }
                 return
             }
-            guard case .preparing = phase(for: capture) else { return }
+            guard sendTokens[capture] == token, case .preparing = phase(for: capture) else { return }
             phases[capture] = .preparing("Zipping…")
             do { try await Self.zip(folder, into: uploader.zipFolder) } catch {
-                phases[capture] = .failed("Couldn't zip \(capture): \(error.localizedDescription)")
+                if sendTokens[capture] == token { phases[capture] = .failed("Couldn't zip \(capture): \(error.localizedDescription)") }
                 return
             }
-            guard case .preparing = phase(for: capture) else { return }
+            guard sendTokens[capture] == token, case .preparing = phase(for: capture) else { return }
             phases[capture] = .uploading(0)
+            startWatchdog(capture)
             uploader.upload(capture: capture, to: server)
         }
     }
@@ -147,6 +157,8 @@ final class ProcessingStore {
     func cancelSend(capture: String) {
         switch phase(for: capture) {
         case .preparing, .uploading:
+            sendTokens[capture] = nil
+            stopWatchdog(capture)
             uploader.cancel(capture: capture)
             phases[capture] = .idle
         default:
@@ -176,6 +188,8 @@ final class ProcessingStore {
 
     /// Drops everything about a capture (it was deleted). The server keeps its job and room.
     func forget(capture: String) {
+        sendTokens[capture] = nil
+        stopWatchdog(capture)
         polls.removeValue(forKey: capture)?.cancel()
         uploader.cancel(capture: capture)
         phases[capture] = nil
@@ -195,17 +209,41 @@ final class ProcessingStore {
         switch event {
         case .progress(let capture, let fraction):
             guard case .uploading = phase(for: capture) else { return }
+            lastProgress[capture] = Date()
+            stalledUploads.remove(capture)
             phases[capture] = .uploading(fraction)
         case .finished(let capture, let server, .success(let job)):
+            stopWatchdog(capture)
             records.byCapture[capture] = JobRecord(jobId: job.id, server: server, job: job)
             saveRecords()
             update(capture, job: job)
             if !job.status.isFinished { poll(capture) }
         case .finished(let capture, _, .failure(let error)):
+            stopWatchdog(capture)
             // A cancelled upload already went back to idle.
             guard case .uploading = phase(for: capture) else { return }
             phases[capture] = .failed(error.localizedDescription)
         }
+    }
+
+    /// Flags an upload that stops making progress, so the sheet can say why instead of sitting at "Uploading 100%".
+    private func startWatchdog(_ capture: String) {
+        lastProgress[capture] = Date()
+        watchdogs[capture]?.cancel()
+        watchdogs[capture] = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard let self, case .uploading = self.phase(for: capture) else { return }
+                if Date().timeIntervalSince(self.lastProgress[capture] ?? Date()) > Self.stallAfter {
+                    self.stalledUploads.insert(capture)
+                }
+            }
+        }
+    }
+
+    private func stopWatchdog(_ capture: String) {
+        watchdogs.removeValue(forKey: capture)?.cancel()
+        stalledUploads.remove(capture)
     }
 
     private func update(_ capture: String, job: ScanJob) {

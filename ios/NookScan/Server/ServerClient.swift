@@ -25,7 +25,9 @@ extension ServerError: LocalizedError {
         case .invalidURL(let text):
             "“\(text)” isn't a server URL. Use one like \(ServerSettings.defaultURL)."
         case .unreachable(let host):
-            "Can't reach \(host): is Tailscale on?"
+            host.first?.isNumber == true || host == "localhost"
+                ? "Can't reach \(host): is the server running? (A plain-http server needs http:// in front of the address.)"
+                : "Can't reach \(host): is Tailscale on?"
         case .offline(let host):
             "Can't reach \(host): this iPhone is offline (or Local Network access is off in Settings › Nook Scan)."
         case .needsHTTPS(let host):

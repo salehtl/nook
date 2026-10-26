@@ -34,6 +34,10 @@ final class CaptureRecorder {
         return lockPolicy.state
     }
 
+    /// Seconds after an exposure/white-balance lock before frames count as locked (contract §4.8).
+    static let lockSettle = 0.3
+    private var keyframesFrom = -Double.infinity
+
     /// The guided pass recorded on keyframes from now on.
     var pass: ScanPass {
         get { lock.lock(); defer { lock.unlock() }; return currentPass }
@@ -46,9 +50,12 @@ final class CaptureRecorder {
         lock.lock(); defer { lock.unlock() }
         guard !stopped else { return .stopped }
         if lockPolicy.shouldLock(tracking: frame.tracking, timestamp: frame.timestamp) {
-            lockPolicy.didLock(lockCamera?() ?? .none)
+            let result = lockCamera?() ?? .none
+            lockPolicy.didLock(result)
+            // Frames still in the camera pipeline were exposed under auto exposure/white balance: let them pass.
+            if result.exposureLocked || result.whiteBalanceLocked { keyframesFrom = frame.timestamp + Self.lockSettle }
         }
-        guard lockPolicy.allowsKeyframes else { return .waitingForLock }
+        guard lockPolicy.allowsKeyframes, frame.timestamp >= keyframesFrom else { return .waitingForLock }
         let decision = selector.evaluate(transform: frame.transform, tracking: frame.tracking, sharpness: frame.sharpness)
         guard decision == .keep else { return decision }
         if writer.isBusy { return .busy }
