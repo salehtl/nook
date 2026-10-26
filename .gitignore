@@ -19,3 +19,6 @@ scan/.venv/
 ios/*.xcodeproj/
 ios/build/
 build/
+result
+result-*
+target/
