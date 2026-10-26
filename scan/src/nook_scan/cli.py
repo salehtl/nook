@@ -18,6 +18,7 @@ import numpy as np
 from . import REPO, ScanError, say
 from . import brush, capture, dataset, gpu, photometric, post, room
 from .ply import write_splats
+from .spz import write_spz
 
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
@@ -197,11 +198,14 @@ def cmd_train(args) -> int:
         views = room.viewpoints(cap, floor_y)
         say(f"viewpoints: {len(views)} camera poses at least {room.MIN_EYE_M} m above the floor")
         ply_path = room_dir / f"{args.name}.ply"
+        spz_path = room_dir / f"{args.name}.spz"
         room_json = room_dir / "room.json"
-        # Re-read: training takes minutes and the planner may have saved room.json (e.g. its look) meanwhile.
-        new_room = room.updated(room.read_existing(room_dir), ply_path, room_dir, floor_y, views)
-        ply_tmp = work / "final.ply"
+        # The planner loads the compact SPZ (~5x smaller, same rendering); the PLY stays alongside, full precision.
+        # Re-read room.json: training takes minutes and the planner may have saved it (e.g. its look) meanwhile.
+        new_room = room.updated(room.read_existing(room_dir), spz_path, room_dir, floor_y, views)
+        ply_tmp, spz_tmp = work / "final.ply", work / "final.spz"
         write_splats(ply_tmp, splats)
+        write_spz(spz_tmp, splats)
 
         # Commit: nothing touches room-dir until everything above has succeeded. A cancel (SIGTERM) arriving now
         # waits until both files are in place, so room.json never points at a missing PLY.
@@ -209,15 +213,18 @@ def cmd_train(args) -> int:
         created = not room_dir.exists()
         room_dir.mkdir(parents=True, exist_ok=True)
         staged = room_dir / f".{args.name}.ply.tmp-{os.getpid()}"
+        staged_spz = room_dir / f".{args.name}.spz.tmp-{os.getpid()}"
         staged_json = room_dir / f".room.json.tmp-{os.getpid()}"
         try:
             shutil.copyfile(ply_tmp, staged)
+            shutil.copyfile(spz_tmp, staged_spz)
             staged_json.write_bytes((json.dumps(new_room, indent=2) + "\n").encode())
             os.replace(staged, ply_path)
+            os.replace(staged_spz, spz_path)
             os.replace(staged_json, room_json)
         except OSError as e:
-            staged.unlink(missing_ok=True)
-            staged_json.unlink(missing_ok=True)
+            for p in (staged, staged_spz, staged_json):
+                p.unlink(missing_ok=True)
             if created:
                 shutil.rmtree(room_dir, ignore_errors=True)
             raise ScanError(f"cannot write into {room_dir}: {e.strerror}")
@@ -225,7 +232,7 @@ def cmd_train(args) -> int:
         shutil.rmtree(work, ignore_errors=True)
 
     summary = {
-        "name": args.name, "ply": str(ply_path), "room_json": str(room_json), "splats": int(len(splats)),
+        "name": args.name, "ply": str(ply_path), "spz": str(spz_path), "room_json": str(room_json), "splats": int(len(splats)),
         "floor_y": round(float(floor_y), 4), "steps": cfg["steps"], "seconds": round(time.time() - started, 1),
         "trainer": brush.trainer_name(binary), "psnr": result["psnr"], "floor_source": floor_source,
         "frames": {"train": prep.n_train, "held_out": prep.n_eval}, "seeds": prep.seed_source,

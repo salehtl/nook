@@ -37,7 +37,7 @@ import json, jsonschema, sys
 r = json.load(open(\"$OUT/room/room.json\")); s = json.load(open(\"contract/room.schema.json\"))
 jsonschema.validate(r, s)
 t = r[\"transform\"]
-ok = abs(t[\"position\"][1] - 1.35) <= 0.05 and max(abs(a - b) for a, b in zip(t[\"quaternion\"], [0, 0, 0, 1])) < 1e-3 and t[\"scale\"] == 1 and r[\"splat\"].endswith(\"eval-scan.ply\")
+ok = abs(t[\"position\"][1] - 1.35) <= 0.05 and max(abs(a - b) for a, b in zip(t[\"quaternion\"], [0, 0, 0, 1])) < 1e-3 and t[\"scale\"] == 1 and r[\"splat\"].endswith(\"eval-scan.spz\")
 sys.exit(0 if ok else 1)"' "$(cat "$OUT/room/room.json" 2>/dev/null | tr -d '\n ' | cut -c1-300)"
 
   # Quality: Spark-rendered PSNR on held-out frames vs an untrained seed-point baseline.

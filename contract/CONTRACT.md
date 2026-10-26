@@ -308,8 +308,8 @@ uv run --project scan nook-scan check <capture.zip|dir>
 uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-dir room] [--steps N] [--holdout-every N] [--max-image-size 1280]
 ```
 
-- `train` writes `<room-dir>/<name>.ply`, a standard 3DGS PLY (the §1 property set) **in capture world coordinates**. It's cropped (floaters outside the captured volume are removed) but not moved.
-- It then writes or updates `<room-dir>/room.json` (room.schema.json): `splat` is the path of the PLY relative to the repo root (or to `<room-dir>`'s parent when outside the repo), and `transform` is `position [0, −floor_y, 0]`, `quaternion [0,0,0,1]`, `scale 1`. Other existing keys, such as `look` and `placeholder`, are kept.
+- `train` writes `<room-dir>/<name>.ply`, a standard 3DGS PLY (the §1 property set) **in capture world coordinates**. It's cropped (floaters outside the captured volume are removed) but not moved. Alongside it goes `<name>.spz` (v2), the same splats in Niantic's compact format (about 5× smaller, renders identically in Spark). `room.json` points the planner at the `.spz`.
+- It then writes or updates `<room-dir>/room.json` (room.schema.json): `splat` is the path of the SPZ relative to the repo root (or to `<room-dir>`'s parent when outside the repo), and `transform` is `position [0, −floor_y, 0]`, `quaternion [0,0,0,1]`, `scale 1`. Other existing keys, such as `look` and `placeholder`, are kept.
   - `floor_y` comes from `meta.floor_y`. Otherwise it's estimated from seed or depth points (a low percentile of the y values of near-horizontal dense regions).
 - `--holdout-every N` (default 0) excludes frames with `index % N == 0` from training, so that evals can score them.
 - The last stdout line is JSON: `{ "name", "ply", "room_json", "splats", "floor_y", "steps", "seconds", "trainer": "<name and version>" }`.
@@ -399,7 +399,7 @@ The job object:
 }
 ```
 
-When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/planner/"` and `"ply_url": "/room/<name>.ply"`. These are site paths on the same origin the app talked to.
+When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/planner/"`, `"ply_url": "/room/<name>.ply"` and `"spz_url": "/room/<name>.spz"`. These are site paths on the same origin the app talked to.
 
 - **One job at a time** (one GPU). The queue is FIFO.
 - **Restarts:** job state persists in `jobs.json`. On restart, a job that was running becomes `failed` with the message "server restarted during training: upload again", and queued jobs stay queued.
