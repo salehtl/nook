@@ -45,6 +45,8 @@ final class ReplayCaptureTests: XCTestCase {
             XCTAssertEqual(f["file_path"] as? String, "images/\(name).jpg")
             XCTAssertEqual(f["depth_file_path"] as? String, "depth/\(name).png")
             XCTAssertNil(f["fl_x"], "no per-frame intrinsics override expected")
+            XCTAssertEqual(f["pass"] as? Int, 1, "replay records everything in the first guided pass")
+            XCTAssertNil(f["exposure_duration"], "the fixture has no exposure to pass through")
 
             // Image: JPEG at w × h.
             let img = try XCTUnwrap(ImageUtils.loadImage(out.appendingPathComponent("images/\(name).jpg")))
@@ -79,7 +81,10 @@ final class ReplayCaptureTests: XCTestCase {
         // meta.json
         XCTAssertEqual(meta["version"] as? Int, 1)
         XCTAssertEqual(meta["app"] as? String, "nook-scan")
-        XCTAssertEqual(meta["app_version"] as? String, "0.1.0")
+        XCTAssertEqual(meta["app_version"] as? String, "0.2.0")
+        XCTAssertEqual(meta["exposure_locked"] as? Bool, false, "replay has no camera to lock")
+        XCTAssertEqual(meta["white_balance_locked"] as? Bool, false)
+        XCTAssertNil(meta["lock_iso"])
         XCTAssertEqual(meta["world"] as? String, "arkit-gravity-y-up-meters")
         XCTAssertEqual(meta["lidar"] as? Bool, true)
         XCTAssertEqual(meta["frame_count"] as? Int, frames.count)

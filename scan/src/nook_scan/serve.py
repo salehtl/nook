@@ -1,0 +1,466 @@
+"""`nook-scan serve`: the processing server's jobs API (contract §5). Python stdlib only.
+
+Uploads stream to disk and are validated with the same code as `nook-scan check`. One worker thread trains queued
+jobs in FIFO order, each as a `python -m nook_scan train ...` subprocess in its own process group, and follows its
+`step X/Y` lines. Cancel and shutdown stop the whole group (the trainer and Brush). Job state lives in jobs.json.
+"""
+
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import zipfile
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import metadata
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from . import ScanError, brush, capture, gpu
+
+MAX_BODY = 4 * 1024 ** 3
+CHUNK = 1 << 20
+SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+JOB_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
+TERMINAL = ("done", "failed", "cancelled")
+RESTART_MSG = "server restarted during training: upload again"
+SAVE_EVERY_S = 5.0
+KILL_GRACE_S = 5.0
+# Progress bands: preparing and building the trainer take the first few percent, Brush's steps most of it,
+# cropping and writing the room the rest.
+P_PREP, P_TRAIN_END, P_FINISH = 0.03, 0.95, 0.97
+STEP = re.compile(r"\bstep (\d+)/(\d+)")
+TOTAL = re.compile(r"training with .*: (\d+) steps")
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def version() -> str:
+    try:
+        return metadata.version("nook-scan")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+class Server:
+    def __init__(self, args):
+        from .cli import PRESETS  # cli imports this module lazily; avoid a cycle at import time
+        self.data = Path(args.data_dir).expanduser().resolve()
+        self.room_dir = Path(args.room_dir).expanduser().resolve()
+        self.uploads, self.logs = self.data / "uploads", self.data / "logs"
+        for d in (self.uploads, self.logs):
+            d.mkdir(parents=True, exist_ok=True)
+        self.state_path = self.data / "jobs.json"
+        self.train_args = ["--room-dir", str(self.room_dir)]
+        for flag, value in (("--quality", args.quality), ("--steps", args.steps), ("--max-splats", args.max_splats)):
+            if value is not None:
+                self.train_args += [flag, str(value)]
+        self.default_steps = args.steps or PRESETS[args.quality or "high"]["steps"]
+        self.lock = threading.Lock()
+        self.wake = threading.Condition(self.lock)
+        self.jobs: dict[str, dict] = {}
+        self.running: str | None = None
+        self.proc: subprocess.Popen | None = None
+        self.stopping = False
+        self.last_save = 0.0
+        self.trainer = brush.trainer_name()
+        self.gpu = gpu.info()["name"]
+        self._load()
+
+    # --- state -------------------------------------------------------------------------------------------------
+    def _load(self) -> None:
+        if self.state_path.exists():
+            try:
+                jobs = json.loads(self.state_path.read_text())["jobs"]
+                self.jobs = {j["id"]: j for j in jobs}
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                bad = self.state_path.with_name(f"jobs.json.bad-{int(time.time())}")
+                self.state_path.replace(bad)
+                print(f"nook-scan serve: {self.state_path} was unreadable ({e}); moved it to {bad.name} and started empty", file=sys.stderr)
+        for j in self.jobs.values():
+            if j["status"] == "training":
+                j.update(status="failed", stage="done", eta_s=None, finished=now(), message=RESTART_MSG)
+                self._upload_path(j["id"]).unlink(missing_ok=True)
+            elif j["status"] == "queued" and not self._upload_path(j["id"]).is_file():
+                j.update(status="failed", stage="done", finished=now(), message="the upload is gone from the server: upload again")
+        self._save()
+
+    def _save(self) -> None:
+        """Atomically write jobs.json. Callers hold the lock (or run before the threads start)."""
+        tmp = self.state_path.with_name(f".jobs.json.tmp-{os.getpid()}")
+        tmp.write_text(json.dumps({"version": 1, "jobs": list(self.jobs.values())}, indent=1))
+        os.replace(tmp, self.state_path)
+        self.last_save = time.time()
+
+    def _upload_path(self, jid: str) -> Path:
+        return self.uploads / f"{jid}.zip"
+
+    def snapshot(self, jid: str) -> dict | None:
+        with self.lock:
+            j = self.jobs.get(jid)
+            return dict(j) if j else None
+
+    def health(self) -> dict:
+        with self.lock:
+            return {"ok": True, "version": version(), "trainer": self.trainer, "gpu": self.gpu,
+                    "busy": self.running is not None, "queued": sum(j["status"] == "queued" for j in self.jobs.values())}
+
+    def listing(self) -> list[dict]:
+        with self.lock:
+            return [dict(j) for j in reversed(list(self.jobs.values()))]  # insertion order is creation order
+
+    # --- uploads -----------------------------------------------------------------------------------------------
+    def find_active(self, capture_name: str) -> dict | None:
+        return next((j for j in self.jobs.values() if j["capture"] == capture_name and j["status"] not in ("failed", "cancelled")), None)
+
+    def create(self, zip_path: Path, capture_name: str, name: str) -> tuple[int, dict]:
+        with self.lock:
+            existing = self.find_active(capture_name)
+            if existing:
+                zip_path.unlink(missing_ok=True)
+                return 200, dict(existing)
+            jid = f"j-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
+            while jid in self.jobs:
+                jid = f"j-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
+            os.replace(zip_path, self._upload_path(jid))
+            job = {"id": jid, "capture": capture_name, "name": name, "status": "queued", "stage": "waiting",
+                   "progress": 0.0, "step": 0, "total_steps": self.default_steps, "eta_s": None,
+                   "created": now(), "started": None, "finished": None, "message": "waiting for the GPU", "result": None}
+            self.jobs[jid] = job
+            self._save()
+            self.wake.notify_all()
+            return 202, dict(job)
+
+    # --- cancel and shutdown -----------------------------------------------------------------------------------
+    def cancel(self, jid: str) -> tuple[int, dict]:
+        with self.lock:
+            j = self.jobs.get(jid)
+            if not j:
+                return 404, {"error": f"no job {jid}: list jobs with GET /api/scan/jobs"}
+            if j["status"] in TERMINAL:
+                return 409, {"error": f"job {jid} is already {j['status']}: nothing to cancel"}
+            j.update(status="cancelled", stage="done", eta_s=None, finished=now(), message="cancelled")
+            self._save()
+            if self.running == jid and self.proc:
+                self._kill(self.proc)
+            else:
+                self._upload_path(jid).unlink(missing_ok=True)
+            return 200, dict(j)
+
+    @staticmethod
+    def _kill(proc: subprocess.Popen, wait: bool = False) -> None:
+        """SIGTERM the trainer's process group (the trainer and Brush), then SIGKILL whatever is left after a grace period."""
+        def signal_group(sig):
+            try:
+                os.killpg(proc.pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        def reap():
+            try:
+                proc.wait(KILL_GRACE_S)
+            except subprocess.TimeoutExpired:
+                pass
+            signal_group(signal.SIGKILL)  # Brush may outlive its parent; the group still names it
+
+        signal_group(signal.SIGTERM)
+        if wait:
+            reap()
+        else:
+            threading.Thread(target=reap, daemon=True).start()
+
+    def shutdown(self, *_):
+        """On SIGTERM/SIGINT: stop the trainer and exit. A job that was training stays `training` in jobs.json and
+        becomes failed with RESTART_MSG on the next start, as the contract says."""
+        with self.lock:
+            self.stopping = True
+            proc = self.proc
+        if proc:
+            self._kill(proc, wait=True)
+        os._exit(0)
+
+    # --- the worker --------------------------------------------------------------------------------------------
+    def worker(self) -> None:
+        while True:
+            with self.lock:
+                while not self.stopping and not any(j["status"] == "queued" for j in self.jobs.values()):
+                    self.wake.wait()
+                if self.stopping:
+                    return
+                job = next(j for j in self.jobs.values() if j["status"] == "queued")  # FIFO: oldest first
+                job.update(status="training", stage="preparing", started=now(), message="preparing: checking the capture")
+                self.running = job["id"]
+                self._save()
+            try:
+                self.run(job)
+            except Exception as e:  # noqa: BLE001 - a broken job must not take the queue down
+                with self.lock:
+                    if job["status"] == "training" and not self.stopping:
+                        job.update(status="failed", stage="done", eta_s=None, finished=now(),
+                                   message=f"the server could not run the trainer ({type(e).__name__}: {e})")
+                        self._save()
+            finally:
+                with self.lock:
+                    self.running, self.proc = None, None
+                    if job["status"] in TERMINAL:
+                        self._upload_path(job["id"]).unlink(missing_ok=True)
+
+    def run(self, job: dict) -> None:
+        jid = job["id"]
+        log_path = self.logs / f"{jid}.log"
+        cmd = [sys.executable, "-m", "nook_scan", "train", str(self._upload_path(jid)), "--name", job["name"],
+               *self.train_args, "--progress-every", "2"]
+        # PYTHONPATH: the child must import the same nook_scan as this process, even when a wrapper script (e.g. Nix's)
+        # put it on sys.path without telling the environment.
+        env = dict(os.environ, PYTHONUNBUFFERED="1", NOOK_SCAN_TRAIN_LOG=str(self.logs / f"{jid}-brush.log"),
+                   PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+        with self.lock:
+            if job["status"] != "training" or self.stopping:
+                return
+            self.proc = proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                                text=True, errors="replace", bufsize=1, env=env, start_new_session=True)
+        result, error, t_train = None, None, None
+        with open(log_path, "w") as log:
+            log.write("$ " + " ".join(cmd) + "\n")
+            for line in proc.stdout:
+                log.write(line)
+                log.flush()
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        result = json.loads(line)
+                    except ValueError:
+                        pass
+                    continue
+                if line.startswith(("nook-scan: error:", "nook-scan: unexpected error", "nook-scan: interrupted")):
+                    error = line.removeprefix("nook-scan: ").removeprefix("error: ")
+                    continue
+                text = line.removeprefix("nook-scan:").strip()
+                with self.lock:
+                    if job["status"] != "training":
+                        continue
+                    upd = {}
+                    if m := TOTAL.search(text):
+                        upd = {"stage": "training", "total_steps": int(m[1]), "message": "training: starting"}
+                        t_train = time.time()
+                    elif m := STEP.search(text):
+                        step, total = int(m[1]), int(m[2])
+                        t_train = t_train or time.time()
+                        el = time.time() - t_train
+                        eta = round(el / step * (total - step) + 10) if step and el > 0 else None
+                        upd = {"stage": "training", "step": step, "total_steps": total, "eta_s": eta,
+                               "progress": P_PREP + (P_TRAIN_END - P_PREP) * min(1.0, step / total),
+                               "message": f"training: step {step}/{total}"}
+                    elif text.startswith("building"):
+                        upd = {"stage": "building trainer", "message": "building the trainer (first run on this machine only, ~10 min)"}
+                    elif text.startswith("finishing"):
+                        upd = {"stage": "finishing", "progress": P_FINISH, "eta_s": 10, "message": text.removeprefix("finishing: ")}
+                    elif text.startswith(("preparing", "photometric")):
+                        upd = {"stage": "preparing", "progress": 0.01, "message": text.removeprefix("preparing: ")}
+                    if upd:
+                        if "progress" in upd:
+                            upd["progress"] = round(max(job["progress"], upd["progress"]), 4)
+                        job.update(upd)
+                        if time.time() - self.last_save > SAVE_EVERY_S:
+                            self._save()
+        rc = proc.wait()
+        with self.lock:
+            if job["status"] != "training" or self.stopping:  # cancelled, or the server is going down
+                return
+            if rc == 0 and result:
+                result = dict(result, room_url="/planner/", ply_url=f"/room/{job['name']}.ply")
+                job.update(status="done", stage="done", progress=1.0, step=result.get("steps", job["total_steps"]),
+                           total_steps=result.get("steps", job["total_steps"]), eta_s=0, finished=now(),
+                           message="room ready", result=result)
+            else:
+                job.update(status="failed", stage="done", eta_s=None, finished=now(),
+                           message=error or f"the trainer exited with code {rc}: see {log_path}")
+            self._save()
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # so clients that send `Expect: 100-continue` get an answer before the body
+    server_version = "nook-scan"
+    app: Server
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write(f"nook-scan serve: {self.address_string()} {fmt % args}\n")
+
+    def send(self, status: int, data) -> None:
+        body = (json.dumps(data) + "\n").encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def err(self, status: int, msg: str, close: bool = False) -> None:
+        if close:
+            self.close_connection = True
+        self.send(status, {"error": msg})
+
+    def _length_problem(self) -> tuple[int, str] | None:
+        cl = self.headers.get("Content-Length")
+        if cl is None:
+            return 411, "Content-Length is required: upload the capture zip as a file, not a stream"
+        try:
+            n = int(cl)
+        except ValueError:
+            return 400, "Content-Length is not a number"
+        if n < 0:
+            return 400, "Content-Length is negative"
+        if n > MAX_BODY:
+            return 413, "the capture is larger than 4 GB: scan with fewer frames"
+        return None
+
+    def handle_expect_100(self):
+        path = urlsplit(self.path).path
+        if self.command == "POST" and path == "/api/scan/captures" and (p := self._length_problem()):
+            self.err(*p, close=True)
+            return False
+        return super().handle_expect_100()
+
+    def do_GET(self):
+        path = urlsplit(self.path).path
+        if path == "/api/scan/health":
+            return self.send(200, self.app.health())
+        if path == "/api/scan/jobs":
+            return self.send(200, {"jobs": self.app.listing()})
+        m = re.fullmatch(r"/api/scan/jobs/([^/]+)", path)
+        if m and JOB_ID.fullmatch(m[1]):
+            j = self.app.snapshot(m[1])
+            return self.send(200, j) if j else self.err(404, f"no job {m[1]}: list jobs with GET /api/scan/jobs")
+        self.err(404, "not found: the API lives under /api/scan (health, captures, jobs)")
+
+    def do_POST(self):
+        path = urlsplit(self.path).path
+        if path == "/api/scan/captures":
+            return self.upload()
+        m = re.fullmatch(r"/api/scan/jobs/([^/]+)/cancel", path)
+        if m and JOB_ID.fullmatch(m[1]):
+            self._drain()
+            return self.send(*self.app.cancel(m[1]))
+        self._drain()
+        self.err(404, "not found: the API lives under /api/scan (health, captures, jobs)")
+
+    def _drain(self) -> None:
+        """Read and discard a request body we don't need, so the connection stays usable."""
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n > 16 * CHUNK:
+            self.close_connection = True
+            return
+        while n > 0:
+            chunk = self.rfile.read(min(CHUNK, n))
+            if not chunk:
+                break
+            n -= len(chunk)
+
+    def upload(self):
+        if p := self._length_problem():
+            return self.err(*p, close=True)
+        n = int(self.headers["Content-Length"])
+        name = self.headers.get("X-Nook-Name")
+        if name is not None and not SLUG.fullmatch(name):
+            self._drain()
+            return self.err(400, f"X-Nook-Name must be a slug (lowercase letters, digits and dashes, e.g. reading-room), got {name!r}")
+        inbox = Path(tempfile.mkdtemp(prefix=".incoming-", dir=self.app.uploads))
+        try:
+            zip_path = inbox / "capture.zip"
+            left = n
+            with open(zip_path, "wb") as f:
+                while left > 0:
+                    chunk = self.rfile.read(min(CHUNK, left))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    left -= len(chunk)
+            if left:
+                return self.err(400, f"the upload stopped after {n - left} of {n} bytes: send the capture again", close=True)
+            capture_name = _top_folder(zip_path)
+            if capture_name:
+                with self.app.lock:
+                    existing = self.app.find_active(capture_name)
+                    existing = dict(existing) if existing else None
+                if existing:  # idempotent re-upload: no need to validate it again
+                    return self.send(200, existing)
+            capture_name, problem = _validate(zip_path, inbox)
+            if problem:
+                return self.err(400, problem)
+            name = name or re.sub(r"[^a-z0-9-]+", "-", capture_name.lower()).strip("-")[:64]
+            if not SLUG.fullmatch(name):
+                name = "scan"
+            return self.send(*self.app.create(zip_path, capture_name, name))
+        finally:
+            shutil.rmtree(inbox, ignore_errors=True)
+
+
+def _top_folder(zip_path: Path) -> str | None:
+    """The capture folder name from the zip's directory, cheaply (no extraction). None if it isn't a sane capture zip."""
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            names = [n for n in z.namelist() if n.strip("/") and not n.startswith(("__MACOSX", ".DS_Store"))]
+    except (zipfile.BadZipFile, OSError, EOFError):
+        return None
+    tops = {n.split("/")[0] for n in names}
+    return tops.pop() if len(tops) == 1 else None
+
+
+def _validate(zip_path: Path, inbox: Path) -> tuple[str, str | None]:
+    """Run the `nook-scan check` validation on the uploaded zip. Returns (capture folder name, problem or None)."""
+    work = inbox / "check"
+    try:
+        root = capture.open_capture(str(zip_path), work)
+        cap, errs = capture.validate(root)
+    except ScanError as e:
+        return "", _server_wording(str(e))
+    except Exception as e:  # noqa: BLE001 - a malformed upload is the client's problem, not a server crash
+        return "", f"the upload is not a readable nook-scan capture ({type(e).__name__}): share it again from the app"
+    if errs:
+        more = f" (+{len(errs) - 1} more problems)" if len(errs) > 1 else ""
+        return root.name, _server_wording(errs[0] + more)
+    return root.name, None
+
+
+def _server_wording(msg: str) -> str:
+    return msg.replace("AirDrop or unzip it again", "send it again").replace("AirDrop the capture again", "send the capture again") \
+              .replace("(AirDropped from the app)", "from the app")
+
+
+def main(args) -> int:
+    try:
+        app = Server(args)
+    except ScanError as e:
+        print(f"nook-scan: error: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"nook-scan: error: cannot use --data-dir {args.data_dir} ({e.strerror}): pick a writable folder", file=sys.stderr)
+        return 1
+    Handler.app = app
+    try:
+        httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as e:
+        print(f"nook-scan: error: cannot listen on {args.host}:{args.port} ({e.strerror}): is another server running? pick another --port", file=sys.stderr)
+        return 1
+    httpd.daemon_threads = True
+    signal.signal(signal.SIGTERM, app.shutdown)
+    signal.signal(signal.SIGINT, app.shutdown)
+    threading.Thread(target=app.worker, daemon=True, name="gpu-worker").start()
+    print(f"nook-scan serve {version()}: http://{args.host}:{args.port}/api/scan (trainer {app.trainer}, gpu {app.gpu}, "
+          f"data {app.data}, rooms {app.room_dir})", flush=True)
+    httpd.serve_forever()
+    return 0

@@ -61,6 +61,11 @@ struct Keyframe {
     let intrinsics: Intrinsics
     let image: FrameImage
     let depth: DepthMap?
+    /// Exposure time in seconds and exposure offset in EV, from ARCamera (contract §4.8). nil for replayed frames.
+    var exposureDuration: Double? = nil
+    var exposureOffset: Double? = nil
+    /// Guided pass (1–3) the frame was taken in, set by CaptureRecorder.
+    var pass: ScanPass? = nil
 }
 
 /// A frame as a source delivers it. It is only valid during the `onFrame` callback: anything kept must be
@@ -87,7 +92,18 @@ protocol CaptureSource: AnyObject {
     /// Starts delivering frames on a background queue. `onFrame` is called serially and must not keep the frame.
     /// `onEnd` is called when a finite source runs out (replay). A live source never ends on its own.
     func start(onFrame: @escaping (CaptureFrame) -> Void, onEnd: @escaping () -> Void)
+    /// Stops frames and, for a live camera, unlocks exposure and white balance.
     func stop()
+    /// Whether the source has a camera whose exposure and white balance can be locked (contract §4.8).
+    var canLockCamera: Bool { get }
+    /// Locks exposure and white balance at their current values and reports what was locked.
+    /// Called on the frame queue, once tracking has settled.
+    func lockCamera() -> CameraLock
+}
+
+extension CaptureSource {
+    var canLockCamera: Bool { false }
+    func lockCamera() -> CameraLock { .none }
 }
 
 enum FloorEstimator {
@@ -110,6 +126,12 @@ enum Pose {
             + simd_dot(a.columns.2.xyz, b.columns.2.xyz)
         let c = max(-1, min(1, (t - 1) / 2))
         return acos(c) * 180 / .pi
+    }
+
+    /// How far the camera looks up (+) or down (−) from level, in degrees.
+    static func pitchDegrees(_ m: simd_float4x4) -> Float {
+        let f = simd_normalize(-m.columns.2.xyz)
+        return asin(max(-1, min(1, f.y))) * 180 / .pi
     }
 
     /// Camera heading in [0, 2π): the direction the camera looks (−Z), projected on the floor.

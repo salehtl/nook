@@ -13,7 +13,7 @@ settings:
   base:
     DEVELOPMENT_TEAM: 8CFG28JHP3
     CODE_SIGN_STYLE: Automatic
-    MARKETING_VERSION: 0.1.0
+    MARKETING_VERSION: 0.2.0
     CURRENT_PROJECT_VERSION: 1
     IPHONEOS_DEPLOYMENT_TARGET: "18.0"
     SWIFT_VERSION: "5.0"
@@ -48,6 +48,10 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
         NSCameraUsageDescription: Nook Scan uses the camera and LiDAR to capture your room for 3D reconstruction.
+        NSLocalNetworkUsageDescription: Nook Scan sends captures to your processing server for training.
+        # Plain http only to local addresses (the mock server in tests, a dev server on the LAN); everything else is https.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         ITSAppUsesNonExemptEncryption: false
         UIRequiredDeviceCapabilities: [arkit]
         UILaunchScreen: {}

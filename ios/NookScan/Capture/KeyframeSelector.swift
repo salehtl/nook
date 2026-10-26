@@ -6,6 +6,8 @@ enum FrameDecision: Equatable {
     case notMoved
     case trackingLimited
     case blurry
+    /// Exposure and white balance aren't locked yet (contract §4.8): nothing is kept before the lock.
+    case waitingForLock
     /// The writer is behind; the frame is dropped so memory stays bounded.
     case busy
     case stopped

@@ -11,6 +11,9 @@ final class ReplayCaptureSource: CaptureSource {
         let intrinsics: Intrinsics
         let imageURL: URL
         let depthURL: URL?
+        /// Recorded exposure (capture v1.1), passed through when present.
+        var exposureDuration: Double?
+        var exposureOffset: Double?
     }
 
     let folder: URL
@@ -43,7 +46,9 @@ final class ReplayCaptureSource: CaptureSource {
             let ts = (f["timestamp"] as? NSNumber)?.doubleValue ?? Double(i) / 10
             return Entry(timestamp: ts, transform: m, intrinsics: try Self.intrinsics(f, fallback: top),
                          imageURL: folder.appendingPathComponent(path),
-                         depthURL: (f["depth_file_path"] as? String).map { folder.appendingPathComponent($0) })
+                         depthURL: (f["depth_file_path"] as? String).map { folder.appendingPathComponent($0) },
+                         exposureDuration: (f["exposure_duration"] as? NSNumber)?.doubleValue,
+                         exposureOffset: (f["exposure_offset"] as? NSNumber)?.doubleValue)
         }
         hasDepth = entries.contains { $0.depthURL != nil }
         floorY = (meta["floor_y"] as? NSNumber)?.floatValue
@@ -140,6 +145,7 @@ private final class ReplayFrame: CaptureFrame {
         }
         let k = entry.intrinsics.width == image.width && entry.intrinsics.height == image.height
             ? entry.intrinsics : entry.intrinsics.scaled(toWidth: image.width, height: image.height)
-        return Keyframe(timestamp: entry.timestamp, transform: entry.transform, intrinsics: k, image: .cgImage(image), depth: depth)
+        return Keyframe(timestamp: entry.timestamp, transform: entry.transform, intrinsics: k, image: .cgImage(image), depth: depth,
+                        exposureDuration: entry.exposureDuration, exposureOffset: entry.exposureOffset)
     }
 }

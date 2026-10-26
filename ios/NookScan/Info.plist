@@ -26,8 +26,15 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Nook Scan uses the camera and LiDAR to capture your room for 3D reconstruction.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Nook Scan sends captures to your processing server for training.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

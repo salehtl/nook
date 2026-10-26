@@ -1,4 +1,5 @@
 import ARKit
+import AVFoundation
 import Foundation
 
 /// ARKit world tracking with gravity alignment, LiDAR scene depth when the device has it, and horizontal plane
@@ -41,8 +42,44 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
     }
 
     func stop() {
+        unlockCamera()
         session.pause()
         queue.sync { onFrame = nil }
+    }
+
+    // MARK: Exposure and white balance (contract §4.8)
+
+    var canLockCamera: Bool { true }
+
+    /// Locks exposure and white balance of ARKit's camera at their current values. Autofocus stays on: per-frame
+    /// intrinsics already follow it.
+    func lockCamera() -> CameraLock {
+        guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else { return .none }
+        do { try device.lockForConfiguration() } catch { return .none }
+        defer { device.unlockForConfiguration() }
+        var lock = CameraLock()
+        if device.isExposureModeSupported(.locked) {
+            device.exposureMode = .locked
+            lock.exposureLocked = true
+            lock.iso = Double(device.iso)
+            lock.exposureDuration = device.exposureDuration.seconds
+        }
+        if device.isWhiteBalanceModeSupported(.locked) {
+            device.whiteBalanceMode = .locked
+            lock.whiteBalanceLocked = true
+            let g = device.deviceWhiteBalanceGains
+            lock.whiteBalanceGains = WhiteBalanceGains(r: Double(g.redGain), g: Double(g.greenGain), b: Double(g.blueGain))
+        }
+        return lock
+    }
+
+    /// Back to continuous auto exposure and white balance.
+    private func unlockCamera() {
+        guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera,
+              (try? device.lockForConfiguration()) != nil else { return }
+        defer { device.unlockForConfiguration() }
+        if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+        if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { device.whiteBalanceMode = .continuousAutoWhiteBalance }
     }
 
     // MARK: ARSessionDelegate (on `queue`)
@@ -112,7 +149,9 @@ private struct ARCaptureFrame: CaptureFrame {
         let intrinsics = Intrinsics(fx: Double(k[0][0]), fy: Double(k[1][1]), cx: Double(k[2][0]), cy: Double(k[2][1]),
                                     width: Int(res.width), height: Int(res.height))
         return Keyframe(timestamp: frame.timestamp, transform: frame.camera.transform, intrinsics: intrinsics,
-                        image: .pixelBuffer(image), depth: frame.sceneDepth.flatMap(Self.copyDepth))
+                        image: .pixelBuffer(image), depth: frame.sceneDepth.flatMap(Self.copyDepth),
+                        exposureDuration: frame.camera.exposureDuration,
+                        exposureOffset: Double(frame.camera.exposureOffset))
     }
 
     /// Copies sceneDepth (Float32 meters) and its confidence. Low-confidence pixels become 0 (no data).

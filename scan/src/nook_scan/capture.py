@@ -1,6 +1,7 @@
 """Open and validate a nook-scan capture (contract §4.1-4.5)."""
 
 import json
+import os
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from . import REPO, ScanError
 
 MIN_FRAMES = 30
 MIN_SPAN_M = 0.5
-SCHEMA_PATH = REPO / "contract" / "capture.schema.json"
+SCHEMA_PATH = REPO / "contract" / "capture.schema.json"  # NOOK_CONTRACT_DIR overrides the folder (installed copies)
 _JUNK = ("__MACOSX", ".DS_Store")
 
 
@@ -92,11 +93,12 @@ def _load_json(root: Path, name: str) -> dict:
 
 
 def _schema_errors(transforms: dict, meta: dict) -> list[str]:
+    import jsonschema
+    path = Path(os.environ["NOOK_CONTRACT_DIR"]) / "capture.schema.json" if os.environ.get("NOOK_CONTRACT_DIR") else SCHEMA_PATH
     try:
-        import jsonschema
-        schema = json.loads(SCHEMA_PATH.read_text())
-    except (ImportError, OSError):
-        return []
+        schema = json.loads(path.read_text())
+    except (OSError, ValueError):
+        raise ScanError(f"cannot read the capture schema at {path}: run nook-scan from the nook repo, or set NOOK_CONTRACT_DIR to its contract/ folder")
     errs = []
     v = jsonschema.Draft202012Validator(schema)
     for e in sorted(v.iter_errors({"transforms": transforms, "meta": meta}), key=lambda e: list(e.path))[:5]:

@@ -2,7 +2,10 @@ import SwiftUI
 
 struct CapturesListView: View {
     @EnvironmentObject private var store: CaptureStore
+    @Environment(ProcessingStore.self) private var processing
     @State private var activeCapture: CaptureController?
+    @State private var sendTarget: CaptureEntry?
+    @State private var showSettings = false
     @State private var shareItem: ShareItem?
     @State private var zipping: String?
     @State private var pendingDelete: CaptureEntry?
@@ -17,7 +20,11 @@ struct CapturesListView: View {
                 } else {
                     List {
                         ForEach(store.captures) { entry in
-                            CaptureRow(entry: entry, isZipping: zipping == entry.id) { share(entry) }
+                            CaptureRow(entry: entry, isZipping: zipping == entry.id, phase: processing.phase(for: entry.id)) {
+                                share(entry)
+                            }
+                                .contentShape(Rectangle())
+                                .onTapGesture { if entry.isComplete { sendTarget = entry } }
                                 .swipeActions {
                                     Button(role: .destructive) { pendingDelete = entry } label: {
                                         Label("Delete", systemImage: "trash")
@@ -25,14 +32,21 @@ struct CapturesListView: View {
                                     if entry.isComplete {
                                         Button { share(entry) } label: { Label("Share", systemImage: "square.and.arrow.up") }
                                             .tint(.blue)
+                                        Button { sendTarget = entry } label: { Label("Send", systemImage: "paperplane") }
+                                            .tint(.indigo)
                                     }
                                 }
                                 .contextMenu {
                                     if entry.isComplete {
+                                        Button { sendTarget = entry } label: { Label("Send to server", systemImage: "paperplane") }
+                                        if let url = processing.roomURL(for: entry.id) {
+                                            Link(destination: url) { Label("Open room", systemImage: "safari") }
+                                        }
                                         Button { share(entry) } label: { Label("Share as .zip", systemImage: "square.and.arrow.up") }
                                     }
                                     Button(role: .destructive) { pendingDelete = entry } label: { Label("Delete", systemImage: "trash") }
                                 }
+                                .accessibilityAction(named: "Send to server") { if entry.isComplete { sendTarget = entry } }
                         }
                     }
                     .refreshable { store.refresh() }
@@ -45,6 +59,9 @@ struct CapturesListView: View {
                     Button("Replay sample", systemImage: "arrow.triangle.2.circlepath.camera") { startReplay() }
                 }
                 #endif
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Settings", systemImage: "gearshape") { showSettings = true }
+                }
             }
             .safeAreaInset(edge: .bottom) {
                 Button(action: startLive) {
@@ -65,11 +82,20 @@ struct CapturesListView: View {
         .sheet(item: $shareItem, onDismiss: { CaptureStore.clearShareFolder() }) { item in
             ShareSheet(items: [item.url])
         }
+        .sheet(item: $sendTarget) { entry in
+            SendToServerView(entry: entry)
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+        }
         .confirmationDialog("Delete this capture?",
                             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
-                if let entry = pendingDelete { store.delete(entry) }
+                if let entry = pendingDelete {
+                    processing.forget(capture: entry.id)
+                    store.delete(entry)
+                }
                 pendingDelete = nil
             }
         } message: {
@@ -121,6 +147,7 @@ struct CapturesListView: View {
 private struct CaptureRow: View {
     let entry: CaptureEntry
     let isZipping: Bool
+    let phase: SendPhase
     let share: () -> Void
 
     var body: some View {
@@ -153,6 +180,15 @@ private struct CaptureRow: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                if let (text, icon, color) = serverStatus {
+                    HStack(spacing: 4) {
+                        Image(systemName: icon)
+                        Text(text)
+                    }
+                    .font(.footnote.weight(.medium).monospacedDigit())
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                }
             }
             Spacer()
             if entry.isComplete {
@@ -168,6 +204,18 @@ private struct CaptureRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// One line about the capture's server job, or nil when it was never sent.
+    private var serverStatus: (String, String, Color)? {
+        switch phase {
+        case .idle: nil
+        case .preparing: ("Preparing upload…", "arrow.up.circle", .secondary)
+        case .uploading(let f): ("Uploading \(Int((f * 100).rounded(.down)))%", "arrow.up.circle", .blue)
+        case .processing(let job, let warning): (job.shortStatus, warning == nil ? "gearshape.2" : "wifi.exclamationmark", warning == nil ? .blue : .orange)
+        case .finished(let job): (job.shortStatus, job.status == .done ? "checkmark.circle.fill" : "xmark.circle", job.status == .done ? .green : .secondary)
+        case .failed: ("Send failed: tap for details", "exclamationmark.triangle", .orange)
+        }
     }
 }
 

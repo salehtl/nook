@@ -20,12 +20,13 @@ else
   KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
 fi
 BUILD="${1:-$(git rev-list --count HEAD)}"
+VERSION=$(awk '/MARKETING_VERSION:/ {print $2; exit}' ios/project.yml)
 AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$KEY_PATH" -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$NOOK_ASC_ISSUER_ID")
 OUT=build/release
 rm -rf "$OUT" && mkdir -p "$OUT"
 
 xcodegen generate --spec ios/project.yml --project ios >/dev/null
-echo "archiving nook-scan 0.1.0 ($BUILD)…"
+echo "archiving nook-scan $VERSION ($BUILD)…"
 xcodebuild archive -project ios/NookScan.xcodeproj -scheme NookScan -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$OUT/NookScan.xcarchive" \
   CURRENT_PROJECT_VERSION="$BUILD" "${AUTH[@]}" >"$OUT/archive.log" 2>&1 \
@@ -56,4 +57,4 @@ xcodebuild -exportArchive -archivePath "$OUT/NookScan.xcarchive" -exportOptionsP
   -exportPath "$OUT/export" "${AUTH[@]}" >"$OUT/upload.log" 2>&1 \
   || { grep -E "error:|Error" "$OUT/upload.log" | head -n 8 >&2; echo "release: upload failed (log: $OUT/upload.log)" >&2; exit 1; }
 grep -E "Upload succeeded|EXPORT SUCCEEDED|Uploaded" "$OUT/upload.log" | tail -n 2
-echo "done: nook-scan 0.1.0 ($BUILD) uploaded. It appears in TestFlight after Apple finishes processing (usually 5–30 min)."
+echo "done: nook-scan $VERSION ($BUILD) uploaded. It appears in TestFlight after Apple finishes processing (usually 5–30 min)."

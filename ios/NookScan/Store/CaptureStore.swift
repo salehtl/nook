@@ -84,11 +84,11 @@ final class CaptureStore: ObservableObject {
         }
     }
 
-    /// Zips a capture folder for sharing: `<name>.zip` whose single top-level entry is the folder (contract §4.1).
-    /// Uses NSFileCoordinator's `.forUploading`, which zips a directory. Slow for big captures: call off main.
-    static func makeZip(of folder: URL) throws -> URL {
+    /// Zips a capture folder for sharing or upload: `<outDir>/<name>.zip` whose single top-level entry is the folder
+    /// (contract §4.1). Uses NSFileCoordinator's `.forUploading`, which zips a directory. Slow for big captures:
+    /// call off main.
+    static func makeZip(of folder: URL, into outDir: URL = shareFolder) throws -> URL {
         let fm = FileManager.default
-        let outDir = fm.temporaryDirectory.appendingPathComponent("Share", isDirectory: true)
         try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
         let out = outDir.appendingPathComponent(folder.lastPathComponent + ".zip")
         try? fm.removeItem(at: out)
@@ -101,7 +101,11 @@ final class CaptureStore: ObservableObject {
         return out
     }
 
+    static var shareFolder: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("Share", isDirectory: true)
+    }
+
     static func clearShareFolder() {
-        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent("Share"))
+        try? FileManager.default.removeItem(at: shareFolder)
     }
 }

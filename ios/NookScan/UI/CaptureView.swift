@@ -2,18 +2,25 @@ import ARKit
 import SwiftUI
 import UIKit
 
-/// The capture screen: live camera (or replay placeholder) with guidance: frame counter, tracking banner,
-/// slow-down warning and a coverage ring.
+/// The capture screen: live camera (or replay placeholder) with guidance: exposure lock indicator, frame
+/// counter, tracking banner, slow-down warning, and the three guided passes with a coverage ring for each.
 struct CaptureView: View {
     @ObservedObject var controller: CaptureController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @Environment(ProcessingStore.self) private var processing
     @State private var confirmDiscard = false
 
     var body: some View {
         ZStack {
             preview.ignoresSafeArea()
             VStack(spacing: 10) {
+                if controller.phase == .recording {
+                    HStack {
+                        LockIndicator(state: controller.lockState)
+                        Spacer()
+                    }
+                }
                 banners
                 Spacer()
                 bottomPanel
@@ -67,6 +74,8 @@ struct CaptureView: View {
             }
             if controller.tooFast {
                 Banner(text: "Slow down for sharp frames", systemImage: "tortoise.fill", color: .red)
+            } else if let hint = controller.postureHint, controller.lockState != .locking {
+                Banner(text: hint, systemImage: "iphone.gen3", color: .blue)
             }
         }
     }
@@ -76,7 +85,7 @@ struct CaptureView: View {
             switch controller.phase {
             case .recording:
                 HStack(alignment: .center, spacing: 18) {
-                    CoverageRing(coverage: controller.coverage)
+                    CoverageRing(coverage: controller.guide.current.lit)
                         .frame(width: 54, height: 54)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(controller.frameCount)")
@@ -90,21 +99,42 @@ struct CaptureView: View {
                     }
                     Spacer()
                 }
-                Text(coverageHint)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                HStack {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        PassSteps(guide: controller.guide)
+                        Text(controller.guide.pass.title)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    Text(promptText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 10) {
                     Button(role: .destructive) {
                         if controller.frameCount > 0 { confirmDiscard = true } else { controller.discard(); dismiss() }
                     } label: {
-                        Label("Cancel", systemImage: "xmark").frame(maxWidth: .infinity)
+                        Image(systemName: "xmark").frame(width: 20)
                     }
                     .buttonStyle(.bordered)
+                    .accessibilityLabel("Cancel scan")
+                    if controller.guide.pass.next != nil {
+                        Button {
+                            controller.nextPass()
+                        } label: {
+                            Text("Next pass").lineLimit(1).frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(controller.guide.current.isGood ? .green : nil)
+                        .disabled(controller.frameCount == 0)
+                    }
                     Button {
                         controller.finish()
                     } label: {
-                        Label("Done", systemImage: "checkmark").frame(maxWidth: .infinity)
+                        Label("Done", systemImage: "checkmark").lineLimit(1).frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(controller.frameCount == 0)
@@ -127,10 +157,27 @@ struct CaptureView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                Button("Close") { dismiss() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity)
+                HStack(spacing: 10) {
+                    if summary.frameCount >= CaptureController.minFrames {
+                        Button("Close") { dismiss() }
+                            .buttonStyle(.bordered)
+                        Button {
+                            processing.send(folder: summary.folder, to: ServerSettings.current)
+                            dismiss()
+                        } label: {
+                            Label("Send to server", systemImage: "paperplane.fill").lineLimit(1).frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } else {
+                        Button {
+                            dismiss()
+                        } label: {
+                            Text("Close").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .controlSize(.large)
             case .failed(let message):
                 Label(message, systemImage: "xmark.octagon.fill")
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -149,11 +196,76 @@ struct CaptureView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
-    private var coverageHint: String {
-        let n = controller.coveredSectors
-        if controller.frameCount == 0 { return "Move slowly. Frames are kept every 8 cm or 6°." }
-        if n < CaptureController.sectors * 2 / 3 { return "Turn to cover the rest of the room (\(n)/\(CaptureController.sectors) directions)." }
-        return "Good coverage. Add a second pass at a different height."
+    private var promptText: String {
+        switch controller.lockState {
+        case .settling, .locking:
+            return "Point the phone at the room and hold steady for a second while exposure and white balance lock."
+        default:
+            return controller.frameCount == 0
+                ? "\(controller.guide.pass.instruction) Move slowly: frames are kept every 8 cm or 6°."
+                : controller.guide.prompt
+        }
+    }
+}
+
+/// Exposure and white-balance lock state, like the Camera app's AE/AF LOCK badge. Hidden for replay.
+private struct LockIndicator: View {
+    let state: ExposureLockPolicy.State
+
+    var body: some View {
+        if let (text, icon, color) = content {
+            Label(text, systemImage: icon)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.black.opacity(0.55), in: Capsule())
+                .foregroundStyle(color)
+                .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var content: (String, String, Color)? {
+        switch state {
+        case .settling, .locking:
+            ("Locking exposure…", "lock.open", .white)
+        case .locked(let lock) where lock.isFullyLocked:
+            ("Exposure + WB locked", "lock.fill", .yellow)
+        case .locked(let lock):
+            (lock.exposureLocked ? "Exposure locked · WB auto" : "WB locked · exposure auto", "lock.trianglebadge.exclamationmark", .orange)
+        case .unlockable:
+            ("Auto exposure (couldn't lock)", "lock.slash", .orange)
+        case .notApplicable:
+            nil
+        }
+    }
+}
+
+/// Three numbered dots for the guided passes: done passes filled (green when their coverage was good), the current
+/// one outlined.
+private struct PassSteps: View {
+    let guide: PassGuide
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(ScanPass.allCases, id: \.rawValue) { pass in
+                let done = pass.rawValue < guide.pass.rawValue
+                let good = guide.coverage[pass.rawValue - 1].isGood
+                ZStack {
+                    Circle()
+                        .fill(done ? (good ? Color.green : Color.white.opacity(0.35)) : Color.clear)
+                    Circle()
+                        .strokeBorder(pass == guide.pass ? Color.white : Color.white.opacity(0.3), lineWidth: 2)
+                    if done && good {
+                        Image(systemName: "checkmark").font(.system(size: 10, weight: .bold))
+                    } else {
+                        Text("\(pass.rawValue)").font(.caption2.weight(.semibold))
+                    }
+                }
+                .frame(width: 22, height: 22)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Pass \(guide.pass.rawValue) of \(ScanPass.allCases.count)")
     }
 }
 

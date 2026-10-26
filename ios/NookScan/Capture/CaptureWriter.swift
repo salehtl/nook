@@ -82,7 +82,8 @@ final class CaptureWriter {
     }
 
     /// Waits for queued keyframes, then writes points.ply, transforms.json and meta.json.
-    func finish(floorY: Float?) throws -> CaptureSummary {
+    /// `cameraLock` is what the exposure and white-balance lock achieved (contract §4.8).
+    func finish(floorY: Float?, cameraLock: CameraLock = .none) throws -> CaptureSummary {
         try queue.sync {
             if let error { throw CaptureError.write(error.localizedDescription) }
             guard let camera, !frames.isEmpty else { throw CaptureError.noFrames }
@@ -102,7 +103,7 @@ final class CaptureWriter {
 
                 let iso = ISO8601DateFormatter()
                 iso.timeZone = TimeZone(identifier: "UTC")
-                let meta: [String: Any] = [
+                var meta: [String: Any] = [
                     "version": 1,
                     "app": "nook-scan",
                     "app_version": info.appVersion,
@@ -112,7 +113,16 @@ final class CaptureWriter {
                     "created": iso.string(from: info.created),
                     "frame_count": frames.count,
                     "floor_y": floorY.map { Self.num($0) as Any } ?? NSNull(),
+                    "exposure_locked": cameraLock.exposureLocked,
+                    "white_balance_locked": cameraLock.whiteBalanceLocked,
                 ]
+                if cameraLock.exposureLocked {
+                    if let iso = cameraLock.iso, iso.isFinite { meta["lock_iso"] = Self.decimal(iso, 3) }
+                    if let d = cameraLock.exposureDuration, d.isFinite { meta["lock_exposure_duration"] = Self.decimal(d, 7) }
+                }
+                if cameraLock.whiteBalanceLocked, let g = cameraLock.whiteBalanceGains, [g.r, g.g, g.b].allSatisfy(\.isFinite) {
+                    meta["lock_white_balance_gains"] = ["r": Self.decimal(g.r, 4), "g": Self.decimal(g.g, 4), "b": Self.decimal(g.b, 4)]
+                }
                 try writeJSON(meta, to: "meta.json")
                 return CaptureSummary(folder: folder, frameCount: frames.count, depthCount: depthCount,
                                       pointCount: pointCount, floorY: floorY)
@@ -158,6 +168,9 @@ final class CaptureWriter {
             "transform_matrix": Self.rows(kf.transform),
             "timestamp": (time * 1000).rounded() / 1000,
         ]
+        if let d = kf.exposureDuration, d.isFinite, d > 0 { frame["exposure_duration"] = Self.decimal(d, 7) }
+        if let ev = kf.exposureOffset, ev.isFinite { frame["exposure_offset"] = Self.decimal(ev, 4) }
+        if let pass = kf.pass { frame["pass"] = pass.rawValue }
         if let camera {
             if abs(k.fx - camera.fx) > 1e-3 || abs(k.fy - camera.fy) > 1e-3 || abs(k.cx - camera.cx) > 1e-3 || abs(k.cy - camera.cy) > 1e-3 {
                 frame["fl_x"] = k.fx; frame["fl_y"] = k.fy; frame["cx"] = k.cx; frame["cy"] = k.cy
@@ -213,6 +226,12 @@ final class CaptureWriter {
     /// Row-major nested arrays of a column-major simd matrix.
     static func rows(_ m: simd_float4x4) -> [[Double]] {
         (0..<4).map { r in (0..<4).map { c in num(m[c][r]) } }
+    }
+
+    /// `x` rounded to `digits` decimal places.
+    static func decimal(_ x: Double, _ digits: Int) -> Double {
+        let s = pow(10, Double(digits))
+        return (x * s).rounded() / s
     }
 
     /// A Float as the shortest Double that prints like it (0.2354, not 0.23540000617504120).

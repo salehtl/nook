@@ -2,7 +2,8 @@ import Foundation
 import simd
 
 /// Runs one capture for the UI: source → CaptureRecorder, plus the guidance state (frame count, tracking,
-/// slow-down, coverage). Frame handling happens on the source's queue; published state is updated on main.
+/// slow-down, exposure lock, guided passes and their coverage). Frame handling happens on the source's queue;
+/// published state is updated on main.
 final class CaptureController: ObservableObject, Identifiable {
     enum Phase: Equatable {
         case recording
@@ -11,14 +12,18 @@ final class CaptureController: ObservableObject, Identifiable {
         case failed(String)
     }
 
-    static let sectors = 12
     static let minFrames = 30
 
     @Published private(set) var phase: Phase = .recording
     @Published private(set) var frameCount = 0
     @Published private(set) var tracking: TrackingStatus = .limited("Starting up")
     @Published private(set) var tooFast = false
-    @Published private(set) var coverage = [Bool](repeating: false, count: CaptureController.sectors)
+    /// Current guided pass and the heading coverage of each pass.
+    @Published private(set) var guide = PassGuide()
+    /// Exposure and white-balance lock (contract §4.8). Keyframes are only kept once it's settled.
+    @Published private(set) var lockState = ExposureLockPolicy.State.settling(normalSince: nil)
+    /// "Tilt the phone down…" when the phone is held wrong for the current pass.
+    @Published private(set) var postureHint: String?
     /// Replay only: fraction of the recording played.
     @Published private(set) var progress: Double?
     /// The session was interrupted: no more frames are kept, but what was recorded can still be saved.
@@ -39,10 +44,12 @@ final class CaptureController: ObservableObject, Identifiable {
     private var lastPublish = -Double.infinity
     private var framesSeen = 0
     private var recentBlurry = 0
+    private var smoothedPitch: Float?
 
     init(source: CaptureSource, capturesRoot: URL) {
         self.source = source
         self.capturesRoot = capturesRoot
+        lockState = ExposureLockPolicy(canLock: source.canLockCamera).state
     }
 
     var isLive: Bool { source is LiveCaptureSource }
@@ -53,12 +60,15 @@ final class CaptureController: ObservableObject, Identifiable {
         let folder = CaptureStore.newCaptureFolder(in: capturesRoot)
         let recorder: CaptureRecorder
         do {
-            recorder = try CaptureRecorder(folder: folder, info: CaptureInfo(device: source.deviceName, lidar: source.hasDepth))
+            let lockCamera: (() -> CameraLock)? = source.canLockCamera ? { [weak source] in source?.lockCamera() ?? .none } : nil
+            recorder = try CaptureRecorder(folder: folder, info: CaptureInfo(device: source.deviceName, lidar: source.hasDepth),
+                                           lockCamera: lockCamera)
         } catch {
             phase = .failed(error.localizedDescription)
             return
         }
         self.recorder = recorder
+        lockState = recorder.lockState
         (source as? LiveCaptureSource)?.onIssue = { [weak self] issue in
             DispatchQueue.main.async { self?.handle(issue) }
         }
@@ -98,21 +108,31 @@ final class CaptureController: ObservableObject, Identifiable {
         motion.update(timestamp: frame.timestamp, transform: frame.transform)
         framesSeen += 1
         recentBlurry = decision == .blurry ? recentBlurry + 1 : (decision == .keep ? 0 : recentBlurry)
-        let sector = decision == .keep
-            ? Int(Pose.yaw(frame.transform) / (2 * .pi) * Float(Self.sectors)) % Self.sectors : nil
-        guard sector != nil || frame.timestamp - lastPublish >= 0.1 else { return }
+        let pitch = Pose.pitchDegrees(frame.transform)
+        smoothedPitch = smoothedPitch.map { $0 + 0.2 * (pitch - $0) } ?? pitch
+        let kept = decision == .keep ? (yaw: Pose.yaw(frame.transform), pitch: pitch) : nil
+        guard kept != nil || frame.timestamp - lastPublish >= 0.1 else { return }
         lastPublish = frame.timestamp
-        let count = recorder.keptCount, tracking = frame.tracking
+        let count = recorder.keptCount, tracking = frame.tracking, lockState = recorder.lockState
         let fast = motion.isTooFast || recentBlurry >= 5
+        let hint = tracking.isNormal ? smoothedPitch.flatMap { recorder.pass.postureHint(pitchDegrees: $0) } : nil
         let progress = total.map { Double(framesSeen) / Double(max(1, $0)) }
         DispatchQueue.main.async {
             guard self.phase == .recording else { return }
             self.frameCount = count
             if self.tracking != tracking { self.tracking = tracking }
             if self.tooFast != fast { self.tooFast = fast }
-            if let sector, !self.coverage[sector] { self.coverage[sector] = true }
+            if self.lockState != lockState { self.lockState = lockState }
+            if self.postureHint != hint { self.postureHint = hint }
+            if let kept { self.guide.add(yaw: kept.yaw, pitchDegrees: kept.pitch) }
             self.progress = progress
         }
+    }
+
+    /// Moves to the next guided pass: keyframes from now on record it.
+    func nextPass() {
+        guard phase == .recording, let recorder, guide.advance() else { return }
+        recorder.pass = guide.pass
     }
 
     /// Stops the source and saves. Called by "Done", or when a replay runs out.
@@ -162,6 +182,4 @@ final class CaptureController: ObservableObject, Identifiable {
             break
         }
     }
-
-    var coveredSectors: Int { coverage.filter { $0 }.count }
 }
