@@ -408,3 +408,23 @@ When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/
 **Acceptance**
 - **A1.** `bash evals/server_api.sh` passes.
 - **A2.** `evals/mock_scan_server.py` and the real server answer the same requests with the same shapes. The iOS integration test passes against both.
+
+### 4.10 Capture v1.2: high-resolution stills (optional)
+
+- A frame may carry a high-resolution still taken at the same moment as its video frame (ARKit `captureHighResolutionFrame`):
+  - `"hires_file_path": "images_hi/000001.jpg"`: JPEG, quality ≥ 0.9, sensor orientation
+  - `"hires_w"`, `"hires_h"`: its size
+  - `"hires_fl_x"`, `"hires_fl_y"`, `"hires_cx"`, `"hires_cy"`: its intrinsics
+  - The pose is the frame's `transform_matrix`.
+- It's taken under the same exposure and white-balance lock as the video frames.
+- `meta.json` adds `"keyframe_spacing": {"meters": 0.04, "degrees": 3}`.
+- The trainer uses the still in place of the video frame when one is present, downscaled to the quality preset's long side.
+
+### 4.11 Pose refinement (`nook-poses`, kakapo)
+
+- `nook-poses CAPTURE_DIR --out TRANSFORMS.json [--max-frames N]`:
+  - Estimates camera poses from the images with a learned model (VGGT or MASt3R), using the ARKit poses as a prior and for metric scale.
+  - Writes a `transforms.json` with the same frames, intrinsics and keys, in the same ARKit world frame (gravity-up, metric, same origin), with refined `transform_matrix` values.
+  - The last stdout line is JSON: `{"frames", "shift_cm_median", "shift_cm_max", "rot_deg_median", "seconds"}`.
+- It runs on kakapo's RTX 2060 (6 GB): chunking or downscaling as needed.
+- `nook-scan train --refine-poses` runs it on the prepared dataset before training.
