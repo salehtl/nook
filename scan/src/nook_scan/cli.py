@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from . import REPO, ScanError, say
-from . import capture, dataset, gpu, photometric, post, room, trainer
+from . import capture, dataset, gpu, photometric, poses, post, room, trainer
 from .ply import write_splats
 from .spz import write_spz
 
@@ -61,6 +61,8 @@ def build_parser() -> Parser:
     t.add_argument("--photometric", action="store_true",
                    help="even out exposure and white balance between frames before training (captures without exposure lock). "
                         "Off by default: the room looks more even, but held-out photos keep their own exposure, so it scores lower")
+    t.add_argument("--refine-poses", action="store_true",
+                   help="refine the ARKit camera poses with nook-poses (VGGT, kakapo) before training (contract §4.11)")
     # Tuning and server plumbing, not for everyday use.
     t.add_argument("--keep-raw", help=argparse.SUPPRESS)
     t.add_argument("--progress-every", type=float, default=20.0, help=argparse.SUPPRESS)
@@ -123,6 +125,8 @@ def cmd_train(args) -> int:
     if room_dir.exists() and not room_dir.is_dir():
         raise ScanError(f"--room-dir {room_dir} is a file, not a folder")
     room.read_existing(room_dir)  # fail fast on a broken room.json; it is re-read at commit time
+    if args.refine_poses:
+        poses.binary()  # fail fast when nook-poses isn't installed here
 
     work = Path(tempfile.mkdtemp(prefix="nook-scan-"))
     try:
@@ -154,6 +158,11 @@ def cmd_train(args) -> int:
         say(f"dataset: {prep.n_train} training frames, {prep.n_eval} held out, {len(prep.seeds)} seed points ({prep.seed_source})")
         if not len(prep.seeds):
             say("warning: no seed points or depth in this capture, the trainer starts from random splats (expect a blurrier room)")
+        pose_summary = None
+        if args.refine_poses:
+            pose_summary = poses.refine(prep.data_dir)
+            say(f"poses refined: median shift {pose_summary['shift_cm_median']} cm (max {pose_summary['shift_cm_max']}), "
+                f"rotation median {pose_summary['rot_deg_median']} deg, in {pose_summary['seconds']:.0f} s")
         cams = cap.poses()[:, :3, 3]
         floor_y, floor_source = cap.meta.get("floor_y"), "ARKit floor plane in meta.json"
         if floor_y is None:
@@ -215,6 +224,7 @@ def cmd_train(args) -> int:
         "frames": {"train": prep.n_train, "held_out": prep.n_eval}, "seeds": prep.seed_source,
         "quality": args.quality, "max_image_size": prep.long_side, "max_splats": cfg["max_splats"],
         "photometric": gains is not None, "sh_degree": cfg["sh_degree"], "viewpoints": len(views),
+        "poses": pose_summary,
     }
     print(json.dumps(summary), flush=True)
     return 0

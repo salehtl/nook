@@ -33,6 +33,11 @@
           system = linux;
         };
         gsplat = nook-gsplat.gsplat;
+        # Learned camera-pose refinement (VGGT), contract §4.11; `nook-scan train --refine-poses` runs it.
+        nook-poses = import ./nix/poses.nix {
+          inherit nixpkgs;
+          system = linux;
+        };
         nook = pkgs.callPackage ./nix/nook.nix { inherit nook-gsplat; };
         default = nook;
       };

@@ -16,6 +16,15 @@
   3. a bigger splat budget
   4. generative fill, cloud GPU, gaps only and marked in the web app; **deferred**, only if gaps remain after 1–3
 
+## Measurements (scan-20261026-093654, held-out PSNR in Spark)
+| Config | PSNR | Time | Notes |
+|---|---|---|---|
+| gsplat high (baseline) | 21.76 dB | 17 min | |
+| + `--pose-opt` | 21.36 dB | 18 min | cameras moved 0.54 cm median (max 1.3 cm), 0.2° median (max 0.55°) |
+| 1.6M splats, 30k steps | 21.96 dB | 30 min | +0.2 dB for 75% more time; kept off the preset until the v0.3 frames are in |
+
+ARKit's poses hold to about 1 cm across the walk, so drift is not the main loss. Part of the 0.4 dB drop is the measurement itself: held-out frames are rendered at uncorrected poses. Frame quality and density (app v0.3) and the splat budget are the stronger levers.
+
 ## How the article shapes it
 - **Main loop:** contracts, evals, every GPU measurement, integration, fixes, releases (the kakapo PR, TestFlight).
 - **Two builders in parallel,** split by context:
