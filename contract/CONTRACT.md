@@ -606,6 +606,11 @@ The v2 preset trains every capture for the same number of steps, so a 1,200-fram
 
 `--refine-poses` (`nook-poses`) stays as a CLI flag but isn't offered as a setting: it didn't help.
 
+**Experimental: depth loss and fine-tuning** (CLI only for now, not retrain settings, until a real test shows they help):
+- `--depth-weight W` (0–10, default 0 = off): adds `W ×` an L1 loss in log depth between the rendered expected depth and the frame's LiDAR depth (§4 `depth/`), on pixels with a return under 5 m and away from depth edges. Meant to keep floaters out of the room's free space. Frames without depth train as before.
+- `--init SPLAT`: starts from an existing room of the same capture (its `.spz` or `.ply`, in the capture's world frame) instead of seed points. Position learning starts at a tenth of the usual rate and every SH band is on from step 0, so a few thousand `--steps` fine-tune it. Past `--max-splats`, the most opaque splats are kept.
+- Both pass through to `nook-gsplat` as the same flags. The stand-in trainer (`evals/fake_gsplat.py`) accepts and ignores them.
+
 - `nook-scan train CAPTURE --dry-run` prints the resolved settings as JSON (`{"n_train", "settings": {...}, "eta_s"}`) and exits without training. `eta_s` uses `gpu.py`'s measured speed (seconds per 1,000 steps per million splats on this GPU class, set from 0a).
 - The trainer's last-line JSON gains `"settings"` (what actually ran) and `"delivered_splats"`.
 - `meta.roomplan` captures (§4.12): `roomplan.json` and `roomplan.usdz` are copied into the room dir as `<name>.roomplan.json` / `.usdz`, with `world_from_roomplan` applied and the room transform **not** applied (the planner applies it, like the splat).

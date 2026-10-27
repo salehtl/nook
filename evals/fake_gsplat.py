@@ -38,6 +38,8 @@ def main() -> None:
     p.add_argument("--sh-degree", type=int, default=1)
     p.add_argument("--stills-max-size", type=int)   # v4 (§4.9.1): accepted, ignored
     p.add_argument("--pose-opt", action="store_true")
+    p.add_argument("--depth-weight", type=float, default=0.0)   # accepted, ignored
+    p.add_argument("--init")
     a = p.parse_args()
     if os.environ.get("FAKE_GSPLAT_FAIL"):
         print("nook-gsplat: simulated failure", file=sys.stderr)

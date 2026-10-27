@@ -55,6 +55,11 @@ def build_parser() -> Parser:
     t.add_argument("--keep-full-ply", action="store_true", help="also write the unpruned crop as <name>.full.ply")
     t.add_argument("--sh-degree", type=int, choices=range(4), metavar="{0-3}", help="spherical-harmonics degree of the splat (default: from --quality; 3 is ~2.5x bigger)")
     t.add_argument("--pose-opt", action="store_true", help="refine the camera poses along with the splats (nook-gsplat --pose-opt)")
+    t.add_argument("--depth-weight", type=float, default=0.0, metavar="W",
+                   help="pull the splats toward the capture's LiDAR depth (0 = off; 0.2 keeps floaters out of the room's free space)")
+    t.add_argument("--init", metavar="SPLAT",
+                   help="fine-tune from an existing room of this capture (its .spz or .ply) instead of training from scratch; "
+                        "pair it with a few thousand --steps")
     t.add_argument("--dry-run", action="store_true", help='print the settings this run would use, {"n_train", "settings", "eta_s"}, and exit')
     t.add_argument("--far-seeds", type=float, metavar="M",
                    help="seed what the windows show this many meters out, where LiDAR saw nothing (0 = off; default: from --quality)")
@@ -130,6 +135,10 @@ def cmd_train(args) -> int:
         raise ScanError(f"--name {args.name!r} must be a slug (lowercase letters, digits and dashes, e.g. reading-room)")
     if args.parent is not None and not SLUG.match(args.parent):
         raise ScanError(f"--parent {args.parent!r} must be a room name (a slug)")
+    if not 0 <= args.depth_weight <= 10:
+        raise ScanError(f"--depth-weight {args.depth_weight:g} must be from 0 (off) to 10")
+    if args.init and not Path(args.init).expanduser().is_file():
+        raise ScanError(f"--init {args.init}: no such splat file (pass a room's .spz or .ply)")
     if args.dry_run:  # the capture's frame count is all it needs: read it without unzipping
         n_frames = capture.peek(args.capture)["frames"]
         print(json.dumps(settings_mod.summary(n_frames, args.quality, resolve(args, n_frames))), flush=True)
@@ -191,7 +200,8 @@ def cmd_train(args) -> int:
 
         result = trainer.train(prep.data_dir, work / "out", cfg["steps"], prep.long_side, cfg["sh_degree"],
                                cfg["train_max_splats"], args.progress_every,
-                               stills_max_size=cfg["stills_max_size"] if prep.stills else None, pose_opt=cfg["pose_opt"])
+                               stills_max_size=cfg["stills_max_size"] if prep.stills else None, pose_opt=cfg["pose_opt"],
+                               depth_weight=args.depth_weight, init=Path(args.init).expanduser().resolve() if args.init else None)
         if args.keep_raw:
             shutil.copyfile(result["ply"], Path(args.keep_raw).expanduser())
         say("finishing: cropping floaters and writing the room")

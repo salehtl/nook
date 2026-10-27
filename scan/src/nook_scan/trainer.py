@@ -40,11 +40,13 @@ def train_log() -> Path:
 
 
 def train(data_dir: Path, out_dir: Path, steps: int, max_image_size: int, sh_degree: int, max_splats: int,
-          progress_every: float = 20.0, stills_max_size: int | None = None, pose_opt: bool = False) -> dict:
+          progress_every: float = 20.0, stills_max_size: int | None = None, pose_opt: bool = False,
+          depth_weight: float = 0.0, init: Path | None = None) -> dict:
     """Train the prepared dataset in `data_dir`. Returns {"ply": Path, "psnr": None}.
 
     `stills_max_size` sizes the frames dataset.prepare marked as stills; it's only passed on when it differs from
-    `max_image_size` (the same thing otherwise), and `--pose-opt` only when on, so older nook-gsplat builds still run.
+    `max_image_size` (the same thing otherwise), and `--pose-opt`, `--depth-weight` and `--init` only when used, so
+    older nook-gsplat builds still run.
 
     Re-emits nook-gsplat's `step X/Y` lines as `training: step X/Y, ...` every `progress_every` seconds; the jobs
     server reads those for its progress bar.
@@ -57,11 +59,16 @@ def train(data_dir: Path, out_dir: Path, steps: int, max_image_size: int, sh_deg
         cmd += ["--stills-max-size", str(stills_max_size)]
     if pose_opt:
         cmd += ["--pose-opt"]
+    if depth_weight:
+        cmd += ["--depth-weight", str(depth_weight)]
+    if init:
+        cmd += ["--init", str(init)]
     cmd += os.environ.get("NOOK_GSPLAT_ARGS", "").split()  # experiments, e.g. "--pose-opt-lr 2e-5"
     log = train_log()
     log.parent.mkdir(parents=True, exist_ok=True)
     say(f"training with {NAME}: {steps} steps, up to {max_splats:,} splats, SH degree {sh_degree}"
-        f"{', refining poses' if pose_opt else ''} (log: {log})")
+        f"{', refining poses' if pose_opt else ''}{f', depth loss {depth_weight:g}' if depth_weight else ''}"
+        f"{f', fine-tuning {Path(init).name}' if init else ''} (log: {log})")
     started, shown = time.time(), 0.0
     with open(log, "w", encoding="utf-8") as lf:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,

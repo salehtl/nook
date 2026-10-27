@@ -2,7 +2,8 @@
 """nook-gsplat: train a 3D Gaussian splat from a nook capture with gsplat (MCMC densification, CUDA).
 
     nook-gsplat CAPTURE_DIR --out OUT.ply [--steps 20000] [--max-splats 1200000] [--max-image-size 1920]
-                [--stills-max-size N] [--sh-degree 1] [--holdout-every 0] [--pose-opt]
+                [--stills-max-size N] [--sh-degree 1] [--holdout-every 0] [--pose-opt] [--depth-weight 0.2]
+                [--init ROOM.spz]
 
 Reads a contract §4 capture folder directly: transforms.json (Nerfstudio style, OpenGL camera-to-world, per-frame
 intrinsics may override the top-level ones), images/, and points.ply seed points. Frames marked `"still": true` (the
@@ -111,8 +112,10 @@ def read_points(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return xyz[ok], rgb[ok]
 
 
-def load_capture(root: Path, holdout_every: int, max_image_size: int, stills_max_size: int | None = None):
-    """Training frames as (uint8 HxWx3 CPU images, viewmats [N,4,4], Ks [N,3,3], camera centers [N,3])."""
+def load_capture(root: Path, holdout_every: int, max_image_size: int, stills_max_size: int | None = None,
+                 with_depth: bool = False):
+    """Training frames as (uint8 HxWx3 CPU images, viewmats [N,4,4], Ks [N,3,3], camera centers [N,3]), plus the
+    frames' LiDAR depth in meters (None per frame without one, or all None unless `with_depth`)."""
     tf = root / "transforms.json"
     if not tf.is_file():
         raise Fail(f"{root} has no transforms.json: pass an unzipped capture folder (scan-YYYYMMDD-HHMMSS)")
@@ -151,11 +154,19 @@ def load_capture(root: Path, holdout_every: int, max_image_size: int, stills_max
             raise Fail(f"cannot read {f['file_path']}: {e}")
         sx, sy = nw / w, nh / h
         K = np.array([[fx * sx, 0, cx * sx], [0, fy * sy, cy * sy], [0, 0, 1]])
-        return img, np.linalg.inv(c2w @ gl_to_cv), K, c2w[:3, 3]
+        depth = None
+        if with_depth and f.get("depth_file_path"):
+            try:
+                with Image.open(root / f["depth_file_path"]) as dm:  # 16-bit mm, 0 = no data (contract §4)
+                    depth = torch.from_numpy(np.asarray(dm, dtype=np.float32) / 1000.0).half()
+            except OSError as e:
+                raise Fail(f"cannot read {f['depth_file_path']}: {e}")
+        return img, np.linalg.inv(c2w @ gl_to_cv), K, c2w[:3, 3], depth
 
     with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:  # PIL decodes outside the GIL
         out = list(pool.map(load, train))
     images = [o[0] for o in out]
+    depths = [o[4] for o in out]
     viewmats = torch.tensor(np.stack([o[1] for o in out]), dtype=torch.float32)
     Ks = torch.tensor(np.stack([o[2] for o in out]), dtype=torch.float32)
     centers = np.stack([o[3] for o in out])
@@ -166,7 +177,7 @@ def load_capture(root: Path, holdout_every: int, max_image_size: int, stills_max
         seeds = read_points(ply)
         if not len(seeds[0]):
             seeds = None
-    return t, len(frames), images, viewmats, Ks, centers, seeds
+    return t, len(frames), images, viewmats, Ks, centers, seeds, depths
 
 
 # --- training ----------------------------------------------------------------------------------------------------
@@ -198,6 +209,76 @@ def init_splats(seeds, centers: np.ndarray, scene_scale: float, max_splats: int,
     if sh_degree > 0:
         params["shN"] = torch.zeros(n, (sh_degree + 1) ** 2 - 1, 3)
     return params
+
+
+def read_init(path: Path, max_splats: int, sh_degree: int) -> dict:
+    """Splats to fine-tune from: a 3DGS PLY (contract §1) or an SPZ v2 room (scan/src/nook_scan/spz.py's format), in
+    the capture's world frame. Higher SH bands than `sh_degree` are dropped, missing ones start at zero; past
+    `max_splats`, the most opaque are kept."""
+    import gzip
+    import struct
+
+    data = path.read_bytes()
+    if data[:2] == b"\x1f\x8b":  # SPZ: gzip of a header, then each attribute for all splats in turn
+        raw = gzip.decompress(data)
+        magic, ver, n, deg, frac = struct.unpack_from("<IIIBB", raw, 0)
+        if magic != 0x5053474E or ver != 2:
+            raise Fail(f"{path}: not an SPZ v2 file")
+        dim = (deg + 1) ** 2 - 1
+        off, parts = 16, {}
+        for k, size in (("pos", 9), ("alpha", 1), ("color", 3), ("scale", 3), ("rot", 3), ("sh", dim * 3)):
+            parts[k] = np.frombuffer(raw, np.uint8, n * size, off).reshape(n, size).astype(np.float32)
+            off += n * size
+        b = parts["pos"].reshape(n, 3, 3).astype(np.int64)
+        fixed = b[..., 0] + (b[..., 1] << 8) + (b[..., 2] << 16)
+        means = (np.where(fixed >= 1 << 23, fixed - (1 << 24), fixed) / float(1 << frac)).astype(np.float32)
+        alpha = (parts["alpha"][:, 0] / 255.0).clip(1e-4, 1 - 1e-4)
+        xyz = parts["rot"] / 127.5 - 1.0
+        quats = np.concatenate([np.sqrt((1 - (xyz ** 2).sum(1, keepdims=True)).clip(0)), xyz], 1)  # wxyz
+        p = {"means": means, "scales": parts["scale"] / 16.0 - 10.0, "quats": quats,
+             "opacities": np.log(alpha / (1 - alpha)),
+             "sh0": ((parts["color"] / 255.0 - 0.5) / 0.15)[:, None, :],
+             "shN": ((parts["sh"] - 128.0) / 128.0).reshape(n, dim, 3)}
+    else:
+        head, _, body = data.partition(b"end_header\n")
+        names = [ln.split()[-1] for ln in head.decode().splitlines() if ln.startswith("property")]
+        if b"binary_little_endian" not in head or "opacity" not in names:
+            raise Fail(f"{path}: not a binary 3DGS splat PLY (see contract §1)")
+        v = np.frombuffer(body, "<f4").reshape(-1, len(names))
+        col = {c: v[:, i] for i, c in enumerate(names)}
+        rest = sorted((c for c in names if c.startswith("f_rest_")), key=lambda c: int(c[7:]))
+        n, dim = len(v), len(rest) // 3
+        p = {"means": np.stack([col["x"], col["y"], col["z"]], 1),
+             "scales": np.stack([col[f"scale_{i}"] for i in range(3)], 1),
+             "quats": np.stack([col[f"rot_{i}"] for i in range(4)], 1), "opacities": col["opacity"],
+             "sh0": np.stack([col[f"f_dc_{i}"] for i in range(3)], 1)[:, None, :],
+             "shN": np.stack([col[c] for c in rest], 1).reshape(n, 3, dim).transpose(0, 2, 1) if dim
+             else np.zeros((n, 0, 3), np.float32)}
+    if n > max_splats:
+        keep = np.argsort(-p["opacities"])[:max_splats]
+        p = {k: a[keep] for k, a in p.items()}
+    want = (sh_degree + 1) ** 2 - 1
+    sh = np.zeros((len(p["means"]), want, 3), np.float32)
+    sh[:, :min(want, p["shN"].shape[1])] = p["shN"][:, :want]
+    params = {k: torch.from_numpy(np.ascontiguousarray(p[k], dtype=np.float32))
+              for k in ("means", "scales", "quats", "opacities", "sh0")}
+    if sh_degree > 0:
+        params["shN"] = torch.from_numpy(sh)
+    return params
+
+
+def depth_loss(pred: torch.Tensor, lidar: torch.Tensor) -> torch.Tensor:
+    """L1 in log depth between the rendered expected depth ([H, W], averaged down to the LiDAR map's size) and LiDAR,
+    on pixels LiDAR is sure of: a return under 5 m, away from depth edges (where the coarse map blends near and far)."""
+    dh, dw = lidar.shape
+    p = F.adaptive_avg_pool2d(pred[None, None], (dh, dw))[0, 0]
+    d = lidar.float()
+    near = -F.max_pool2d(-torch.where(d > 0, d, torch.full_like(d, 1e3))[None, None], 3, 1, 1)[0, 0]
+    far = F.max_pool2d(d[None, None], 3, 1, 1)[0, 0]
+    ok = (d > 0.15) & (d < 5.0) & (far - near < 0.1 * d) & (p > 0.01)
+    if not ok.any():
+        return pred.sum() * 0.0
+    return (torch.log(p[ok]) - torch.log(d[ok])).abs().mean()
 
 
 class SSIM(torch.nn.Module):
@@ -308,8 +389,8 @@ def train(args) -> dict:
     rng = np.random.default_rng(args.seed)
     torch.backends.cudnn.benchmark = True
 
-    t, n_frames, images, viewmats, Ks, centers, seeds = load_capture(Path(args.capture), args.holdout_every,
-                                                                     args.max_image_size, args.stills_max_size)
+    t, n_frames, images, viewmats, Ks, centers, seeds, depths = load_capture(
+        Path(args.capture), args.holdout_every, args.max_image_size, args.stills_max_size, with_depth=args.depth_weight > 0)
     n = len(images)
     scene_scale = 1.1 * float(np.linalg.norm(centers - centers.mean(0), axis=1).max())
     scene_scale = max(scene_scale, 0.1)
@@ -320,9 +401,16 @@ def train(args) -> dict:
     if seeds is None:
         say("no points.ply: starting from random points around the cameras")
 
-    init = init_splats(seeds, centers, scene_scale, args.max_splats, args.sh_degree, rng)
+    if args.init:
+        init = read_init(Path(args.init), args.max_splats, args.sh_degree)
+        say(f"fine-tuning {len(init['means']):,} splats from {args.init}")
+    else:
+        init = init_splats(seeds, centers, scene_scale, args.max_splats, args.sh_degree, rng)
+    if args.depth_weight > 0:
+        with_depth = sum(d is not None for d in depths)
+        say(f"depth loss {args.depth_weight:g} against LiDAR in {with_depth} of {n} training frames")
     splats = torch.nn.ParameterDict({k: torch.nn.Parameter(v) for k, v in init.items()}).to(dev)
-    lrs = {"means": 1.6e-4 * scene_scale, "scales": 5e-3, "quats": 1e-3, "opacities": 5e-2,
+    lrs = {"means": (1.6e-5 if args.init else 1.6e-4) * scene_scale, "scales": 5e-3, "quats": 1e-3, "opacities": 5e-2,
            "sh0": 2.5e-3, "shN": 2.5e-3 / 20}
     # SelectiveAdam (simple_trainer's --visible_adam) only steps splats seen in the current frame. A room walk-through
     # sees each splat in a few percent of its frames; plain Adam keeps moving the unseen ones on stale momentum.
@@ -362,20 +450,23 @@ def train(args) -> dict:
             order = rng.permutation(n)
         img = images[i].to(dev, non_blocking=True)
         h, w = img.shape[:2]
-        sh_deg = min(step // SH_INTERVAL, args.sh_degree)
+        sh_deg = args.sh_degree if args.init else min(step // SH_INTERVAL, args.sh_degree)
         colors = torch.cat([splats["sh0"], splats["shN"]], 1) if args.sh_degree > 0 else splats["sh0"]
         renders, _, info = rasterization(
             means=splats["means"], quats=splats["quats"], scales=torch.exp(splats["scales"]),
             opacities=torch.sigmoid(splats["opacities"]), colors=colors,
             viewmats=poses.viewmats(torch.tensor([i], device=dev)) if poses is not None else viewmats[i:i + 1],
             Ks=Ks[i:i + 1], width=w, height=h,
-            sh_degree=sh_deg, packed=False, near_plane=0.01, far_plane=1e10, rasterize_mode="classic")
-        pred = renders[0]  # [H, W, 3]
+            sh_degree=sh_deg, packed=False, near_plane=0.01, far_plane=1e10, rasterize_mode="classic",
+            render_mode="RGB+ED" if depths[i] is not None else "RGB")
+        pred = renders[0, ..., :3]  # [H, W, 3]
         target = img.float() / 255.0
         l1 = (pred - target).abs().mean()
         ssim_val = ssim(pred.permute(2, 0, 1)[None], target.permute(2, 0, 1)[None])
         loss = (1 - SSIM_LAMBDA) * l1 + SSIM_LAMBDA * (1 - ssim_val)
         loss_sum += loss.detach()
+        if depths[i] is not None:
+            loss = loss + args.depth_weight * depth_loss(renders[0, ..., 3], depths[i].to(dev, non_blocking=True))
         loss = loss + OPACITY_REG * torch.sigmoid(splats["opacities"]).mean()
         loss = loss + SCALE_REG * torch.exp(splats["scales"]).mean()
         loss.backward()
@@ -427,7 +518,8 @@ def train(args) -> dict:
             "stills_max_size": args.stills_max_size or args.max_image_size,
             "peak_vram_gib": {"allocated": round(torch.cuda.max_memory_allocated() / 2**30, 2),
                               "reserved": round(torch.cuda.max_memory_reserved() / 2**30, 2)},
-            "trainer": f"gsplat {gsplat_version} (MCMC)", "pose_opt": pose_stats}
+            "trainer": f"gsplat {gsplat_version} (MCMC)", "pose_opt": pose_stats,
+            "init": args.init, "depth_weight": args.depth_weight}
 
 
 def main(argv=None) -> None:
@@ -443,9 +535,14 @@ def main(argv=None) -> None:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--pose-opt", action="store_true", help="refine the training cameras' poses along with the splats")
     p.add_argument("--pose-opt-lr", type=float, default=1e-5, help="learning rate of the pose corrections")
+    p.add_argument("--depth-weight", type=float, default=0.0,
+                   help="weight of a log-depth loss against the frames' LiDAR depth (0: off; 0.1-0.3 keeps floaters "
+                        "out of free space)")
+    p.add_argument("--init", metavar="SPLAT", help="fine-tune from this splat (.ply or .spz, the capture's world frame) "
+                                                   "instead of training from seed points; a few thousand steps")
     args = p.parse_args(argv)
     if (args.steps < 1 or args.max_splats < 1000 or args.max_image_size < 16 or args.holdout_every < 0
-            or (args.stills_max_size is not None and args.stills_max_size < 16)):
+            or (args.stills_max_size is not None and args.stills_max_size < 16) or args.depth_weight < 0):
         p.error("--steps >= 1, --max-splats >= 1000, --max-image-size and --stills-max-size >= 16, --holdout-every >= 0")
     try:
         summary = train(args)

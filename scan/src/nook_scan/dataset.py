@@ -181,6 +181,8 @@ def prepare(cap: Capture, work: Path, holdout_every: int, max_image_size: int,
         entry = _frame_entry(cap, f, name, fscale, size, intr)
         if still:
             entry["still"] = True
+        if f.get("depth_file_path"):  # for nook-gsplat --depth-weight; the capture folder outlives the run
+            entry["depth_file_path"] = str((cap.root / f["depth_file_path"]).resolve())
         (held if out else train).append(entry)
     if stills:
         say(f"using {stills} high-resolution stills in place of their video frames, at up to {stills_max_size} px")
