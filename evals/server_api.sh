@@ -130,7 +130,7 @@ check "a cancelled job's capture is kept too" 'j "[c[\"name\"] for c in d[\"capt
 [ "$OWN" = 1 ] && check "the kept capture is <data-dir>/captures/<capture>.zip" '[ -s "$OUT/data/captures/$C1.zip" ]' "$(ls "$OUT/data" "$OUT/data/captures" 2>&1 | tr '\n' ' ')"
 code=$(curl -s -o "$OUT/defaults.json" -w '%{http_code}' "$BASE/api/scan/captures/$C1/defaults")
 check "GET /captures/<name>/defaults returns n_train, settings and eta_s" '[ "$code" = 200 ] && j "d[\"n_train\"] > 0 and d[\"eta_s\"] > 0 and {\"steps\",\"train_max_splats\",\"deliver_max_splats\",\"max_image_size\",\"stills_max_size\",\"sh_degree\",\"pose_opt\",\"holdout_every\"} <= set(d[\"settings\"])" <"$OUT/defaults.json" | grep -q True' "$code $(cat "$OUT/defaults.json")"
-check "defaults scale with the capture: steps = clamp(60 x n_train, 20k, 120k)" 'j "d[\"settings\"][\"steps\"] == min(120000, max(20000, 60 * d[\"n_train\"]))" <"$OUT/defaults.json" | grep -q True'
+check "defaults scale with the capture: steps = clamp(80 x n_train, 20k, 120k)" 'j "d[\"settings\"][\"steps\"] == min(120000, max(20000, 80 * d[\"n_train\"]))" <"$OUT/defaults.json" | grep -q True'
 check "retrain with an unknown setting is 400 naming it" '[ "$(post rbad1 "/api/scan/captures/$C1/retrain" "{\"settings\": {\"warp\": 9}}")" = 400 ] && grep -q warp "$OUT/rbad1.json"'
 check "retrain with a value out of range is 400 naming it" '[ "$(post rbad2 "/api/scan/captures/$C1/retrain" "{\"settings\": {\"sh_degree\": 7}}")" = 400 ] && grep -q sh_degree "$OUT/rbad2.json"'
 check "retrain of an unknown capture is 404" '[ "$(post rbad3 /api/scan/captures/scan-nope/retrain)" = 404 ]'

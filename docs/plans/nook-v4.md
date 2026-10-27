@@ -4,7 +4,15 @@
 
 ## Progress log
 - **2026-10-27, phase 0 (main loop):**
-  - **0a** running on kakapo (`evals/sizing_0a_remote.sh`, judged by `evals/sizing_0a_judge.sh`). A: 20k steps / 1.2M splats in 19.4 min, peak VRAM 2.45 GB, peak RSS 11.7 GB. C (2880 px stills) waits for `--stills-max-size` (build:scan).
+  - **0a** on kakapo (`evals/sizing_0a_remote.sh`, judged by `evals/sizing_0a_judge.sh`; scan-20261027-112322, 1,089 training frames, every 10th held out, held-out PSNR in Spark):
+
+    | Run | Steps | Splats | Time | Peak VRAM | Held-out PSNR |
+    |---|---|---|---|---|---|
+    | A | 20,000 | 1.2M | 19.4 min | 2.45 GB | 21.36 dB |
+    | B1 (40/frame) | 43,560 | 2M | 64 min | 3.97 GB | 21.44 dB |
+    | B2 (80/frame) | 87,120 | 2M | 139 min | 4.05 GB | 22.03 dB |
+
+    **Decision:** `k = 80` steps per frame (was 60). Speed measured at 47.9 s per 1,000 steps per million splats, so `gpu.py`'s 48.5 stays. Peak host RSS is 12.3 GB on every run. B3 (3M splats) is running and decides the 2060's training cap. C (2880 px stills) waits for B3 to end.
   - **0b** not run (needs the phone). **Decision for v4:** the app uses a **separate** RoomPlan pass with `world_from_roomplan` (§4.12), which can't disturb the capture session. A shared session stays a later experiment, after a device spike.
   - **0c** contracts written: §2.7 v4, §2.8, §2.9, §2.10 (raising items and hanging them on walls, added on request), §3.1 v4, §4.9.1, §4.12, §5.1; `roomplan.schema.json`, plus `meta.roomplan`, `parent`, `mount`, `mounted`.
   - **0d** evals first (failing until built): `library_api.sh` (new), `planner_v4_smoke.mjs` (new), v4 cases in `server_api.sh`, `rooms_api.sh`, `pipeline_offline.sh`, `ios_build.sh`, `validate_capture.py`; mocks `mock_scan_server.py` (§5.1, passes `server_api.sh` 35/35) and `mock_library_server.py` (new); fixtures `fixtures/roomplan/` (hand-made, labeled) and `fixtures/models/cube-obj.zip` (`fixtures/make_v4_fixtures.py`).

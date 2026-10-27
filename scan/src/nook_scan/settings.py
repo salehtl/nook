@@ -6,7 +6,7 @@ Every setting maps 1:1 to a `nook-scan train` flag (FLAGS) and to a retrain sett
 
 from . import gpu
 
-K_STEPS_PER_FRAME = 60             # §4.9.1 placeholder; phase 0a of the v4 plan sets it
+K_STEPS_PER_FRAME = 80             # §4.9.1, from v4 phase 0a: 40 -> 80 steps per frame gave +0.59 dB held-out at 2M splats
 STEPS_MIN, STEPS_MAX = 20_000, 120_000
 DRAFT_MAX_SPLATS = 1_200_000       # v1's cap, kept for --quality draft
 

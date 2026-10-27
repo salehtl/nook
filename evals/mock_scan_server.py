@@ -48,7 +48,7 @@ def new_job(capture: str, name: str, kind: str = "upload", parent: str | None = 
 
 def defaults(cap: dict, holdout_every: int = 0) -> dict:
     n = cap["n_frames"] - (len(range(0, cap["n_frames"], holdout_every)) if holdout_every else 0)
-    s = {"steps": min(120_000, max(20_000, 60 * n)), "train_max_splats": 2_000_000, "deliver_max_splats": 1_500_000,
+    s = {"steps": min(120_000, max(20_000, 80 * n)), "train_max_splats": 2_000_000, "deliver_max_splats": 1_500_000,
          "max_image_size": 1920, "stills_max_size": 1920, "sh_degree": 3, "pose_opt": False, "holdout_every": holdout_every}
     return {"n_train": n, "settings": s, "eta_s": round(s["steps"] / 1000 * 75)}
 
