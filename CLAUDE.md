@@ -18,6 +18,9 @@ The spec is [contract/CONTRACT.md](contract/CONTRACT.md). Read it before changin
 |---|---|
 | `planner/` | planner (browser app + `planner/serve.py`) |
 | `pipeline/` | furniture CLI (`nook-add`) |
+| `scan/`, `gsplat/`, `poses/` | nook-scan: capture check, trainer, jobs server |
+| `ios/` | Nook Scan iPhone app |
+| `nix/`, `deploy/` | kakapo packaging (NixOS module), Cloudflare Pages copy |
 | `contract/`, `evals/`, `fixtures/`, `CLAUDE.md`, `PLAN.md` | main session only; treat as read-only otherwise |
 | `room/`, `library/`, `layouts/` | user data written by the tools |
 
@@ -41,5 +44,6 @@ Only the main session commits.
 - `npm run eval:rooms` runs `evals/rooms_api.sh` (the rooms API, §2.7); `npm run eval:rooms-ui` runs `evals/planner_rooms_smoke.mjs` (several rooms, a training scan, phone and desktop).
 - `npm run eval:pipeline` runs `evals/pipeline_offline.sh` (offline, mocked fal, $0).
 - `evals/validate_library.py <library.json>` checks any library against the contract.
+- Scan, iOS, server and quality evals: see [evals/README.md](evals/README.md).
 
 Scratch output goes to `evals/out/` (git-ignored).
