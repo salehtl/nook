@@ -37,6 +37,43 @@
         }
       },
       "notes": "Starter piece: replay of the real 2026-10-25 capture. Dims approximate."
+    },
+    {
+      "id": "eames-ottoman",
+      "name": "Eames ottoman",
+      "category": "ottoman",
+      "dims_cm": {
+        "w": 66,
+        "d": 52.7,
+        "h": 43.8
+      },
+      "assets": {
+        "glb": "eames-ottoman/model.glb",
+        "splat": "eames-ottoman/splat.ply",
+        "thumb": "eames-ottoman/thumb.jpg"
+      },
+      "default_render": "splat",
+      "source": {
+        "engine": "sam3d",
+        "input": "library/_inbox/eames-lounge-chair-and-ottoman.jpg",
+        "prompt": "ottoman",
+        "cost_usd": 0.02,
+        "mock": false,
+        "created": "2026-10-27T06:27:36Z"
+      },
+      "fit": {
+        "glb_error_pct": {
+          "w": 0.0,
+          "d": 0.0,
+          "h": 0.0
+        },
+        "splat_error_pct": {
+          "w": 17.409,
+          "d": 13.745,
+          "h": 0.0
+        }
+      },
+      "notes": "Herman Miller Eames ottoman; dims from HM 3D model data (660x527x438 mm)"
     }
   ]
 }

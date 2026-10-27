@@ -3,3 +3,4 @@ date,id,engine,cost_usd,mock,input
 2026-10-25T14:46:05Z,render-20261025-144605,render:kontext,0.04,false,orbit
 2026-10-25T14:46:13Z,render-20261025-144613,render:nano-banana,0.0398,false,orbit
 2026-10-25T14:46:23Z,render-20261025-144623,render:qwen,0.0307,false,orbit
+2026-10-27T06:27:36Z,eames-ottoman,sam3d,0.02,false,library/_inbox/eames-lounge-chair-and-ottoman.jpg
