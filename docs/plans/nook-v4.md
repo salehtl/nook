@@ -1,125 +1,239 @@
 # nook v4: sharper rooms, a measured shell, and a library you manage from the browser
 
-**Status:** plan only, not started (2026-10-27).
+**Status:** plan only, not started. Revision 2 (2026-10-27), after a blind critique; the critique's findings are folded in and listed at the end.
 
 ## Goals
-1. **Sharper rooms:** retraining that matches the capture. Today a 1,210-photo scan gets the same 20k steps and 1.2M splat cap as a 270-photo one, so it comes out undertrained.
-2. **A measured room shell:** RoomPlan in the app, for exact walls, floor, windows and doors, plus automatic alignment. It sits next to the splat, not in place of it.
+1. **Sharper rooms:** retraining sized to the capture. Today a 1,210-photo scan gets the same 20k steps and 1.2M splats as a 270-photo one, so it comes out undertrained.
+2. **A measured room shell:** RoomPlan in the app (walls, floor, windows, doors). It sits next to the splat, not in place of it.
 3. **Learning to scan:** an animated onboarding in the app.
-4. **Managing the library and retraining from the web UI:**
-   - add furniture by uploading a model (`.glb`, `.gltf`, `.obj`)
-   - add furniture from a pasted image link run through a model (SAM 3D, TRELLIS 2)
-   - remove items
-   - retrain any room, with advanced settings
+4. **Library and retraining from the web UI:**
+   - add furniture from a model file (`.glb`, or `.obj` zipped with its `.mtl` and textures)
+   - add furniture from an image (pasted link, or a photo from the phone) run through a model (SAM 3D, TRELLIS 2)
+   - edit, remove and restore items
+   - retrain any room whose capture is kept, with advanced settings
 
-## What we know (2026-10-27)
-- **scan-20261027-112322** (app v0.3, ~2 GB):
-  - 1,210 training frames
-  - 20,000 steps, so about 16 looks per photo where around 100 is normal
-  - 1,134,027 splats, against the 1.2M cap
-  - images downsized to 1920 px, although the stills are 4032 px
-  - 19 min on kakapo
+## What we know (checked in the code, 2026-10-27)
+- **scan-20261027-112322:** 1,210 frames, 20k steps (about 16 looks per photo), 1,134,027 splats (cap 1.2M), 1920 px, 19 min.
+- **Hardware limits:**
+  - **VRAM:** 1.2M splats peak at about 2.5 GB at 1920 px, SH3 (`scan/src/nook_scan/gpu.py:15`), so 3M would be close to the whole 6 GB card.
+  - **Host RAM:** the trainer decodes every training image into RAM (`gsplat/nook_gsplat.py`), about 9 GB for 1,089 frames at 1920 px.
+  - **Browser:** the planner deliberately caps rooms at 1.5M splats, because Spark loads them in the browser (`gpu.py:14`). The planner is phone-first.
+- **Stills:** the app takes a high-res still every 3rd keyframe only (`CaptureRecorder.swift`, `stillEvery = 3`). Held-out frames are judged as video at 1920 px (`dataset.py`).
+- **Captures aren't kept.**
+  - The jobs server deletes the upload when a job ends, and again on restart (`serve.py:93`, `:225`).
+  - Re-uploading a capture returns its old job (`serve.py:133`).
   
-  It looks blurry everywhere.
-- **First-scan measurements (v3 plan):** the trainer and the ARKit camera positions are fine; the bigger budget gave +0.2 dB at 270 frames. At 4.5× the frames, the budget is the most likely limit.
-- **kakapo's nook service** (`nix/module.nix`) has **no `FAL_KEY` and no `nook-add`**. The furniture pipeline only runs on the Mac today. kakapo manages secrets with **sops** (`modules/sops.nix` in the kakapo repo).
-- **`nook.salehtl.com` has no login** (house network and tailnet). Library actions spend money on fal and fetch URLs, so they need guards (§ Risks).
-- **Planner v2 is merged** (PR #1). It has a rooms browser, a phone-first UI (`planner/ui/…`) and per-room config (contract §2.7). The library panel exists but is read-only.
+  So no existing room can be retrained without a re-upload.
+- **The GPU lock:** only my evals take `~/nook-gpu.lock`. The nook service's worker ignores it.
+- **kakapo:** the nook service has no `FAL_KEY` and no `nook-add`. kakapo uses sops for secrets. The pipeline pins Python `<3.13` (`pipeline/pyproject.toml`).
+- **Rendering:** `/api/render` is a paid fal call too. It's off on kakapo only because there's no key.
+- **The site:** `nook.salehtl.com` has no login (house network and tailnet).
+- **App:** targets iOS 18, so RoomPlan's shared-session initializer (iOS 17+) is available. Whether RoomPlan keeps the app's own session setup (hi-res video format, scene depth, exposure lock, delegate) is unknown until it runs on a phone. RoomPlan needs LiDAR.
+- **Planner v2 is merged:** a rooms browser, phone-first UI, per-room config (§2.7) and a read-only library panel.
 
 ## How the article shapes it
 - **One main loop by default.** These stay in the main loop:
-  - contracts
-  - every GPU measurement (one card, `flock ~/nook-gpu.lock`)
-  - integration and fixes
-  - everything credentialed or outward-facing: TestFlight, the kakapo PR, the sops secret (which you add), pushing and merging
-- **Builders split by context, not by step.** Each one owns a set of files and works against a written contract. None needs another's code to start: the planner UI builds against the contract with the fixtures and mock servers.
-- **Blind verification, kept light.** You asked to skip eval suites. Each change gets one number or check from the main loop. One blind reviewer reads the finished diff against the contract (not the builders' notes) before the PR. Drop it if you'd rather.
-- **Evals first, only where they're cheap.** The retrain gets its quality number before any default changes. The new APIs get their contract tests in the existing evals (`rooms_api`, `server_api`, `pipeline_offline`) by the builder that owns the API.
+  - contracts, **evals and mock servers (written before any builder starts)**
+  - every GPU measurement
+  - the RoomPlan device spike
+  - integration, fixes, version bumps
+  - everything credentialed or outward-facing: TestFlight, the kakapo PR, merges, the sops secret (which you add)
+- **Builders split by context.** Four builders, each owning whole files (table below). They build against the contract plus the main loop's evals, fixtures and mocks. They **run** the evals but don't edit them (`evals/` is main-loop-only, per CLAUDE.md), so passing them is a real check, not self-grading.
+- **Blind review, kept light.** You asked to skip eval suites, so there's no verifier per builder. One fresh reviewer reads the integrated diff against the contract only, not the builders' notes, before the PR.
 
-## Phase 0: main loop (before any agent)
-1. **Retrain experiment** (GPU, about 2 h total). Run on scan-20261027-112322 under the GPU lock, held-out every 10th frame, judged in Spark:
-   - **A.** As shipped: 20k steps, 1.2M splats, 1920 px.
-   - **B.** Scaled: about 80 steps per training frame (capped at 120k), 3M splats, 1920 px.
-   - **C.** B at 2880 px (stills only).
+## Phase 0: main loop
+### 0a. Retrain sizing on kakapo (GPU, about 6 h, unattended)
+- **Setup:**
+  - scan-20261027-112322, held out every 10th frame, judged in Spark
+  - stop `nook-scan.service` during the runs (or have it take the shared lock, 0d)
+  - log peak VRAM **and** peak host RAM
+  - first, `free -g` on kakapo
+- **The runs, in order:**
 
-   Record PSNR, time and peak VRAM in this file, and pick the scaling rule from the winner.
-   
-   *This needs you:* the scan's zip from the app, and the kakapo link reopened (one YubiKey tap).
-2. **Contract updates** (`contract/CONTRACT.md` and its schemas):
-   - **§4.12 Capture v1.3 (optional), RoomPlan:**
-     - `roomplan.json`: walls, floor, doors, windows and object boxes, each with dimensions and a 4×4 transform in the ARKit world (the same frame as `transforms.json`)
-     - `roomplan.usdz` for viewing
-     - `meta.json` `roomplan: {version, sessions: "shared" | "separate"}`
-     
-     Old captures stay valid.
-   - **§4.9 Trainer v3: settings that scale with the capture.**
-     - `steps = clamp(k × n_train, 20k, 120k)` and `max_splats` from VRAM, with k and the caps from step 1
-     - 2880 px when stills exist
-     - `--quality high` means "scaled"
-     - explicit flags still win
-   - **§5 Jobs API, retrain:**
-     - `POST /api/scan/rooms/<name>/retrain` with a body of optional `{steps, max_splats, max_image_size, sh_degree, pose_opt, holdout_every}`
-     - it re-queues the stored capture
-     - the result is a **new room** `<name>-r<N>`, so you can compare it with the old one, which is kept
-     - `GET /api/scan/defaults` returns the scaled settings the trainer would pick for a given capture
-     - jobs record the settings they ran with
-     - captures are kept for retraining, with `DELETE /api/scan/captures/<name>` to drop one
-   - **§2.8 Library API** (on `planner/serve.py`):
-     - `GET /api/library` returns the library
-     - `POST /api/library/items` takes either:
-       - multipart: a model file (`.glb`/`.gltf`/`.obj`, or an `.obj` zip with `.mtl` and textures), `name`, `dims_cm`, `category`, `yaw`
-       - JSON: `{image_url, engine: sam3d|trellis2, name, dims_cm, prompt, resolution, yaw}`
-       
-       It returns `202 {job}` with the estimated cost.
-     - `GET /api/library/jobs[/<id>]` returns progress and the result.
-     - `DELETE /api/library/items/<id>` moves the item to `library/.trash/`.
-     - `PATCH /api/library/items/<id>` changes name, category, dims (re-scaled), yaw or default render.
-     - Model jobs run `nook-add` one at a time.
-     - Cost rules: a cost estimate before every paid call, and a daily spend cap (default $2/day, from `costs.csv`).
-   - **§3.1 Pipeline:** `--engine glb` also accepts `.obj` (with `.mtl` and textures, converted to GLB). A URL input may be an image page link only when it resolves to an image (content type checked).
-3. **Brief per builder:** paths owned, contract sections, fixtures, done-when. Written in the same file as their prompts.
+  | Run | Steps | Splats | Notes |
+  |---|---|---|---|
+  | A | 20k | 1.2M | as shipped |
+  | B1 | 40 per frame | 2M | |
+  | B2 | 80 per frame | 2M | |
+  | B3 | 80 per frame | 3M | only if B2's peak VRAM is under 4.5 GB and RAM allows |
+  | C | best B | best B | at 2880 px **for stills only**; video frames unchanged |
 
-## Phase 1: workflow (5 builders in parallel, no shared files)
+  Held-out PSNR can't see C's extra detail, because held-out frames are video. Also score C on held-out *stills* and with a sharpness measure on the same crops.
+- **Delivery test:**
+  - The winner gets **delivered** at ≤1.5M splats (SH degree ≤2 if needed), however many it trained with.
+  - Load that SPZ on your iPhone in the planner and note the load time and frame rate.
+- **Phase 1 doesn't wait.** It starts with placeholder constants (`k = 60` steps per frame, a training cap of 2M, a delivery cap of 1.5M). 0a only changes the numbers.
+
+### 0b. RoomPlan device spike (about 30 min, needs your phone)
+- A throwaway build where RoomPlan shares the app's ARKit session. Check that:
+  - keyframes, stills and the exposure lock still work
+  - the photo rate stays within about 10% of today's
+  - it produces a `CapturedRoom`
+- **Shared session works:** v4 uses it.
+- **It doesn't:** v4 uses a separate 1-minute RoomPlan pass, plus an alignment step defined in the contract (§4.12, `world_from_roomplan`, solved from the floor plane and wall planes against the splat's points).
+- **Phones without LiDAR:** the app shows no RoomPlan.
+
+### 0c. Contracts (`contract/CONTRACT.md` + schemas)
+**§4.12 Capture v1.3 (optional), RoomPlan**
+- **Files:**
+  - `roomplan.json`: walls, floor, doors, windows and object boxes, each with dimensions and a 4×4 transform
+  - `roomplan.usdz` for viewing
+- **The coordinate frame:**
+  - In the shared-session case, transforms are in the `transforms.json` world.
+  - Otherwise `world_from_roomplan` (4×4) is stored, so `roomplan.json` is never assumed to be in the capture frame.
+- **`meta.json`:** gains `roomplan: {version, sessions: "shared" | "separate"}`.
+- **Old captures** stay valid.
+
+**§4.9 Trainer v3, scaled settings**
+- **Training settings:**
+  - `steps = clamp(k × n_train, 20k, 120k)`
+  - `train_max_splats`: a constant per GPU class, not "from VRAM", so a dry run gives the same answer on any machine
+  - stills trained at `stills_max_size`
+- **Delivered splats:** `deliver_max_splats` (1.5M by default) prunes by opacity × volume before writing the room, keeping the full PLY only on request.
+- **Precedence:** `--quality high` means scaled settings, and explicit flags win.
+- **Q1:** updated, since the old "<40 min" rule no longer holds.
+- **Advanced settings and the trainer flags they map to:**
+
+  | Setting | Flag |
+  |---|---|
+  | steps | `--steps` |
+  | training splats | `--max-splats` |
+  | delivered splats | `--deliver-max-splats` |
+  | image size | `--max-image-size` |
+  | stills size | `--stills-max-size` |
+  | detail | `--sh-degree` |
+  | camera refinement | `--pose-opt` (made a real flag; `nook-poses` is not offered, it gave nothing) |
+  | held out | `--holdout-every` |
+
+**§5 Jobs API: captures and retrain**
+- **Keeping captures:**
+  - A finished job's upload is **kept** as `captures/<capture>.zip`.
+  - Restarts no longer delete it.
+  - The restart message becomes "server restarted during training: retrain from the planner".
+- **New routes:**
+  - `GET /api/scan/captures` returns `{name, size_bytes, created, rooms: [...]}`.
+  - `DELETE /api/scan/captures/<name>` removes a capture.
+- **Retrain:**
+  - `POST /api/scan/captures/<name>/retrain` takes a body of `{settings}` (the table above, all optional) and returns `202 {job}`.
+  - Jobs gain `kind: "upload" | "retrain"`, `parent` (room name) and `settings` (what actually ran).
+  - The upload dedupe applies only to `kind: "upload"`.
+- **Naming:**
+  - A retrain of room `<base>` (base = name with any `-r\d+` suffix removed) becomes `<base>-r<N>`, where N is the highest existing number plus 1.
+  - Names stay within the 64-character slug limit by truncating the base.
+  - A user-chosen title is the room's `title`, not its name, so it can't collide.
+- **The new room starts from its parent's alignment and look.** `<new>.room.json` copies the parent's `transform` and `look`; it's the same world frame. Its viewpoints are recomputed, and its layouts start empty with an offer to copy them. It doesn't become `current` unless you open it.
+- **`GET /api/scan/captures/<name>/defaults`** returns the scaled settings and an `eta_s` estimate.
+- **Proxy:** every mutating `/api/scan` route is proxied by `planner/serve.py`, including DELETE.
+
+**§2.7 additions (rooms)**
+- room objects gain `roomplan_url`, `capture` (name or null) and `parent`
+- the rooms list groups `-rN` rooms under their base
+
+**§2.8 Library API (`planner/serve.py`)**
+- **Routes:**
+  - `GET /api/library`
+  - `POST /api/library/items` with a **raw body** (no multipart, since `cgi` is gone from Python 3.13), described by headers:
+    - `X-Nook-Kind: model | image`
+    - `X-Nook-Filename`
+    - `X-Nook-Meta`: base64 JSON of name, dims_cm, category, yaw, engine, prompt, resolution
+    
+    The body is one of: a `.glb`; a `.zip` with an `.obj`, `.mtl` and textures; or an image file (a photo from the phone).
+  - `POST /api/library/items/from-url`, JSON `{image_url, ...meta}`
+  - Both return `202 {job, cost_usd_estimate}`.
+  - `GET /api/library/jobs[/<id>]`
+  - `PATCH /api/library/items/<id>` changes name, category, yaw, default render, or dims. Dims are rescaled **server-side** from the item's normalized assets (`nook-add --rescale <id>`), with no new model call.
+  - `DELETE /api/library/items/<id>` moves the item to `library/.trash/`.
+  - `POST /api/library/items/<id>/restore` brings it back.
+- **Layouts that use a deleted item:** they load, with the item shown as a "missing item" placeholder.
+- **Writes:** all library writes (`nook-add` and the server) take one lock and go through one queue.
+- **Limits:**
+  - uploads: 200 MB for models, 20 MB for images
+  - zips: extracted files allowlisted (`.obj .mtl .png .jpg .jpeg`), no path escapes, at most 500 MB unpacked
+  - `.gltf` with side files: zip it, or convert to `.glb` first
+- **What `/library/` serves:** item assets only. It doesn't serve `raw/` or `.trash/`, and sends `X-Content-Type-Options: nosniff`.
+
+**§2.9 Mutating requests and money (applies to every route above and to `/api/render`)**
+- **Against forged requests (CSRF):** every POST, PUT, PATCH and DELETE needs the header `X-Nook: 1` and an `Origin` that's absent or the page's own. Anything else gets `403`. The iOS app's upload sends the header too.
+- **Spend cap:**
+  - A server flag (`--daily-spend-usd`, default 2), not settable from the page.
+  - It covers `/api/render` too.
+  - Check-and-reserve is atomic, logged to `costs.csv`, and refunded on failure.
+  - `costs.csv` isn't served.
+- **URL fetches (SSRF):**
+  - `nook-web` downloads the image **itself** and passes a local file to `nook-add`, which never fetches URLs on the server.
+  - http(s) only. The resolved IP is pinned and checked on every redirect hop (at most 3).
+  - Blocked: 127/8, ::1, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, fd7a:115c:a1e0::/48, fc00::/7, and v4-mapped forms.
+  - Image content type required, 20 MB at most. A web page link gets "paste the image's own link".
+
+**§3.1 Pipeline**
+- `--engine glb` accepts `.glb` and an `.obj` zip (converted to GLB).
+- `--rescale <id>`.
+- Mock mode accepts a local image, so the from-URL flow is tested at $0 through `nook-web`'s download plus a local file.
+
+### 0d. Evals, mocks and fixtures first (main loop, before the builders)
+- **Failing eval cases** for §2.8, §2.9, §5 (captures and retrain) and §4.12. They go in the existing suites (`rooms_api`, `server_api`, `pipeline_offline`) plus a new `library_api`.
+- **`evals/mock_scan_server.py`** extended for captures and retrain, so the planner UI and iOS tests have something to talk to (A2 parity kept).
+- **A new `evals/mock_library_server.py`.**
+- **A RoomPlan fixture:** from the 0b spike's real `CapturedRoom` if possible, otherwise hand-made and labeled as such.
+- **The shared GPU lock:** `/run/nook/gpu.lock` (in the module's `RuntimeDirectory`), taken by the service worker and by `evals/remote.sh`.
+- **Python:** decide the pipeline's version, either relaxing the `<3.13` pin after a test or packaging it with `python312`. Also check whether nixpkgs has `fal-client`, otherwise package it.
+
+## Phase 1: workflow (4 builders in parallel, whole-file ownership)
 | Agent | Owns | Builds | Done when |
 |---|---|---|---|
-| `build:ios-roomplan` | `ios/NookScan/Capture/`, `ios/NookScan/RoomPlan/` (new), `ios/project.yml`, tests | RoomPlan running on the app's own ARKit session (`RoomCaptureSession(arSession:)`, iOS 17+), with a fallback 1-min separate pass if sharing hurts the capture. Writes `roomplan.json`/`.usdz` (§4.12). RoomPlan coaching shown during scans. | Device build clean; replay test writes a valid v1.3 capture; frame rate and stills rate with RoomPlan on vs off reported from a simulator/replay run (real phone in phase 3) |
-| `build:ios-onboarding` | `ios/NookScan/UI/Onboarding/` (new) | Five looping SwiftUI animations (prepare, lock the light, pass 1, pass 2, pass 3 + close-ups) plus do/don't. First-run sheet and a **How to scan** button. Text matches `docs/SCANNING.md`. Optional mini-guide strip during a pass. | Builds; snapshot tests of each screen; the main loop wires in the one entry point |
-| `build:scan` | `scan/`, `evals/server_api.sh` additions | Trainer v3 scaling (§4.9); retrain endpoint, stored captures, `/defaults` (§5); `roomplan.*` passed through to `<room-dir>/<name>.roomplan.json`/`.usdz` | `server_api` passes with new cases (fake trainer); `nook-scan train --dry-run` prints scaled settings for both real scans |
-| `build:library-api` | `planner/serve.py` (library routes only), `pipeline/`, `nix/` (nook-add package, `FAL_KEY` `EnvironmentFile` option in `module.nix`) | §2.8 routes and job queue running `nook-add`; OBJ → GLB in the pipeline; guards (cost estimate, daily cap, URL checks, size limits); Nix package for `nook-add` | `pipeline_offline` + new `library_api` cases pass with `NOOK_FAL_MOCK`; `nix build .#nook` on kakapo (main loop runs it under the lock) |
-| `build:planner-ui` | `planner/ui/`, `planner/styles/`, `planner/data.js`, `planner/engine.js` (RoomPlan shell only) | **Library manager:** add sheet with three tabs: upload a model, image link → model (engine, prompt and cost shown), from the phone's photos (upload an image). Job progress, edit, remove (with undo from trash). **Retrain sheet** on a room: one button with the scaled defaults, plus an **Advanced** section (steps, splats, image size, SH degree, camera refinement, held-out) with plain-language hints and the time estimate. New room versions appear in the rooms list, grouped under their scan. **RoomPlan:** auto-align from the floor and walls, wall dimensions on tap, a see-through shell toggle, furniture snapping to walls. Phone first, like v2. | `eval:planner` + rooms UI evals pass with new cases against mock servers; screenshots at 390 × 844 and 1280 × 800 |
+| `build:ios` | all of `ios/` (`Capture/`, `UI/` including `CaptureView.swift`, `SettingsView.swift`, the new `UI/Onboarding/` and `RoomPlan/`, `project.yml`, tests) | RoomPlan as decided in 0b, with on-screen coaching and a settings toggle, hidden without LiDAR; writes §4.12. **Then** the onboarding: five looping SwiftUI guides (prepare, lock the light, three passes with close-ups) plus do/don't, a first-run sheet, a **How to scan** button, an optional in-pass strip; text matches `docs/SCANNING.md`. Sends `X-Nook: 1`. One builder, so `project.yml` and the Xcode project are never edited twice. | Device build clean; unit + replay tests pass (replay writes a valid v1.3 capture from the 0b fixture); onboarding snapshot tests. Real-phone checks happen in phase 3, not here |
+| `build:scan` | `scan/`, `gsplat/`, `nix/nook-gsplat.nix` | §4.9 (scaling, delivery pruning, real `--pose-opt` flag); §5 captures, retrain, naming, parent copy, dedupe and restart rules; `roomplan.*` passed through to the room dir; the service worker takes the shared lock | main-loop evals `server_api` (fake trainer) pass, untouched; `nook-scan train --dry-run` prints the scaled settings for both real scans |
+| `build:web-server` | all of `planner/serve.py`, `pipeline/`, `nix/nook.nix`, `nix/module.nix`, `flake.nix` | §2.7 additions, §2.8, §2.9 (header check, spend cap including render, the URL fetcher), proxying every `/api/scan` method; `nook-add --rescale`, OBJ zips, the single library lock; Nix package for `nook-add` (Python per 0d), `--library ${dataDir}/library`, a module option `falKeyFile` (an EnvironmentFile in `FAL_KEY=…` form), `RuntimeDirectory` for the lock | main-loop evals `library_api`, `rooms_api` and `pipeline_offline` pass with `NOOK_FAL_MOCK`, untouched |
+| `build:planner-ui` | `planner/ui/`, `planner/styles/`, `planner/data.js`, `planner/engine.js`, `planner/main.js`, `planner/index.html` | **Library manager:** add sheet with model file / image link / photo from the phone; the cost shown before you confirm; the day's remaining budget; job progress; edit; remove with undo (restore). **Retrain sheet:** one button with defaults and time estimate, plus **Advanced** (the §4.9 settings, with plain hints). Rooms grouped with their `-rN` versions; "this capture isn't kept, upload again to retrain" when there's none. **RoomPlan (v4 scope):** a see-through shell toggle and wall lengths on tap. *Auto-align and snapping wait for v4.1, built against a real RoomPlan capture.* Sends `X-Nook: 1` on every mutation | `eval:planner` and rooms UI evals pass against the mock servers, untouched; screenshots at 390 × 844 and 1280 × 800 |
 
-Each builder gets the contract, its brief, and the fixtures and mock servers. Nothing else of the others' work is visible to it. Builders don't commit.
+Builders don't commit and don't edit `evals/` or `contract/`. If the contract is wrong, they report it and the main loop decides.
 
 ## Phase 2: main loop
-1. **Integrate** the five sets of changes and run every eval once. Wire the onboarding entry point. Fix what breaks.
-2. **GPU check:** retrain scan-20261027-112322 through the new endpoint with the defaults. It must match phase 0's winner within 0.2 dB.
-3. **One blind review** (a fresh agent): the diff against the contract, reporting bugs and missing states only. The main loop fixes, or records why not.
+1. **Integrate.** Bump versions: nook 0.3.0 (`nix/nook.nix`), app 0.4.0 (`MARKETING_VERSION`). Run every eval, fix what breaks.
+2. **GPU check on kakapo from the branch** (`evals/remote.sh` builds the branch in `~/src/nook`, under the shared lock):
+   - upload the capture to a branch-built jobs server on a spare port
+   - retrain through the new endpoint with `holdout_every: 10`
+   - pass if within 0.2 dB of 0a's winner, and the delivered room is ≤1.5M splats
+3. **One blind review** (a fresh agent): the diff against the contract only, reporting bugs and missing states. The main loop fixes them, or records why not.
 
-## Phase 3: release (main loop, needs you where marked)
-1. **nook PR** → you merge.
-2. **kakapo PR** (you OK the merge): nook pin bump, `services.nook.falKeyFile` from a new sops secret, and `nook-add` in the service. *You add the secret value* (`sops` on kakapo); I never see it.
-3. **TestFlight 0.4.0** via `ios/scripts/release.sh`.
-4. **You rescan** with 0.4.0: onboarding first, then RoomPlan on. I score it against today's scan, check RoomPlan's effect on the frame rate on a real phone, and tune.
+## Phase 3: release (main loop; needs you where marked)
+1. **nook PR.** You merge it.
+2. **kakapo PR** (you OK the merge): the nook pin bump, `services.nook.falKeyFile` pointing at a new sops secret in `FAL_KEY=…` form, and `--daily-spend-usd`.
+   - *You add the secret value* with sops on kakapo. I never see it.
+   - Until then, library model jobs and Render say "no fal key on the server".
+3. **TestFlight 0.4.0.**
+4. **You rescan with 0.4.0.** I score it against today's scan, check the photo rate with RoomPlan on, and use the real RoomPlan output for v4.1 (auto-align, snapping).
 
-## Risks and guards
-- **Spending from an open page:** anyone on the house Wi-Fi or tailnet could run paid model jobs.
-  - Guards: a cost confirmation, a daily cap ($2 default, configurable), and every call logged to `costs.csv`.
-  - Retrain and delete are free but slow or destructive. Delete goes to trash, and retrain is one job at a time.
-  - Adding a login is out of scope unless you want it.
-- **URL fetching:** the server fetches pasted links.
-  - It allows only http(s), blocks private and tailnet addresses, caps size at 20 MB, and requires an image content type. A web page link is rejected with "paste the image's own link".
-- **RoomPlan sharing the session** may lower the frame or stills rate. It's measured on your phone in phase 3. The fallback is a separate 1-minute pass.
-- **Long retrains:** 120k steps is about 1.5–2 h on the 2060. The retrain sheet shows the estimate, and the defaults stay under about 90 min unless you raise them under Advanced.
-- **Disk:** keeping captures for retrain is about 2 GB per scan. The rooms list shows capture size, and deleting a capture is one tap.
+## Risks
+- **Retrain time:** 2M splats at 80 per frame on a 1,200-frame scan is likely 2–3 h. The retrain sheet shows the estimate from 0a's measured speed. Defaults come from 0a, not from guesses.
+- **Disk:** each kept capture is about 2 GB, and each retrained room adds an SPZ (about 100 MB at 1.5M splats). The PLY isn't kept for retrains unless asked. The rooms list shows sizes, and deleting a capture or room is one tap (rooms go to `.trash/`, which you empty yourself).
+- **RoomPlan:** if the device spike fails both ways, RoomPlan moves to v4.1 and v4 ships everything else.
+- **Open page:** §2.9 covers forged requests, URL fetches and money. Anyone on your Wi-Fi or tailnet can still use the page directly, by design. A login stays out of scope unless you want it.
 
 ## Rough timing
 | Phase | Time |
 |---|---|
-| Phase 0 | about 2.5 h (GPU-bound; starts when the zip and link are in) |
-| Phase 1 workflow | about 3–4 h, builders in parallel |
-| Phase 2 | about 1.5 h |
-| Phase 3 | about 1 h of my work plus your merges, the secret and a rescan |
+| 0a GPU sizing | about 6 h unattended; runs while 0c/0d and phase 1 proceed |
+| 0b spike | 30 min with your phone |
+| 0c/0d | about 2 h |
+| Phase 1 | about 3–4 h |
+| Phase 2 | about 2 h plus one GPU retrain (2–3 h) |
+| Phase 3 | about 1 h of my work, plus your merges, the secret and the rescan |
 
-## Out of scope (later)
-- Generative fill of unseen areas (v3 plan, phase 3).
-- A login for `nook.salehtl.com`.
+## Critique findings and what changed
+| # | Finding | Change |
+|---|---|---|
+| 1 | Phase 0 GPU sizing unrealistic, VRAM/RAM | 0a rebuilt: staged runs, RAM logged, 6 h, placeholder constants |
+| 2 | 3M splats too heavy for the browser and phone | Training cap and delivery cap split; phone load test |
+| 3 | Captures deleted, retrain hits the dedupe, naming and parent gaps | §5 captures, retrain, naming, parent copy, dedupe and restart rules |
+| 4 | Unowned files | Whole-file ownership; main loop owns mocks and fixtures |
+| 5 | Two iOS builders collide | One iOS builder, RoomPlan then onboarding |
+| 6 | RoomPlan untested, simulator check impossible, separate-session frame | 0b device spike; `world_from_roomplan`; no simulator metric |
+| 7 | Planner RoomPlan built without real data | v4: shell and wall lengths only; auto-align and snapping in v4.1 |
+| 8 | CSRF, SSRF, XSS, render outside the cap | §2.9 |
+| 9 | Builders grading themselves | Main loop writes the evals first; builders can't edit them |
+| 10 | Library API gaps | Photo upload, restore, server-side rescale, single lock, missing-item placeholder |
+| 11 | Nix, Python pin, secret option naming | 0d decision; one option `falKeyFile` |
+| 12 | GPU lock not shared with the service | Shared lock in `/run/nook` |
+| 13 | Phase 2 can't run before merge | Branch-built server on kakapo, held out |
+| 14 | Minor contract points | Wording fixed, flag mapping, constants per GPU class, version bumps owned, `costs.csv` not served |
