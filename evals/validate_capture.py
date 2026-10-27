@@ -88,10 +88,37 @@ def validate(root: Path, min_frames: int) -> list[str]:
             return errs
     if transforms.get("ply_file_path") and not inside(transforms["ply_file_path"]):
         errs.append(f"ply_file_path {transforms['ply_file_path']} missing or outside the capture")
+    if meta.get("roomplan") is not None:
+        errs += validate_roomplan(root, meta["roomplan"])
     if positions:
         span = float(np.linalg.norm(np.ptp(np.array(positions), axis=0)))
         if span < 0.5:
             errs.append(f"camera positions span only {span:.2f} m (need >= 0.5 m: walk around while scanning)")
+    return errs
+
+
+def validate_roomplan(root: Path, info: dict) -> list[str]:
+    """Contract §4.12: roomplan.json present, schema-valid, matrices finite and rigid, the frame stated as meta says."""
+    p = root / "roomplan.json"
+    if not p.is_file():
+        return ["meta.roomplan is set but roomplan.json is missing"]
+    try:
+        rp = json.loads(p.read_text())
+        jsonschema.validate(rp, json.loads((Path(__file__).parent.parent / "contract/roomplan.schema.json").read_text()))
+    except (ValueError, jsonschema.ValidationError) as e:
+        return [f"roomplan.json: {str(e).splitlines()[0]}"]
+    errs = []
+    if info.get("sessions") == "separate" and "world_from_roomplan" not in rp:
+        errs.append("roomplan.json: sessions is separate, so world_from_roomplan is required")
+    if info.get("sessions") == "shared" and "world_from_roomplan" in rp:
+        errs.append("roomplan.json: sessions is shared, so world_from_roomplan must be absent")
+    mats = [("world_from_roomplan", rp["world_from_roomplan"])] if "world_from_roomplan" in rp else []
+    mats += [(e["id"], e["transform"]) for k in ("walls", "floors", "doors", "windows", "openings", "objects") for e in rp.get(k, [])]
+    for tag, m in mats:
+        m = np.array(m, dtype=float)
+        r = m[:3, :3]
+        if not np.isfinite(m).all() or np.abs(r.T @ r - np.eye(3)).max() > 1e-3 or abs(np.linalg.det(r) - 1) > 1e-3:
+            errs.append(f"roomplan.json {tag}: transform must be finite with an orthonormal rotation")
     return errs
 
 

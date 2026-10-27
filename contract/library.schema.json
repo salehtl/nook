@@ -27,6 +27,7 @@
         "id": { "$ref": "#/$defs/slug" },
         "name": { "type": "string", "minLength": 1 },
         "category": { "type": ["string", "null"] },
+        "mount": { "enum": ["floor", "wall"] },
         "dims_cm": {
           "type": "object",
           "required": ["w", "d", "h"],

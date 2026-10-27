@@ -196,6 +196,24 @@
               "type": "number"
             }
           }
+        },
+        "roomplan": {
+          "type": "object",
+          "required": [
+            "version",
+            "sessions"
+          ],
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "sessions": {
+              "enum": [
+                "shared",
+                "separate"
+              ]
+            }
+          }
         }
       }
     }

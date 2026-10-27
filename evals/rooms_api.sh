@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Planner rooms API eval (contract §2.7, P17–P19 server side): planner/serve.py on a scratch room dir with three
 # rooms (copies of the fixture splat), a v1 room.json and a v1 layout. No browser, no network, $0.
+# v4: the §2.7 room fields (roomplan_url, capture, parent) and the §2.9 forged-request checks (W1).
 # Usage: bash evals/rooms_api.sh   (or npm run eval:rooms). Output lands in evals/out/rooms/.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -25,7 +26,7 @@ f = lambda p: json.load(open(p))
 sys.exit(0 if eval(sys.argv[1]) else 1)' "$1"; }
 # call NAME METHOD PATH [BODY-FILE]: saves the response to $OUT/r/NAME.json and prints the status code.
 call() {
-  local args=(-s -o "$OUT/r/$1.json" -w '%{http_code}' -X "$2")
+  local args=(-s -o "$OUT/r/$1.json" -w '%{http_code}' -X "$2" -H 'X-Nook: 1')   # §2.9: every mutation carries it
   [ -n "${4:-}" ] && args+=(-H 'Content-Type: application/json' --data-binary "@$4")
   curl "${args[@]}" "$BASE$3"
 }
@@ -40,6 +41,8 @@ cp fixtures/room/test.spz "$ROOM/.hidden.spz"                 # dotfile: not a r
 cp fixtures/room/test.spz "$ROOM/Bad_Name.spz"                # not a slug: not a room
 mkdir -p "$ROOM/.trash/old-1" && cp fixtures/room/test.spz "$ROOM/.trash/old-1/gone.spz"
 echo "notes" >"$ROOM/notes.txt"
+cp fixtures/roomplan/roomplan.json "$ROOM/study-new.roomplan.json"   # v4 measured shell (§4.12): not a room by itself
+echo "usdz" >"$ROOM/study-new.roomplan.usdz"
 python3 - "$ROOM" <<'EOF'
 import os, sys, time
 d, now = sys.argv[1], time.time()
@@ -86,7 +89,7 @@ check "v1 PUT /api/layouts/<non-slug> is 400" '[ "$(call v1bad PUT /api/layouts/
 # --- listing (P17) and adoption (P19) ------------------------------------------------------------------------------------
 code=$(call list1 GET /api/rooms)
 check "GET /api/rooms lists the three rooms newest first" '[ "$code" = 200 ] && py "[x[\"name\"] for x in r(\"list1\")[\"rooms\"]] == [\"study-new\", \"reading-room\", \"hall-old\"]"' "$code $(head -c 400 "$OUT/r/list1.json")"
-check "room objects have exactly the contract fields" 'py "all(set(x) == {\"name\",\"title\",\"splat\",\"created\",\"size_bytes\",\"thumb_url\",\"aligned\",\"layouts\",\"current\"} for x in r(\"list1\")[\"rooms\"])"'
+check "room objects have exactly the contract fields" 'py "all(set(x) == {\"name\",\"title\",\"splat\",\"created\",\"size_bytes\",\"thumb_url\",\"aligned\",\"layouts\",\"current\",\"roomplan_url\",\"capture\",\"parent\"} for x in r(\"list1\")[\"rooms\"])"'
 check "current is the room room.json points at" 'py "r(\"list1\")[\"current\"] == \"reading-room\" and [x[\"current\"] for x in r(\"list1\")[\"rooms\"]] == [False, True, False]"'
 check "splat paths follow the trainer convention, .spz wins over .ply" 'py "[x[\"splat\"] for x in r(\"list1\")[\"rooms\"]] == [ROOM + \"/study-new.spz\", ROOM + \"/reading-room.spz\", ROOM + \"/hall-old.spz\"]"' "$(head -c 300 "$OUT/r/list1.json")"
 check "size, created (ISO UTC), thumb_url, aligned, title" 'py "all(x[\"size_bytes\"] == os.path.getsize(ROOM + \"/test.spz\".replace(\"test\", x[\"name\"])) and x[\"created\"].endswith(\"Z\") and x[\"thumb_url\"] is None and x[\"aligned\"] is False and x[\"title\"] is None for x in r(\"list1\")[\"rooms\"])"'
@@ -183,6 +186,33 @@ files = glob.glob(\"$ROOM/*.room.json\") + [\"$ROOM/room.json\"]
 assert len(files) == 4, files
 for p in files: jsonschema.validate(json.load(open(p)), s)"'
 
+# --- v4: room fields (§2.7) and forged requests (§2.9, W1) -----------------------------------------------------------------
+call list6 GET /api/rooms >/dev/null
+check "roomplan_url set for the room with a measured shell only" 'py "{x[\"name\"]: x[\"roomplan_url\"] for x in r(\"list6\")[\"rooms\"]} == {\"study-new\": \"/room/study-new.roomplan.json\", \"reading-room\": None, \"hall-old\": None}"' "$(head -c 400 "$OUT/r/list6.json")"
+check "the roomplan file is served" '[ "$(curl -s -o /dev/null -w "%{http_code}" "$BASE/room/study-new.roomplan.json")" = 200 ]'
+check "capture is null without --scan-api, parent null without a retrain" 'py "all(x[\"capture\"] is None and x[\"parent\"] is None for x in r(\"list6\")[\"rooms\"])"'
+python3 - "$ROOM/hall-old.room.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["parent"] = "reading-room"; json.dump(c, open(sys.argv[1], "w"))
+PY
+call list7 GET /api/rooms >/dev/null
+check "parent comes from <name>.room.json" 'py "[x[\"parent\"] for x in r(\"list7\")[\"rooms\"] if x[\"name\"] == \"hall-old\"] == [\"reading-room\"]"'
+cp "$ROOM/hall-old.room.json" "$OUT/hall.before-w1.json"
+forged() {  # forged NAME METHOD PATH [curl args...]: a mutation as a cross-site page would send it; prints the status
+  local n=$1 m=$2 path=$3; shift 3
+  curl -s -o "$OUT/r/$n.json" -w '%{http_code}' -X "$m" -H 'Content-Type: application/json' --data-binary '{"version": 1, "title": "forged"}' "$@" "$BASE$path"
+}
+check "W1 PUT /api/rooms/<name> without X-Nook is 403, nothing written" '[ "$(forged w1a PUT /api/rooms/hall-old)" = 403 ] && cmp -s "$OUT/hall.before-w1.json" "$ROOM/hall-old.room.json"'
+check "W1 a foreign Origin is 403 even with X-Nook" '[ "$(forged w1b PUT /api/rooms/hall-old -H "X-Nook: 1" -H "Origin: http://evil.example")" = 403 ] && cmp -s "$OUT/hall.before-w1.json" "$ROOM/hall-old.room.json"'
+cp "$ROOM/room.json" "$OUT/roomjson.before-w1.json"
+# Probes that would do harm if unguarded aim at nothing real (403 must come before 404), or are undone right after.
+check "W1 PUT /api/room, layouts and DELETE are guarded too" '[ "$(forged w1c PUT /api/room)" = 403 ] && [ "$(forged w1d PUT "/api/layouts/x?room=hall-old")" = 403 ] && [ "$(forged w1e DELETE /api/rooms/nope)" = 403 ]'
+cp "$OUT/roomjson.before-w1.json" "$ROOM/room.json"; rm -f "$LAYOUTS/hall-old/x.json"
+check "W1 POST /api/render without X-Nook is 403" '[ "$(forged w1f POST /api/render)" = 403 ]'
+check "W1 the page's own Origin is accepted" '[ "$(forged w1g PUT /api/rooms/hall-old -H "X-Nook: 1" -H "Origin: $BASE")" = 200 ]'
+check "W1 403 answers with a JSON error" 'py "\"error\" in r(\"w1a\")"'
+cp "$OUT/hall.before-w1.json" "$ROOM/hall-old.room.json"
+
 # --- delete rooms --------------------------------------------------------------------------------------------------------------
 call putb PUT "/api/layouts/plan-b?room=reading-room" "$(body putb "${LAY/plan-a/plan-b}")" >/dev/null
 call thumb2 PUT /api/rooms/reading-room/thumb "$OUT/r/thumb.body" >/dev/null
@@ -200,6 +230,7 @@ check "deleting a room room.json doesn't point at leaves room.json alone" '[ "$c
 code=$(call delsn DELETE /api/rooms/study-new)
 T3=$(python3 -c "import json; print(json.load(open('$OUT/r/delsn.json')).get('trash', ''))" 2>/dev/null)
 check "deleting the last room moves room.json to the trash, .ply too" '[ "$code" = 200 ] && [ ! -e "$ROOM/room.json" ] && [ -f "$ROOM/$T3/room.json" ] && [ -f "$ROOM/$T3/study-new.ply" ] && [ -f "$ROOM/$T3/study-new.spz" ]' "$code $(ls -a "$ROOM")"
+check "v4 the room's roomplan files go to the trash with it" '[ -f "$ROOM/$T3/study-new.roomplan.json" ] && [ -f "$ROOM/$T3/study-new.roomplan.usdz" ] && [ ! -e "$ROOM/study-new.roomplan.json" ]' "$(ls -a "$ROOM/$T3")"
 call list5 GET /api/rooms >/dev/null
 check "no rooms left: empty list, current null" 'py "r(\"list5\") == {\"rooms\": [], \"current\": None}"' "$(cat "$OUT/r/list5.json")"
 call v1room3 GET /api/room >/dev/null

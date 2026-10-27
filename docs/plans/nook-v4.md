@@ -1,6 +1,15 @@
 # nook v4: sharper rooms, a measured shell, and a library you manage from the browser
 
-**Status:** PARKED (2026-10-27, low on usage credits); not started. Revision 2 (2026-10-27), after a blind critique; the critique's findings are folded in and listed at the end.
+**Status:** IN PROGRESS (started 2026-10-27, branch `v4`). Revision 2 (2026-10-27), after a blind critique; the critique's findings are folded in and listed at the end.
+
+## Progress log
+- **2026-10-27, phase 0 (main loop):**
+  - **0a** running on kakapo (`evals/sizing_0a_remote.sh`, judged by `evals/sizing_0a_judge.sh`). A: 20k steps / 1.2M splats in 19.4 min, peak VRAM 2.45 GB, peak RSS 11.7 GB. C (2880 px stills) waits for `--stills-max-size` (build:scan).
+  - **0b** not run (needs the phone). **Decision for v4:** the app uses a **separate** RoomPlan pass with `world_from_roomplan` (§4.12), which can't disturb the capture session. A shared session stays a later experiment, after a device spike.
+  - **0c** contracts written: §2.7 v4, §2.8, §2.9, §2.10 (raising items and hanging them on walls, added on request), §3.1 v4, §4.9.1, §4.12, §5.1; `roomplan.schema.json`, plus `meta.roomplan`, `parent`, `mount`, `mounted`.
+  - **0d** evals first (failing until built): `library_api.sh` (new), `planner_v4_smoke.mjs` (new), v4 cases in `server_api.sh`, `rooms_api.sh`, `pipeline_offline.sh`, `ios_build.sh`, `validate_capture.py`; mocks `mock_scan_server.py` (§5.1, passes `server_api.sh` 35/35) and `mock_library_server.py` (new); fixtures `fixtures/roomplan/` (hand-made, labeled) and `fixtures/models/cube-obj.zip` (`fixtures/make_v4_fixtures.py`).
+  - **Python:** the pipeline passes on 3.13 (all pre-v4 checks), so the pin is relaxed to `<3.14` and the Nix package uses nixpkgs' python3 (3.13). `fal-client` isn't in nixpkgs: it gets packaged in `nix/`.
+  - **GPU lock:** `evals/remote.sh` takes `/run/nook/gpu.lock` when the module has made it, else `~/nook-gpu.lock`.
 
 ## Goals
 1. **Sharper rooms:** retraining sized to the capture. Today a 1,210-photo scan gets the same 20k steps and 1.2M splats as a 270-photo one, so it comes out undertrained.

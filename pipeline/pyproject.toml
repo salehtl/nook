@@ -2,7 +2,7 @@
 name = "nook-pipeline"
 version = "0.1.0"
 description = "nook-add: turn a furniture photo or model into a normalized nook library item"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "fal-client>=0.7",
     "numpy>=2.0",

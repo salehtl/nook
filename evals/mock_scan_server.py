@@ -1,4 +1,5 @@
-"""Reference mock of the nook-scan jobs API (contract §5): same routes, statuses and shapes, with simulated training.
+"""Reference mock of the nook-scan jobs API (contract §5, §5.1): same routes, statuses and shapes, with simulated training.
+v4: kept captures, retrain with settings and -rN naming, defaults, and the X-Nook / Origin check on mutations (§2.9).
 
 The iOS app is built and tested against this before the real server exists; the real server must answer the same way.
 Usage: python3 evals/mock_scan_server.py [--port 8798] [--seconds 6]   (stdlib only)
@@ -19,6 +20,13 @@ SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 STEPS = 30000
 lock = threading.Lock()
 jobs: dict[str, dict] = {}
+captures: dict[str, dict] = {}   # kept captures (§5.1): name -> {name, size_bytes, created, n_frames, roomplan}
+SETTINGS = {  # §4.9.1: key -> (type, min, max)
+    "steps": (int, 1000, 200_000), "train_max_splats": (int, 100_000, 4_000_000), "deliver_max_splats": (int, 100_000, 4_000_000),
+    "max_image_size": (int, 640, 3840), "stills_max_size": (int, 640, 4032), "sh_degree": (int, 0, 3), "pose_opt": (bool, None, None),
+    "holdout_every": (int, 0, 50),
+}
+RN = re.compile(r"-r(\d+)$")
 queue: list[str] = []
 SECONDS = 6.0
 
@@ -27,11 +35,46 @@ def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def new_job(capture: str, name: str) -> dict:
+def new_job(capture: str, name: str, kind: str = "upload", parent: str | None = None, settings: dict | None = None) -> dict:
     jid = f"j-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
-    return {"id": jid, "capture": capture, "name": name, "status": "queued", "stage": "waiting", "progress": 0.0,
-            "step": 0, "total_steps": STEPS, "eta_s": None, "created": now(), "started": None, "finished": None,
+    steps = (settings or {}).get("steps", STEPS)
+    return {"id": jid, "kind": kind, "capture": capture, "name": name, "parent": parent, "settings": settings,
+            "status": "queued", "stage": "waiting", "progress": 0.0,
+            "step": 0, "total_steps": steps, "eta_s": None, "created": now(), "started": None, "finished": None,
             "message": "waiting for the GPU", "result": None}
+
+
+def defaults(cap: dict, holdout_every: int = 0) -> dict:
+    n = cap["n_frames"] - (len(range(0, cap["n_frames"], holdout_every)) if holdout_every else 0)
+    s = {"steps": min(120_000, max(20_000, 60 * n)), "train_max_splats": 2_000_000, "deliver_max_splats": 1_500_000,
+         "max_image_size": 1920, "stills_max_size": 1920, "sh_degree": 3, "pose_opt": False, "holdout_every": holdout_every}
+    return {"n_train": n, "settings": s, "eta_s": round(s["steps"] / 1000 * 75)}
+
+
+def check_settings(given: dict) -> str | None:
+    for k, v in given.items():
+        if k not in SETTINGS:
+            return f"unknown setting {k!r}: use one of {', '.join(SETTINGS)}"
+        typ, lo, hi = SETTINGS[k]
+        if typ is bool:
+            if not isinstance(v, bool):
+                return f"{k} must be true or false"
+        elif isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi or (k == "holdout_every" and v == 1):
+            return f"{k} must be a whole number from {lo} to {hi}" + (" (0 or at least 2)" if k == "holdout_every" else "")
+    if given.get("deliver_max_splats", 0) > given.get("train_max_splats", 4_000_000):
+        return "deliver_max_splats can't be more than train_max_splats"
+    return None
+
+
+def retrain_name(capture: str) -> tuple[str, str]:
+    """(parent, new name) for a retrain of this capture: §5.1 naming. Call with the lock held."""
+    done = sorted((j for j in jobs.values() if j["capture"] == capture and j["status"] == "done"), key=lambda j: j["finished"])
+    parent = done[-1]["name"] if done else capture
+    base = RN.sub("", parent)
+    taken = [int(m.group(1)) for j in jobs.values() if j["status"] not in ("failed", "cancelled")
+             for m in [RN.search(j["name"])] if m and RN.sub("", j["name"]) == base]
+    suffix = f"-r{max(taken, default=0) + 1}"
+    return parent, base[:64 - len(suffix)].rstrip("-") + suffix
 
 
 def worker():
@@ -42,6 +85,10 @@ def worker():
                 queue.remove(jid)
                 job = jobs[jid]
                 job.update(status="training", stage="preparing", started=now(), message="preparing images")
+                cap = captures.get(job["capture"])
+                if cap:  # settings: what actually ran (§5.1)
+                    job["settings"] = {**defaults(cap)["settings"], **(job["settings"] or {})}
+                    job["total_steps"] = job["settings"]["steps"]
         if not jid:
             time.sleep(0.2)
             continue
@@ -81,6 +128,15 @@ class Handler(BaseHTTPRequestHandler):
     def err(self, status: int, msg: str) -> None:
         self.send(status, {"error": msg})
 
+    def guarded(self) -> bool:
+        """§2.9: a mutation needs X-Nook: 1 and an Origin that is absent or this server's own. Sends the 403 when not."""
+        origin = self.headers.get("Origin")
+        own = {f"http://{self.headers.get('Host')}", f"https://{self.headers.get('Host')}"}
+        if self.headers.get("X-Nook") == "1" and (origin is None or origin in own):
+            return True
+        self.err(403, "cross-site request refused")
+        return False
+
     def do_GET(self):
         p = self.path.split("?")[0]
         if p == "/api/scan/health":
@@ -96,10 +152,58 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 j = jobs.get(m.group(1))
                 return self.send(200, j) if j else self.err(404, f"no job {m.group(1)}")
+        if p == "/api/scan/captures":
+            with lock:
+                out = [{k: c[k] for k in ("name", "size_bytes", "created", "roomplan")} |
+                       {"rooms": [j["name"] for j in jobs.values() if j["capture"] == c["name"] and j["status"] == "done"]}
+                       for c in captures.values()]
+            return self.send(200, {"captures": sorted(out, key=lambda c: c["created"], reverse=True)})
+        m = re.fullmatch(r"/api/scan/captures/([a-z0-9-]+)/defaults", p)
+        if m:
+            with lock:
+                c = captures.get(m.group(1))
+                return self.send(200, defaults(c)) if c else self.err(404, f"no kept capture {m.group(1)}")
         self.err(404, "not found")
 
+    def do_DELETE(self):
+        if not self.guarded():
+            return
+        m = re.fullmatch(r"/api/scan/captures/([a-z0-9-]+)", self.path.split("?")[0])
+        if not m:
+            return self.err(404, "not found")
+        with lock:
+            name = m.group(1)
+            if name not in captures:
+                return self.err(404, f"no kept capture {name}")
+            if any(j["capture"] == name and j["status"] in ("queued", "training") for j in jobs.values()):
+                return self.err(409, "a job for this capture is still queued or training: cancel it first")
+            del captures[name]
+        self.send(200, {"ok": True})
+
     def do_POST(self):
+        if not self.guarded():
+            return
         p = self.path.split("?")[0]
+        m = re.fullmatch(r"/api/scan/captures/([a-z0-9-]+)/retrain", p)
+        if m:
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                assert isinstance(body, dict) and isinstance(body.get("settings", {}), dict)
+            except (ValueError, AssertionError):
+                return self.err(400, 'body must be JSON like {"settings": {"steps": 60000}}')
+            problem = check_settings(body.get("settings", {}))
+            if problem:
+                return self.err(400, problem)
+            with lock:
+                if m.group(1) not in captures:
+                    return self.err(404, f"no kept capture {m.group(1)}: upload it again to retrain")
+                parent, name = retrain_name(m.group(1))
+                j = new_job(m.group(1), name, "retrain", parent, body.get("settings") or None)
+                if body.get("title"):
+                    j["title"] = str(body["title"])
+                jobs[j["id"]] = j
+                queue.append(j["id"])
+                return self.send(202, j)
         m = re.fullmatch(r"/api/scan/jobs/([A-Za-z0-9-]+)/cancel", p)
         if m:
             with lock:
@@ -132,9 +236,13 @@ class Handler(BaseHTTPRequestHandler):
         if not SLUG.fullmatch(name):
             return self.err(400, f"X-Nook-Name must be a slug, got {name!r}")
         with lock:
-            existing = next((j for j in jobs.values() if j["capture"] == capture and j["status"] not in ("failed", "cancelled")), None)
+            existing = next((j for j in jobs.values() if j["kind"] == "upload" and j["capture"] == capture
+                             and j["status"] not in ("failed", "cancelled")), None)
             if existing:
                 return self.send(200, existing)
+            n_frames = len(json.loads(z.read(f"{capture}/transforms.json")).get("frames", []))
+            captures[capture] = {"name": capture, "size_bytes": n, "created": now(), "n_frames": n_frames,
+                                 "roomplan": f"{capture}/roomplan.json" in names}
             j = new_job(capture, name)
             jobs[j["id"]] = j
             queue.append(j["id"])
