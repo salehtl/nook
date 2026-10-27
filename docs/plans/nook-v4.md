@@ -1,6 +1,6 @@
 # nook v4: sharper rooms, a measured shell, and a library you manage from the browser
 
-**Status:** plan only, not started. Revision 2 (2026-10-27), after a blind critique; the critique's findings are folded in and listed at the end.
+**Status:** PARKED (2026-10-27, low on usage credits); not started. Revision 2 (2026-10-27), after a blind critique; the critique's findings are folded in and listed at the end.
 
 ## Goals
 1. **Sharper rooms:** retraining sized to the capture. Today a 1,210-photo scan gets the same 20k steps and 1.2M splats as a 270-photo one, so it comes out undertrained.
