@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """nook planner server (stdlib only).
 
-Serves the repo root as static files and a tiny JSON API for the room config, layouts and
-"Render this view" (a paid fal image edit of a planner screenshot). See contract/CONTRACT.md §2.1 and §2.6.
+Serves the repo root as static files and a tiny JSON API for the room config, the rooms (every scan in the room
+dir, each with its own config, thumbnail and layouts), layouts and "Render this view" (a paid fal image edit of a
+planner screenshot). See contract/CONTRACT.md §2.1, §2.6 and §2.7.
 
-    python3 planner/serve.py [--port 8765] [--room-file room/room.json] [--layouts-dir layouts]
+    python3 planner/serve.py [--port 8765] [--room-dir room] [--room-file <room-dir>/room.json] [--layouts-dir layouts]
                              [--renders-dir renders] [--costs-file library/costs.csv]
 
 Relative paths are resolved against the repo root. FAL_KEY comes from the environment, else from
@@ -20,6 +21,7 @@ import json
 import os
 import re
 import sys
+import shutil
 import tempfile
 import threading
 import urllib.error
@@ -28,13 +30,16 @@ from datetime import datetime, timezone
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from pathlib import Path, PurePosixPath
+from urllib.parse import parse_qs, unquote, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 PLACEHOLDER_ROOM = {"version": 1, "placeholder": {"w": 3.5, "d": 4, "h": 2.7}}
 MAX_BODY = 32 * 1024 * 1024
+SCAN_EXTS = (".spz", ".ply")  # a room's scan; .spz wins when both exist (contract §2.7)
+MAX_THUMB = 2 * 1024 * 1024
+rooms_lock = threading.RLock()  # room-dir writes (adoption, save, thumbnail, delete) one at a time
 
 # --- render this view (contract §2.6) -------------------------------------------------------
 RENDER_MODELS = {
@@ -153,6 +158,50 @@ def download(url: str) -> bytes:
     with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "nook"}), timeout=120) as res:
         return res.read()
 
+
+# --- rooms (contract §2.7) ----------------------------------------------------------------------
+def iso_utc(t: float | None = None) -> str:
+    dt = datetime.fromtimestamp(t, timezone.utc) if t is not None else datetime.now(timezone.utc)
+    return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def read_json_file(path: Path):
+    """The parsed file, or None when it is missing or unreadable."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def splat_stem(config) -> str | None:
+    """The basename stem of a config's `splat` (room/scan-1.spz -> scan-1): how room.json and layouts name a room."""
+    splat = config.get("splat") if isinstance(config, dict) else None
+    if not isinstance(splat, str) or not splat:
+        return None
+    return PurePosixPath(urlsplit(splat).path).stem or None
+
+
+def splat_url(scan: Path, room_dir: Path) -> str:
+    """Same rule as the trainer (scan/src/nook_scan/room.py): relative to the repo root, or to room-dir's parent
+    when room-dir is outside the repo."""
+    scan = scan.resolve()
+    base = REPO if REPO in scan.parents else room_dir.resolve().parent
+    return scan.relative_to(base).as_posix()
+
+
+def list_scans(room_dir: Path) -> dict[str, Path]:
+    """{name: scan file} for every slug-named .spz/.ply in room-dir (dotfiles and .trash ignored)."""
+    scans: dict[str, Path] = {}
+    if not room_dir.is_dir():
+        return scans
+    for p in room_dir.iterdir():
+        if p.name.startswith(".") or p.suffix not in SCAN_EXTS or not SLUG.match(p.stem) or not p.is_file():
+            continue
+        if p.stem not in scans or p.suffix == ".spz":
+            scans[p.stem] = p
+    return scans
+
+
 MIME = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -163,6 +212,7 @@ MIME = {
     ".csv": "text/csv; charset=utf-8",
     ".txt": "text/plain; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".webmanifest": "application/manifest+json",
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -201,6 +251,7 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, room_file: Path, layouts_dir: Path, renders_dir: Path, costs_file: Path,
                  room_dir: Path | None = None, library_dir: Path | None = None, scan_api: str | None = None, **kwargs):
         self.room_file = room_file
+        self.room_dir = room_dir or (REPO / "room")  # where the rooms live (served as /room/)
         self.layouts_dir = layouts_dir
         self.renders_dir = renders_dir
         self.costs_file = costs_file
@@ -335,9 +386,15 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if api == "/api/room":
                 return self.put_room()
+            m = re.fullmatch(r"/api/rooms/([^/]*)/thumb", api)
+            if m:
+                return self.put_room_thumb(m.group(1))
+            m = re.fullmatch(r"/api/rooms/([^/]*)", api)
+            if m:
+                return self.put_room_config(m.group(1))
             m = re.fullmatch(r"/api/layouts/(.*)", api)
             if m:
-                return self.put_layout(m.group(1))
+                return self.put_room_layout(m.group(1)) if self.room_query() is not None else self.put_layout(m.group(1))
             return self.error_json(HTTPStatus.NOT_FOUND, f"no such endpoint: PUT {api}")
         except Exception as e:  # keep the server alive and answer in JSON
             return self.error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
@@ -354,6 +411,18 @@ class Handler(SimpleHTTPRequestHandler):
         return self.error_json(HTTPStatus.METHOD_NOT_ALLOWED, "use GET or PUT (POST only for /api/render)")
 
     def do_DELETE(self):
+        api = self.api_path()
+        try:
+            m = re.fullmatch(r"/api/rooms/([^/]*)", api or "")
+            if m:
+                return self.delete_room(m.group(1))
+            m = re.fullmatch(r"/api/layouts/(.*)", api or "")
+            if m and self.room_query() is not None:
+                return self.delete_room_layout(m.group(1))
+            if m:
+                return self.error_json(HTTPStatus.BAD_REQUEST, "only a room's layouts can be deleted: add ?room=<name>")
+        except Exception as e:
+            return self.error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
         return self.error_json(HTTPStatus.METHOD_NOT_ALLOWED, "use GET or PUT")
 
     # --- api -------------------------------------------------------------
@@ -362,12 +431,17 @@ class Handler(SimpleHTTPRequestHandler):
             if api == "/api/room":
                 return self.get_room()
             if api == "/api/layouts":
-                return self.list_layouts()
+                return self.list_room_layouts() if self.room_query() is not None else self.list_layouts()
             if api == "/api/renders":
                 return self.list_renders()
+            if api == "/api/rooms":
+                return self.list_rooms()
+            m = re.fullmatch(r"/api/rooms/([^/]*)", api)
+            if m:
+                return self.get_room_config(m.group(1))
             m = re.fullmatch(r"/api/layouts/(.*)", api)
             if m:
-                return self.get_layout(m.group(1))
+                return self.get_room_layout(m.group(1)) if self.room_query() is not None else self.get_layout(m.group(1))
             return self.error_json(HTTPStatus.NOT_FOUND, f"no such endpoint: GET {api}")
         except Exception as e:
             return self.error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
@@ -388,7 +462,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
         if not isinstance(data, dict) or "version" not in data:
             return self.error_json(HTTPStatus.BAD_REQUEST, "room must be a JSON object with a 'version' field")
-        atomic_write_json(self.room_file, data)
+        with rooms_lock:
+            atomic_write_json(self.room_file, data)
+            name = splat_stem(data)
+            if name and name in list_scans(self.room_dir):  # keep that room's own config in step (§2.7)
+                atomic_write_json(self.room_dir / f"{name}.room.json", data)
         return self.send_json(HTTPStatus.OK, {"ok": True})
 
     def list_layouts(self):
@@ -420,6 +498,227 @@ class Handler(SimpleHTTPRequestHandler):
             return self.error_json(HTTPStatus.BAD_REQUEST, "layout must be a JSON object")
         atomic_write_json(self.layouts_dir / f"{name}.json", data)
         return self.send_json(HTTPStatus.OK, {"ok": True, "name": name})
+
+    # --- rooms (contract §2.7) ---------------------------------------------
+    def room_query(self) -> str | None:
+        """The ?room=<name> of this request, or None when there is none."""
+        values = parse_qs(urlsplit(self.path).query).get("room")
+        return values[0] if values else None
+
+    def current_room(self, scans: dict[str, Path]) -> str | None:
+        """The room room.json points at (matched by the basename stem of its splat), or None."""
+        name = splat_stem(read_json_file(self.room_file))
+        return name if name in scans else None
+
+    def room_config(self, name: str, scan: Path, current: str | None) -> dict:
+        """<name>.room.json; else room.json when it points at this room (adopted: copied to <name>.room.json);
+        else the identity config. `splat` is always the room's scan. Call with rooms_lock held."""
+        own = self.room_dir / f"{name}.room.json"
+        config = read_json_file(own)
+        if not isinstance(config, dict):
+            config = None
+            if name == current:
+                legacy = read_json_file(self.room_file)
+                if isinstance(legacy, dict):
+                    config = dict(legacy, splat=splat_url(scan, self.room_dir))
+                    atomic_write_json(own, config)
+        if config is None:
+            config = {"version": 1}
+        config["splat"] = splat_url(scan, self.room_dir)
+        return config
+
+    def room_layouts(self, name: str) -> list[dict]:
+        """The room's layouts plus the v1 layouts made for its scan (legacy), as {name, items, updated, legacy}."""
+        found: dict[str, dict] = {}
+
+        def add(path: Path, legacy: bool, data=None):
+            data = read_json_file(path) if data is None else data
+            items = data.get("items") if isinstance(data, dict) else None
+            found[path.stem] = {"name": path.stem, "items": len(items) if isinstance(items, list) else 0,
+                                "updated": iso_utc(path.stat().st_mtime), "legacy": legacy}
+
+        own = self.layouts_dir / name
+        if own.is_dir():
+            for p in own.glob("*.json"):
+                if SLUG.match(p.stem) and p.is_file():
+                    add(p, False)
+        if self.layouts_dir.is_dir():
+            for p in self.layouts_dir.glob("*.json"):
+                if not SLUG.match(p.stem) or p.stem in found or not p.is_file():
+                    continue
+                data = read_json_file(p)
+                if isinstance(data, dict) and splat_stem(data.get("room")) == name:
+                    add(p, True, data)
+        return [found[k] for k in sorted(found)]
+
+    def find_room(self, name: str):
+        """(scans, scan) for a known room, or (scans, None)."""
+        scans = list_scans(self.room_dir)
+        return scans, scans.get(name) if SLUG.match(name) else None
+
+    def no_room(self, name: str):
+        if not SLUG.match(name):
+            return self.error_json(HTTPStatus.NOT_FOUND, f"no room named {name!r} (room names are slugs: a-z, 0-9, -)")
+        return self.error_json(HTTPStatus.NOT_FOUND, f"no room named {name!r}: GET /api/rooms lists the rooms in {self.room_dir}")
+
+    def list_rooms(self):
+        with rooms_lock:
+            scans = list_scans(self.room_dir)
+            current = self.current_room(scans)
+            rooms = []
+            for name, scan in scans.items():
+                config = self.room_config(name, scan, current)
+                st = scan.stat()
+                title = config.get("title")
+                rooms.append({
+                    "name": name, "title": title if isinstance(title, str) and title else None,
+                    "splat": config["splat"], "created": iso_utc(st.st_mtime), "size_bytes": st.st_size,
+                    "thumb_url": f"/room/{name}.jpg" if (self.room_dir / f"{name}.jpg").is_file() else None,
+                    "aligned": bool(config.get("saved")), "layouts": len(self.room_layouts(name)),
+                    "current": name == current, "_mtime": st.st_mtime,
+                })
+        rooms.sort(key=lambda r: (-r.pop("_mtime"), r["name"]))
+        return self.send_json(HTTPStatus.OK, {"rooms": rooms, "current": current})
+
+    def get_room_config(self, name: str):
+        with rooms_lock:
+            scans, scan = self.find_room(name)
+            if scan is None:
+                return self.no_room(name)
+            return self.send_json(HTTPStatus.OK, self.room_config(name, scan, self.current_room(scans)))
+
+    def put_room_config(self, name: str):
+        if not SLUG.match(name):
+            return self.error_json(HTTPStatus.BAD_REQUEST, f"room name must be a slug (a-z, 0-9, -): {name!r}")
+        try:
+            data = self.read_json_body()
+        except ValueError as e:
+            return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
+        if not isinstance(data, dict) or "version" not in data:
+            return self.error_json(HTTPStatus.BAD_REQUEST, "room must be a JSON object with a 'version' field")
+        with rooms_lock:
+            scans, scan = self.find_room(name)
+            if scan is None:
+                return self.no_room(name)
+            current = self.current_room(scans)
+            # A rename (only `title` differs) keeps the old `saved` time, so it doesn't mark the room aligned.
+            before = self.room_config(name, scan, current)
+            same = lambda c: {k: v for k, v in c.items() if k not in ("title", "saved", "splat")}
+            saved = before.get("saved") if same(data) == same(before) else iso_utc()
+            config = dict(data, splat=splat_url(scan, self.room_dir), saved=saved)
+            atomic_write_json(self.room_dir / f"{name}.room.json", config)
+            if name == current:
+                atomic_write_json(self.room_file, config)
+        return self.send_json(HTTPStatus.OK, {"ok": True, "name": name, "saved": config["saved"], "current": name == current})
+
+    def put_room_thumb(self, name: str):
+        if not SLUG.match(name):
+            return self.error_json(HTTPStatus.BAD_REQUEST, f"room name must be a slug (a-z, 0-9, -): {name!r}")
+        try:
+            body = self.read_json_body()
+        except ValueError as e:
+            return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
+        image = body.get("image") if isinstance(body, dict) else None
+        m = re.fullmatch(r"data:image/jpe?g;base64,([A-Za-z0-9+/=\s]+)", image) if isinstance(image, str) else None
+        data = None
+        if m:
+            try:
+                data = base64.b64decode(re.sub(r"\s", "", m.group(1)), validate=True)
+            except (binascii.Error, ValueError):
+                data = None
+        if not data or data[:3] != b"\xff\xd8\xff":
+            return self.error_json(HTTPStatus.BAD_REQUEST, "image must be a JPEG data URI (data:image/jpeg;base64,...)")
+        if len(data) > MAX_THUMB:
+            return self.error_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "thumbnail is over 2 MB: send a smaller JPEG")
+        with rooms_lock:
+            _, scan = self.find_room(name)
+            if scan is None:
+                return self.no_room(name)
+            atomic_write_bytes(self.room_dir / f"{name}.jpg", data)
+        return self.send_json(HTTPStatus.OK, {"ok": True, "name": name, "thumb_url": f"/room/{name}.jpg"})
+
+    def delete_room(self, name: str):
+        with rooms_lock:
+            scans, scan = self.find_room(name)
+            if scan is None:
+                return self.no_room(name)
+            current = self.current_room(scans)
+            self.room_config(name, scan, current)  # adopt room.json first, so its alignment goes to the trash too
+            base = f"{name}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+            trash, n = self.room_dir / ".trash" / base, 1
+            while trash.exists():
+                n += 1
+                trash = self.room_dir / ".trash" / f"{base}-{n}"
+            trash.mkdir(parents=True)
+            for p in sorted(self.room_dir.glob(f"{name}.*")):  # scan(s), <name>.room.json, <name>.jpg
+                if p.is_file():
+                    shutil.move(str(p), str(trash / p.name))
+            layouts = self.layouts_dir / name
+            if layouts.is_dir():
+                shutil.move(str(layouts), str(trash / "layouts"))
+            if name == current:
+                left = list_scans(self.room_dir)
+                if left:
+                    newest = max(left, key=lambda k: (left[k].stat().st_mtime, k))
+                    atomic_write_json(self.room_file, self.room_config(newest, left[newest], None))
+                elif self.room_file.exists():
+                    shutil.move(str(self.room_file), str(trash / "room.json"))  # kept, never removed
+        return self.send_json(HTTPStatus.OK, {"ok": True, "trash": trash.relative_to(self.room_dir).as_posix()})
+
+    def layout_room(self):
+        """(room name, None) for a known ?room=, else (None, error already sent)."""
+        name = self.room_query()
+        if not SLUG.match(name):
+            self.error_json(HTTPStatus.BAD_REQUEST, f"room name must be a slug (a-z, 0-9, -): {name!r}")
+            return None
+        if self.find_room(name)[1] is None:
+            self.no_room(name)
+            return None
+        return name
+
+    def list_room_layouts(self):
+        room = self.layout_room()
+        if room is None:
+            return
+        details = self.room_layouts(room)
+        return self.send_json(HTTPStatus.OK, {"layouts": [d["name"] for d in details], "details": details})
+
+    def get_room_layout(self, name: str):
+        room = self.layout_room()
+        if room is None:
+            return
+        path = self.layouts_dir / room / f"{name}.json"
+        if not SLUG.match(name) or not path.is_file():
+            return self.get_layout(name)  # v1 fallback (and its 404s)
+        data = read_json_file(path)
+        if data is None:
+            return self.error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"layout {name!r} of room {room!r} is unreadable: fix or delete it")
+        return self.send_json(HTTPStatus.OK, data)
+
+    def put_room_layout(self, name: str):
+        room = self.layout_room()
+        if room is None:
+            return
+        if not SLUG.match(name):
+            return self.error_json(HTTPStatus.BAD_REQUEST, f"layout name must be a slug (a-z, 0-9, -): {name!r}")
+        try:
+            data = self.read_json_body()
+        except ValueError as e:
+            return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
+        if not isinstance(data, dict):
+            return self.error_json(HTTPStatus.BAD_REQUEST, "layout must be a JSON object")
+        atomic_write_json(self.layouts_dir / room / f"{name}.json", dict(data, room_name=room))
+        return self.send_json(HTTPStatus.OK, {"ok": True, "name": name, "room": room})
+
+    def delete_room_layout(self, name: str):
+        room = self.layout_room()
+        if room is None:
+            return
+        path = self.layouts_dir / room / f"{name}.json"
+        if not SLUG.match(name) or not path.is_file():
+            return self.error_json(HTTPStatus.NOT_FOUND, f"room {room!r} has no layout named {name!r} (v1 layouts aren't deleted)")
+        path.unlink()
+        return self.send_json(HTTPStatus.OK, {"ok": True, "name": name, "room": room})
 
     # --- render this view ------------------------------------------------
     def list_renders(self):

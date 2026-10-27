@@ -8,6 +8,7 @@
   "properties": {
     "version": { "const": 1 },
     "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+    "room_name": { "description": "The room this layout belongs to (contract §2.7); absent in v1 layouts.", "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
     "library": { "description": "Library URL the layout was made with.", "type": ["string", "null"] },
     "room": { "description": "Room config at save time (room.schema.json), or null.", "type": ["object", "null"] },
     "items": {

@@ -38,7 +38,15 @@ function assetFiles() {
 // 1. Static site
 fs.rmSync(DIST, { recursive: true, force: true })
 fs.mkdirSync(path.join(DIST, 'planner'), { recursive: true })
-for (const f of ['index.html', 'main.js', 'style.css']) fs.copyFileSync(path.join(REPO, 'planner', f), path.join(DIST, 'planner', f))
+// Every file under planner/ except the local server (serve.py), Python caches and dotfiles.
+const copyTree = (src, dst) => {
+  for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+    if (e.name.startsWith('.') || e.name === '__pycache__' || e.name.endsWith('.py')) continue
+    const s = path.join(src, e.name), d = path.join(dst, e.name)
+    if (e.isDirectory()) { fs.mkdirSync(d, { recursive: true }); copyTree(s, d) } else fs.copyFileSync(s, d)
+  }
+}
+copyTree(path.join(REPO, 'planner'), path.join(DIST, 'planner'))
 fs.writeFileSync(path.join(DIST, '_redirects'), '/ /planner/ 302\n')
 fs.writeFileSync(path.join(DIST, '_headers'), '/planner/*\n  Cache-Control: no-cache\n')
 

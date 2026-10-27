@@ -1,5 +1,5 @@
-"""nook-scan CLI (contract §4.6, §4.9, §5): `check` a capture, `train` it into room/<name>.ply + room/room.json,
-or `serve` the jobs API."""
+"""nook-scan CLI (contract §4.6, §4.9, §5): `check` a capture, `train` it into room/<name>.ply + room/room.json
+(and room/<name>.room.json), or `serve` the jobs API."""
 
 import argparse
 import json
@@ -186,6 +186,7 @@ def cmd_train(args) -> int:
         ply_path = room_dir / f"{args.name}.ply"
         spz_path = room_dir / f"{args.name}.spz"
         room_json = room_dir / "room.json"
+        own_json = room_dir / f"{args.name}.room.json"  # the room's own config (§2.7), kept when a later scan repoints room.json
         # The planner loads the compact SPZ (~5x smaller, same rendering); the PLY stays alongside, full precision.
         # Re-read room.json: training takes minutes and the planner may have saved it (e.g. its look) meanwhile.
         new_room = room.updated(room.read_existing(room_dir), spz_path, room_dir, floor_y, views)
@@ -201,15 +202,18 @@ def cmd_train(args) -> int:
         staged = room_dir / f".{args.name}.ply.tmp-{os.getpid()}"
         staged_spz = room_dir / f".{args.name}.spz.tmp-{os.getpid()}"
         staged_json = room_dir / f".room.json.tmp-{os.getpid()}"
+        staged_own = room_dir / f".{args.name}.room.json.tmp-{os.getpid()}"
         try:
             shutil.copyfile(ply_tmp, staged)
             shutil.copyfile(spz_tmp, staged_spz)
             staged_json.write_bytes((json.dumps(new_room, indent=2) + "\n").encode())
+            staged_own.write_bytes((json.dumps(new_room, indent=2) + "\n").encode())
             os.replace(staged, ply_path)
             os.replace(staged_spz, spz_path)
+            os.replace(staged_own, own_json)
             os.replace(staged_json, room_json)
         except OSError as e:
-            for p in (staged, staged_spz, staged_json):
+            for p in (staged, staged_spz, staged_json, staged_own):
                 p.unlink(missing_ok=True)
             if created:
                 shutil.rmtree(room_dir, ignore_errors=True)

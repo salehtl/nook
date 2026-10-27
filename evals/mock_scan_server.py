@@ -61,7 +61,7 @@ def worker():
                     job.update(status="done", stage="done", progress=1.0, eta_s=0, finished=now(), message="room ready")
                     job["result"] = {"name": job["name"], "ply": f"room/{job['name']}.ply", "room_json": "room/room.json",
                                      "splats": 123456, "floor_y": -1.35, "steps": STEPS, "seconds": SECONDS,
-                                     "trainer": "mock", "psnr": None, "room_url": "/planner/",
+                                     "trainer": "mock", "psnr": None, "room_url": f"/planner/?room={job['name']}",
                                      "ply_url": f"/room/{job['name']}.ply"}
                     break
 

@@ -16,9 +16,11 @@ library/<id>/thumb.jpg        square thumbnail, optional
 library/<id>/source.<ext>     the input image or model, as given
 library/<id>/raw/             untouched engine outputs (debugging only)
 library/costs.csv             one row per pipeline run: date,id,engine,cost_usd,mock,input
-room/room.json                room config (room.schema.json)
+room/room.json                room config of the current room (room.schema.json)
 room/<scan>.spz|.ply|...      the scan itself (git-ignored)
+room/<scan>.room.json         that room's own config, room/<scan>.jpg its thumbnail (§2.7)
 layouts/<name>.json           saved layouts (layout.schema.json)
+layouts/<room>/<name>.json    a room's layouts (§2.7)
 ```
 
 ### Normalized assets
@@ -52,6 +54,7 @@ python3 planner/serve.py [--port 8765] [--room-file room/room.json] [--layouts-d
 ### 2.2 URL parameters
 
 - `?library=<url>`: library to load (default `/library/library.json`). Asset paths resolve relative to it. A missing library is an empty library, not an error.
+- `?room=<name>`: the room to open (§2.7).
 
 ### 2.3 Features (MVP)
 
@@ -65,7 +68,7 @@ python3 planner/serve.py [--port 8765] [--room-file room/room.json] [--layouts-d
    - **Save** writes `PUT /api/room`. Reloading restores it.
 3. **Library panel**: lists library items (thumbnail if present, name, W×D×H cm). Clicking an item adds it to the room near the center, on the floor.
 4. **Items**:
-   - Click an item to select it. A transform gizmo **moves on the floor plane only** (y stays 0) and **rotates around Y only**. Keyboard: `R` rotates by 15°, `Delete`/`Backspace` removes, `Esc` deselects.
+   - Click (tap) an item to select it. **Dragging the selected item** moves it **on the floor plane only** (y stays 0); a grip on its footprint outline **rotates it around Y only**, as do −15°/+15° buttons. Keyboard: `R` rotates by 15°, `Delete`/`Backspace` removes, `Esc` deselects.
    - The selected item shows a label with its name and W×D×H cm.
    - Each placed item has a `render` of `glb` or `splat`. A toggle switches between them when the item has both assets.
 5. **Measure tool**: click two points (on the floor, items or splat) to show a line with its distance in m and cm. `Esc` clears it.
@@ -74,9 +77,9 @@ python3 planner/serve.py [--port 8765] [--room-file room/room.json] [--layouts-d
    - **Orbit**: the default, using OrbitControls.
    - **Seated**: eye height 1.15 m.
    - **Standing**: eye height 1.6 m.
-   - Seated and standing are first-person views: WASD/arrow keys to move on the floor, drag to look.
+   - Seated and standing are first-person views: WASD/arrow keys to move on the floor (or tap the floor to walk there), drag to look.
 8. **Errors**: anything that fails (missing asset, bad file) shows a small non-blocking message in the UI and is pushed to `window.nook.errors`. It never throws an uncaught exception.
-9. Usable at 1280 × 800: panels can collapse and don't cover more than about a third of the view.
+9. Usable at 1280 × 800: panels can collapse and don't cover more than about a third of the view. Usable on a phone (390 × 844, touch): panels are bottom sheets, and every action has a touch control (§2.7, P20).
 
 ### 2.4 `window.nook` test hook
 
@@ -113,12 +116,12 @@ interface Nook {
 - P2. No uncaught exceptions or console errors during normal use with the fixtures.
 - P3. A placeholder room renders when there's no splat. The fixture splat room renders when given.
 - P4. An added item's `worldBounds` size matches its `dims_cm` within 2 %, with min y = 0 (±1 cm). Rotating 90° swaps the X and Z extents.
-- P5. Gizmo dragging keeps y = 0, and rotation is around Y only.
+- P5. Dragging an item keeps y = 0, and rotation is around Y only.
 - P6. Layouts round-trip: positions within 1 mm, rotation within 0.1°.
 - P7. Seated and standing views put the camera at 1.15 m and 1.6 m (±1 cm).
-- P8. Alignment edits (including pick-floor and two-point scale) persist through `PUT /api/room` and survive a reload.
+- P8. Alignment edits (including pick-floor and two-point scale) persist through `PUT /api/room` (or `PUT /api/rooms/<name>`, §2.7) and survive a reload. Pick floor moves the picked point to y = 0 and, when the floor around it is tilted by 0.3–12°, also levels the scan.
 - P9. The measure tool shows the correct distance (e.g. between two placed items' known positions).
-- P11–P16: see §2.6.
+- P11–P16: see §2.6. P17–P20: see §2.7.
 
 ### 2.6 Realism and "Render this view"
 
@@ -180,6 +183,69 @@ listRenders(): Promise<RenderMeta[]>
 - P15. Without a key (and not in mock mode), `/api/render` returns 503 with the FAL_KEY message, and the UI shows it as a toast.
 - P16. Performance: with the fixture splat room and 3 items, orbiting stays interactive. Baking happens only on load, on save, or when asked, never per frame.
 - P10. A missing or corrupt asset shows an error message and the rest of the app keeps working.
+
+### 2.7 Rooms (planner v2)
+
+The planner knows every trained scan, not just the last one. A **room** is one scan file in the room dir plus its own config, layouts and thumbnail. Everything here is additive: `room.json`, `GET/PUT /api/room`, the flat `layouts/` and every v1 call keep working.
+
+**Files** (in `--room-dir`, default the repo's `room/`, served as `/room/`):
+
+```
+<room-dir>/room.json             the current room (newest scan), as before (§4.6)
+<room-dir>/<name>.spz | .ply     a room's scan; <name> is a slug. .spz wins when both exist
+<room-dir>/<name>.room.json      that room's config (room.schema.json): alignment, look, viewpoints, title
+<room-dir>/<name>.jpg            its thumbnail (made by the planner), optional
+<room-dir>/.trash/<name>-<UTC stamp>/   deleted rooms, all of their files (never removed by the tools)
+layouts/<room>/<layout>.json     a room's layouts (layout.schema.json, with room_name)
+layouts/<layout>.json            v1 layouts (no room), still listed and loadable
+```
+
+**A room's config** is, first match wins: `<name>.room.json`; else `room.json` when its `splat` is this room's file (the server then copies it to `<name>.room.json`, so a later scan repointing `room.json` can't lose it); else `{version: 1, splat: <path of the scan>}` (identity transform). `room.schema.json` gains `title` (free text, set by rename; the file name never changes) and `saved` (ISO time of the last Save room from the planner).
+
+**Server** (`planner/serve.py`, stdlib only):
+
+| Method and path | Response |
+|---|---|
+| `GET /api/rooms` | `200 {"rooms": [room, ...], "current": "<name>" \| null}`, newest first. `current` is the room `room.json` points at. |
+| `GET /api/rooms/<name>` | `200` the room's config (as above, with `splat` set), or `404`. |
+| `PUT /api/rooms/<name>` | Body: a room config. Writes `<name>.room.json` (`splat` forced to the room's file, `saved` stamped unless only `title` changed, so a rename doesn't mark the room aligned). When `room.json` points at this room, it's updated too. `404` for an unknown room. |
+| `PUT /api/rooms/<name>/thumb` | Body: `{"image": "data:image/jpeg;base64,..."}` (≤ 2 MB). Writes `<name>.jpg`. |
+| `DELETE /api/rooms/<name>` | Moves all of the room's files (scan, config, thumbnail, `layouts/<name>/`) to `.trash/`. If `room.json` pointed at it, `room.json` is repointed at the newest remaining room (its config), or removed when none is left. `200 {"ok": true, "trash": "<dir>"}`. |
+| `GET /api/layouts?room=<name>` | `200 {"layouts": ["name", ...], "details": [{"name", "items", "updated", "legacy"}]}`: the room's layouts, plus v1 layouts whose `room.splat` is this room's scan (`legacy: true`). |
+| `GET/PUT /api/layouts/<layout>?room=<name>` | Reads or writes `layouts/<name>/<layout>.json` (GET falls back to a v1 layout). PUT sets `room_name`. |
+| `DELETE /api/layouts/<layout>?room=<name>` | Removes the room's layout (`404` if it isn't there). v1 layouts aren't deleted. |
+
+The room object in `GET /api/rooms`:
+
+```json
+{ "name": "scan-20261026-093654", "title": "Reading room, morning" | null,
+  "splat": "room/scan-20261026-093654.spz", "created": "<ISO-8601 UTC, the scan file's mtime>",
+  "size_bytes": 61234567, "thumb_url": "/room/scan-20261026-093654.jpg" | null,
+  "aligned": true, "layouts": 3, "current": true }
+```
+
+`aligned` is true when the room has a `saved` time. Training numbers (splats, seconds, steps, quality) and the status of scans still in progress come from the jobs API (§5, `/api/scan/jobs` through `--scan-api`), matched to rooms by `name`. Without `--scan-api` the planner shows rooms only.
+
+**Planner:**
+- `?room=<name>` opens that room. Without it the planner opens the room last opened on this device, if it still exists; otherwise it loads `GET /api/room` as in v1 (the current room, or the placeholder). A room whose name is in neither (`?room` naming a deleted room) shows an error with a way back to the rooms list.
+- Layouts, alignment, look and the thumbnail belong to the open room. Saving the room writes `PUT /api/rooms/<name>`; layouts use `?room=<name>`. The placeholder room (and a dropped file) use the v1 endpoints.
+- Opening a room for the first time saves a thumbnail of the default view.
+- Jobs: queued, training, failed and cancelled scans are listed with the rooms; a training job shows live progress (poll `/api/scan/jobs` about every 5 s while one is active, every 60 s otherwise); a job turning `done` offers to open the new room.
+
+**Hook additions (`window.nook`)**
+
+```ts
+listRooms(): Promise<Room[]>                 // GET /api/rooms
+openRoom(name: string): Promise<void>        // loads the room, its config and layouts; resolves when the scan has loaded
+getState().room.name: string | null          // the open room, null for the placeholder or a dropped file
+saveRoom(): Promise<void>                    // Save room: PUT /api/rooms/<name>, or PUT /api/room when no named room is open
+```
+
+**Acceptance**
+- P17. With three rooms in the room dir, `listRooms()` returns them newest first, `openRoom()` loads each, and saving the alignment of one leaves the others' configs unchanged.
+- P18. A layout saved in room A isn't listed in room B; a v1 layout still loads.
+- P19. A `room.json` from before v2 (no per-room files) opens with its alignment and viewpoints intact.
+- P20. Usable at 390 × 844 with touch only: every action reachable, targets ≥ 44 px.
 
 ---
 
@@ -309,7 +375,7 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 ```
 
 - `train` writes `<room-dir>/<name>.ply`, a standard 3DGS PLY (the §1 property set) **in capture world coordinates**. It's cropped (floaters outside the captured volume are removed) but not moved. Alongside it goes `<name>.spz` (v2), the same splats in Niantic's compact format (about 5× smaller, renders identically in Spark). `room.json` points the planner at the `.spz`.
-- It then writes or updates `<room-dir>/room.json` (room.schema.json): `splat` is the path of the SPZ relative to the repo root (or to `<room-dir>`'s parent when outside the repo), and `transform` is `position [0, −floor_y, 0]`, `quaternion [0,0,0,1]`, `scale 1`. Other existing keys, such as `look` and `placeholder`, are kept.
+- It then writes or updates `<room-dir>/room.json` (room.schema.json): `splat` is the path of the SPZ relative to the repo root (or to `<room-dir>`'s parent when outside the repo), and `transform` is `position [0, −floor_y, 0]`, `quaternion [0,0,0,1]`, `scale 1`. Other existing keys, such as `look` and `placeholder`, are kept. The same config is also written to `<room-dir>/<name>.room.json` (§2.7), so the room keeps its alignment after a later scan repoints `room.json`.
   - `floor_y` comes from `meta.floor_y`. Otherwise it's estimated from seed or depth points (a low percentile of the y values of near-horizontal dense regions).
 - `--holdout-every N` (default 0) excludes frames with `index % N == 0` from training, so that evals can score them.
 - The last stdout line is JSON: `{ "name", "ply", "room_json", "splats", "floor_y", "steps", "seconds", "trainer": "<name and version>" }`.
@@ -399,7 +465,7 @@ The job object:
 }
 ```
 
-When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/planner/"`, `"ply_url": "/room/<name>.ply"` and `"spz_url": "/room/<name>.spz"`. These are site paths on the same origin the app talked to.
+When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/planner/?room=<name>"` (§2.7), `"ply_url": "/room/<name>.ply"` and `"spz_url": "/room/<name>.spz"`. These are site paths on the same origin the app talked to.
 
 - **One job at a time** (one GPU). The queue is FIFO.
 - **Restarts:** job state persists in `jobs.json`. On restart, a job that was running becomes `failed` with the message "server restarted during training: upload again", and queued jobs stay queued.

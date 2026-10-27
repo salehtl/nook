@@ -113,6 +113,8 @@ def viewpoints(cap, floor_y: float) -> list[dict]:
 
 def updated(existing: dict, ply: Path, room_dir: Path, floor_y: float, views: list[dict] | None = None) -> dict:
     room = dict(existing)
+    for key in ("title", "saved"):  # the previous room's name and save time (contract §2.7), not this scan's
+        room.pop(key, None)
     room["version"] = 1
     room["splat"] = splat_url(ply, room_dir)
     room["transform"] = {"position": [0, round(-floor_y, 4) + 0.0, 0], "quaternion": [0, 0, 0, 1], "scale": 1}
