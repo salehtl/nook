@@ -53,6 +53,7 @@ export function mount(ctx) {
         items: [
           { label: isOpen ? 'Open now' : 'Open room', icon: 'play', tone: 'accent', disabled: isOpen || off, onSelect: () => R.switchTo(r.name) },
           { label: 'Rename', icon: 'pencil', disabled: off, onSelect: () => rename(r) },
+          { label: 'Retrain…', icon: 'retrain', disabled: off, onSelect: () => ctx.retrain?.open(r.name) },
           { label: 'Move to trash…', icon: 'trash', tone: 'danger', disabled: off, onSelect: () => trash(r) },
         ],
       })
@@ -61,6 +62,7 @@ export function mount(ctx) {
     shell.menu(anchor, [
       { label: isOpen ? 'Open now' : 'Open room', icon: 'play', kbd: 'Enter', disabled: isOpen || off, onSelect: () => R.switchTo(r.name) },
       { label: 'Rename', icon: 'pencil', kbd: 'F2', disabled: off, onSelect: () => rename(r) },
+      { label: 'Retrain…', icon: 'retrain', disabled: off, onSelect: () => { shell.closePage(); ctx.retrain?.open(r.name) } },
       '-',
       { label: 'Move to trash…', icon: 'trash', kbd: 'Del', danger: true, disabled: off, onSelect: () => trash(r) },
     ])

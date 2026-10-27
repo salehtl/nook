@@ -5,13 +5,16 @@
 //   hold('w'|'a'|'s'|'d', on)            press or release a walk key from the UI (the clickable WASD keycaps)
 //   held() → Set of walk keys down;      onKeys(fn) → unsubscribe; fn(held) whenever it changes
 // Pointer, one gesture at a time: a drag that starts on the selected item (its box on screen, plus 16 px on touch)
-// moves it on the floor; anything else orbits (OrbitControls: one finger turns, two pan and pinch) or, in first person,
-// looks. A tap (no drag, one finger) picks, measures, selects, or in first person walks there.
+// moves it on its own horizontal plane (a hung item along its wall; Shift+drag: up and down, §2.10); a long press on it
+// (touch) starts Hang on wall; anything else orbits (OrbitControls: one finger turns, two pan and pinch) or, in first
+// person, looks. A tap (no drag, one finger) hangs, picks, measures, selects, or in first person walks there.
 // Keys: R / Shift+R rotate 15°, Delete/Backspace remove, Esc leaves a mode or deselects, M measure, F frame, 1 2 3 views,
-// [ ] scan viewpoints, WASD/arrows walk (Shift faster), hold Shift to snap moves (5 cm) and the rotate grip (15°).
+// [ ] scan viewpoints, WASD/arrows walk (Shift faster), PageUp / PageDown raise and lower 1 cm (Shift 10 cm), H hang on
+// wall, hold Shift to snap the rotate grip (15°).
 import { VIEWS } from './engine.js'
 
 const TAP_PX = { mouse: 4, pen: 6, touch: 10 }
+const LONG_MS = 550
 const WALK = ['w', 'a', 's', 'd']
 
 export function installInput(engine) {
@@ -38,7 +41,7 @@ export function installInput(engine) {
   // --- pointer (capture phase on window, so it runs before OrbitControls sees the event on the canvas)
   const ptrs = new Set()
   let g = null // the gesture: { id, kind: 'item'|'look'|'other', x0, y0, lx, ly, t0, type, moved, multi }
-  const busy = () => engine.getPick().mode || engine.getMeasureState().active
+  const busy = () => engine.getPick().mode || engine.getMeasureState().active || engine.getHang()
   on(window, 'pointerdown', (e) => {
     if (!enabled.pointer || e.target !== canvas) return
     if (e.pointerType === 'mouse' && e.button !== 0) return // right button: OrbitControls pans
@@ -47,9 +50,19 @@ export function installInput(engine) {
     g = { id: e.pointerId, kind: 'other', x0: e.clientX, y0: e.clientY, lx: e.clientX, ly: e.clientY, t0: performance.now(), type: e.pointerType, moved: false, multi: false }
     const sel = engine.getSelected()
     const pad = e.pointerType === 'mouse' ? 6 : 16
-    if (sel && !busy() && engine.hitItemAt(sel, e.clientX, e.clientY, pad) && engine.beginItemDrag(sel, e.clientX, e.clientY)) g.kind = 'item'
+    if (sel && !busy() && engine.hitItemAt(sel, e.clientX, e.clientY, pad) && engine.beginItemDrag(sel, e.clientX, e.clientY, { lift: e.shiftKey })) g.kind = 'item'
     else if (engine.getView() !== 'orbit') g.kind = 'look'
     if (g.kind !== 'other') canvas.setPointerCapture?.(e.pointerId)
+    // Long press on the selected piece (touch): Hang on wall, then tap a wall.
+    if (g.kind === 'item' && e.pointerType !== 'mouse') {
+      const mine = g
+      g.long = setTimeout(() => {
+        if (g !== mine || mine.moved || mine.multi) return
+        engine.endItemDrag()
+        mine.kind = 'long'
+        engine.startHang(sel)
+      }, LONG_MS)
+    }
   }, true)
   on(window, 'pointermove', (e) => {
     if (!g || e.pointerId !== g.id) return
@@ -63,7 +76,9 @@ export function installInput(engine) {
     if (!ptrs.delete(e.pointerId) || !g || ptrs.size) return
     const d = g
     g = null
+    clearTimeout(d.long)
     if (d.kind === 'item') engine.endItemDrag()
+    if (d.kind === 'long') return
     const quick = d.type === 'mouse' || performance.now() - d.t0 < 700
     if (e.type !== 'pointerup' || d.moved || d.multi || !quick) return
     try { engine.tap(e.clientX, e.clientY) } catch (err) { engine.reportError('Tap failed', err) }
@@ -90,13 +105,18 @@ export function installInput(engine) {
     syncMove()
     const selected = engine.getSelected()
     if (k === 'escape') {
-      if (engine.getPick().mode || engine.getPick().points) engine.cancelPickMode()
+      if (engine.getHang()) engine.cancelHang()
+      else if (engine.getPick().mode || engine.getPick().points) engine.cancelPickMode()
       else if (engine.getMeasureState().active) { engine.clearMeasure(); engine.setMeasureActive(false) }
       else engine.select(null)
     } else if (k === 'delete' || k === 'backspace') {
       if (selected) { e.preventDefault(); engine.removeItemInternal(selected) }
     } else if (k === 'r') {
       engine.rotateSelected(e.shiftKey ? -15 : 15)
+    } else if (k === 'pageup' || k === 'pagedown') {
+      if (selected) { e.preventDefault(); engine.nudgeElevation(selected, (k === 'pageup' ? 1 : -1) * (e.shiftKey ? 0.1 : 0.01)) }
+    } else if (k === 'h') {
+      if (selected) { if (engine.getHang()) engine.cancelHang(); else engine.startHang(selected) }
     } else if (k === 'm') {
       const active = !engine.getMeasureState().active
       if (!active) engine.clearMeasure()

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pipeline eval: runs nook-add against recorded fal responses (NOOK_FAL_MOCK), so it costs $0.
 # Checks contract/CONTRACT.md §3. Output lands in evals/out/pipeline/.
+# v4: OBJ zips, --rescale, --mount, NOOK_FAL_MOCK_COST (§3.1).
 # Usage: bash evals/pipeline_offline.sh   (or npm run eval:pipeline)
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -105,12 +106,54 @@ fi
 check "bad input leaves library.json untouched" '[ "$(shasum "$LIB/library.json" 2>/dev/null)" = "$sum_before" ]'
 check "bad input adds no cost rows" '[ "$(wc -l <"$LIB/costs.csv" 2>/dev/null)" = "$rows_before" ]'
 
+# --- v4 (§3.1): OBJ zips, --rescale, --mount, mock cost -----------------------------------------------------------
+if run cube fixtures/models/cube-obj.zip --engine glb --name "Cube" --id cube --dims 50x50x50 --mount wall --library "$LIB"; then
+  ok "an OBJ zip (.obj + .mtl + texture) is accepted by --engine glb"
+  imgs=$(evals/py evals/glb_info.py "$LIB/cube/model.glb" | json "o.images")
+  check "the OBJ's texture survives into the GLB" '[ "$imgs" -ge 1 ]' "images=$imgs"
+  check "--mount wall is stored on the item" '[ "$(node -e "console.log(JSON.parse(require(\"fs\").readFileSync(\"$LIB/library.json\",\"utf8\")).items.find(i=>i.id===\"cube\").mount)")" = wall ]'
+else
+  bad "an OBJ zip is accepted by --engine glb — $(tail -n 2 "$OUT/cube.err" | tr '\n' ' ')"
+fi
+for evil in slip abs exe; do
+  python3 - "$OUT/evil-$evil.zip" "$evil" <<'PY'
+import sys, zipfile
+src = zipfile.ZipFile("fixtures/models/cube-obj.zip")
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    for n in src.namelist(): z.writestr(n, src.read(n))
+    z.writestr({"slip": "../../escaped.txt", "abs": "/tmp/nook-escaped.txt", "exe": "cube/run.exe"}[sys.argv[2]], "x")
+PY
+  bad_case "zip-$evil" "$OUT/evil-$evil.zip" --engine glb --name "Evil" --id "evil-$evil" --dims 50x50x50 --library "$LIB"
+done
+check "a zip never writes outside the library" '[ ! -e "$OUT/../escaped.txt" ] && [ ! -e evals/escaped.txt ] && [ ! -e /tmp/nook-escaped.txt ]'
+
+rows_before=$(wc -l <"$LIB/costs.csv")
+if run rescale --rescale sheen --dims 70x65x85 --library "$LIB"; then
+  ok "--rescale refits an existing item"
+  sz=$(evals/py evals/glb_info.py "$LIB/sheen/model.glb" | json "o.bounds[1].map((v,i)=>(v-o.bounds[0][i]).toFixed(3)).join(' ')")
+  check "--rescale dims within 2% per axis" 'node -e "const [w,h,d]=\"$sz\".split(\" \").map(Number); process.exit(Math.abs(w-0.70)/0.70<0.02&&Math.abs(h-0.85)/0.85<0.02&&Math.abs(d-0.65)/0.65<0.02?0:1)"' "size $sz"
+  check "--rescale summary says \$0 and adds no cost row" '[ "$(lastline $OUT/rescale.out | json "o.cost_usd")" = 0 ] && [ "$(wc -l <"$LIB/costs.csv")" = "$rows_before" ]'
+  check "--rescale keeps the textures" '[ "$(evals/py evals/glb_info.py "$LIB/sheen/model.glb" | json "o.images")" = 7 ]'
+else
+  bad "--rescale refits an existing item — $(tail -n 2 "$OUT/rescale.err" | tr '\n' ' ')"
+fi
+run rescale-yaw --rescale arrow-0 --yaw 90 --library "$LIB" && {
+  c=$(evals/py evals/glb_info.py "$LIB/arrow-0/model.glb" | json "o.centroid.map(v=>v.toFixed(3)).join(' ')")
+  check "--rescale --yaw 90 is relative: the arrow now points -Z" 'node -e "const [x,,z]=\"$c\".split(\" \").map(Number); process.exit(z<-0.05&&Math.abs(x)<0.02?0:1)"' "centroid $c"
+} || bad "--rescale --yaw — $(tail -n 1 "$OUT/rescale-yaw.err")"
+bad_case rescale-unknown --rescale no-such-item --library "$LIB"
+if NOOK_FAL_MOCK_COST=1 run paidmock "$IMG" --engine sam3d --name "Paid Mock" --id paid-mock --dims 75x80x95 --library "$LIB"; then
+  check "NOOK_FAL_MOCK_COST=1 records the engine's real price on a mock run" '[ "$(lastline $OUT/paidmock.out | json "o.cost_usd")" = 0.02 ] && tail -n 1 "$LIB/costs.csv" | grep -q "paid-mock,sam3d,0.02,true"' "$(tail -n 1 "$LIB/costs.csv")"
+else
+  bad "NOOK_FAL_MOCK_COST=1 mock run — $(tail -n 1 "$OUT/paidmock.err")"
+fi
+
 # --- costs + contract validation (L2) ----------------------------------------
 check "costs.csv has a header and one row per successful run" '[ "$(tail -n +2 "$LIB/costs.csv" 2>/dev/null | grep -c .)" -ge 6 ]' "$(cat "$LIB/costs.csv" 2>/dev/null | tr '\n' ' ')"
 check "costs.csv columns are date,id,engine,cost_usd,mock,input" '[ "$(head -n 1 "$LIB/costs.csv" 2>/dev/null)" = "date,id,engine,cost_usd,mock,input" ]'
 check "mock runs record \$0 and mock=true" 'node -e "
   const rows = require(\"fs\").readFileSync(\"$LIB/costs.csv\", \"utf8\").trim().split(\"\n\").slice(1).map(r => r.split(\",\"))
-  process.exit(rows.length && rows.every(r => Number(r[3]) === 0 && r[4] === \"true\") ? 0 : 1)"' "$(cat "$LIB/costs.csv" 2>/dev/null | tr '\n' ' ')"
+  process.exit(rows.length && rows.every(r => r[4] === \"true\" && (Number(r[3]) === 0 || r[1] === \"paid-mock\")) ? 0 : 1)"' "$(cat "$LIB/costs.csv" 2>/dev/null | tr '\n' ' ')"
 if evals/py evals/validate_library.py "$LIB/library.json" >"$OUT/validate.out" 2>&1; then
   ok "library passes evals/validate_library.py"
 else

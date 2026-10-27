@@ -1,6 +1,23 @@
 # nook v4: sharper rooms, a measured shell, and a library you manage from the browser
 
-**Status:** PARKED (2026-10-27, low on usage credits); not started. Revision 2 (2026-10-27), after a blind critique; the critique's findings are folded in and listed at the end.
+**Status:** IN PROGRESS (started 2026-10-27, branch `v4`). Revision 2 (2026-10-27), after a blind critique; the critique's findings are folded in and listed at the end.
+
+## Progress log
+- **2026-10-27, phase 0 (main loop):**
+  - **0a** on kakapo (`evals/sizing_0a_remote.sh`, judged by `evals/sizing_0a_judge.sh`; scan-20261027-112322, 1,089 training frames, every 10th held out, held-out PSNR in Spark):
+
+    | Run | Steps | Splats | Time | Peak VRAM | Held-out PSNR |
+    |---|---|---|---|---|---|
+    | A | 20,000 | 1.2M | 19.4 min | 2.45 GB | 21.36 dB |
+    | B1 (40/frame) | 43,560 | 2M | 64 min | 3.97 GB | 21.44 dB |
+    | B2 (80/frame) | 87,120 | 2M | 139 min | 4.05 GB | 22.03 dB |
+
+    **Decision:** `k = 80` steps per frame (was 60). Speed measured at 47.9 s per 1,000 steps per million splats, so `gpu.py`'s 48.5 stays. Peak host RSS is 12.3 GB on every run. B3 (3M splats) was stopped by hand at step 41,700 (peak VRAM 5.2 GB so far), so the 2060's training cap stays 2M; C (2880 px stills) wasn't run. Viewed side by side in the planner, all three still look subpar. The held-out frames split: frames 0–700 score 23.2–23.9 dB on every run, frames 770–1190 score 17.4 → 18.2 → 20.2 dB. More steps help only the second half of the scan, which points at that part of the capture more than at sizing. B2 is kept as the room `scan-20261027-112322-r2` on kakapo; the other run outputs are deleted, and metrics are in `evals/out/sizing/runs/`.
+  - **0b** not run (needs the phone). **Decision for v4:** the app uses a **separate** RoomPlan pass with `world_from_roomplan` (§4.12), which can't disturb the capture session. A shared session stays a later experiment, after a device spike.
+  - **0c** contracts written: §2.7 v4, §2.8, §2.9, §2.10 (raising items and hanging them on walls, added on request), §3.1 v4, §4.9.1, §4.12, §5.1; `roomplan.schema.json`, plus `meta.roomplan`, `parent`, `mount`, `mounted`.
+  - **0d** evals first (failing until built): `library_api.sh` (new), `planner_v4_smoke.mjs` (new), v4 cases in `server_api.sh`, `rooms_api.sh`, `pipeline_offline.sh`, `ios_build.sh`, `validate_capture.py`; mocks `mock_scan_server.py` (§5.1, passes `server_api.sh` 35/35) and `mock_library_server.py` (new); fixtures `fixtures/roomplan/` (hand-made, labeled) and `fixtures/models/cube-obj.zip` (`fixtures/make_v4_fixtures.py`).
+  - **Python:** the pipeline passes on 3.13 (all pre-v4 checks), so the pin is relaxed to `<3.14` and the Nix package uses nixpkgs' python3 (3.13). `fal-client` isn't in nixpkgs: it gets packaged in `nix/`.
+  - **GPU lock:** `evals/remote.sh` takes `/run/nook/gpu.lock` when the module has made it, else `~/nook-gpu.lock`.
 
 ## Goals
 1. **Sharper rooms:** retraining sized to the capture. Today a 1,210-photo scan gets the same 20k steps and 1.2M splats as a 270-photo one, so it comes out undertrained.

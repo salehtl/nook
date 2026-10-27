@@ -6,6 +6,7 @@ struct CapturesListView: View {
     @State private var activeCapture: CaptureController?
     @State private var sendTarget: CaptureEntry?
     @State private var showSettings = false
+    @State private var showGuide = false
     @State private var shareItem: ShareItem?
     @State private var zipping: String?
     @State private var pendingDelete: CaptureEntry?
@@ -64,18 +65,31 @@ struct CapturesListView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                Button(action: startLive) {
-                    Label("New Scan", systemImage: "camera.viewfinder")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
+                HStack(spacing: 10) {
+                    Button { showGuide = true } label: {
+                        Label("How to scan", systemImage: "questionmark.circle")
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.bordered)
+                    Button(action: startLive) {
+                        Label("New Scan", systemImage: "camera.viewfinder")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .padding()
                 .background(.bar)
             }
         }
-        .onAppear { store.refresh() }
+        .onAppear {
+            store.refresh()
+            if OnboardingState.needsFirstRun(), !OnboardingState.isRunningTests { showGuide = true }
+        }
+        .sheet(isPresented: $showGuide, onDismiss: { OnboardingState.markSeen() }) {
+            HowToScanView()
+        }
         .fullScreenCover(item: $activeCapture, onDismiss: { store.refresh() }) { controller in
             CaptureView(controller: controller)
         }

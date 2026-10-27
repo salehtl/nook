@@ -106,6 +106,8 @@ protocol CaptureSource: AnyObject {
     var hasDepth: Bool { get }
     /// Height of the floor (lowest large horizontal plane) once known.
     var floorY: Float? { get }
+    /// Vertical planes seen so far, in capture world (for lining up a RoomPlan pass, contract §4.12).
+    var wallPlanes: [WallPlane] { get }
     /// Starts delivering frames on a background queue. `onFrame` is called serially and must not keep the frame.
     /// `onEnd` is called when a finite source runs out (replay). A live source never ends on its own.
     func start(onFrame: @escaping (CaptureFrame) -> Void, onEnd: @escaping () -> Void)
@@ -125,6 +127,7 @@ protocol CaptureSource: AnyObject {
 }
 
 extension CaptureSource {
+    var wallPlanes: [WallPlane] { [] }
     var canLockCamera: Bool { false }
     func lockCamera() -> CameraLock { .none }
     var canCaptureStills: Bool { false }

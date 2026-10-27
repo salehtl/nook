@@ -6,7 +6,8 @@
 #
 # scan <nook-scan args...> behaves like `nook-scan` run locally: local capture paths are copied to the host, a
 # --room-dir is mapped to a folder there and copied back afterwards, and the exit code, stdout and stderr pass through.
-# Every run holds ~/nook-gpu.lock on the host, so GPU jobs never share the card.
+# Every run holds the host's GPU lock: /run/nook/gpu.lock, the one the nook service's worker takes (§5.1), when the module
+# has created it, else ~/nook-gpu.lock. So an eval and a real job never share the card.
 NOOK_SCAN_HOST=${NOOK_SCAN_HOST:-kakapo}
 NOOK_SSH_CONTROL=${NOOK_SSH_CONTROL:-$HOME/.ssh/cm-nook-kakapo}
 _SSH=(ssh -o ControlPath="$NOOK_SSH_CONTROL" -o BatchMode=yes "$NOOK_SCAN_HOST")
@@ -45,7 +46,7 @@ scan() {
   [ -n "$room_remote" ] && "${_SSH[@]}" "rm -rf ~/$room_remote"
   local quoted="" rc
   for a in "${args[@]}"; do quoted+=" $(printf %q "$a")"; done
-  "${_SSH[@]}" "cd ~ && flock ~/nook-gpu.lock env NOOK_GSPLAT_ARGS=$(printf %q "${NOOK_GSPLAT_ARGS:-}") ~/src/nook/result-nook/bin/nook-scan$quoted"
+  "${_SSH[@]}" "cd ~ && lock=\$( [ -w /run/nook ] && echo /run/nook/gpu.lock || echo ~/nook-gpu.lock ) && flock \$lock env NOOK_GSPLAT_ARGS=$(printf %q "${NOOK_GSPLAT_ARGS:-}") ~/src/nook/result-nook/bin/nook-scan$quoted"
   rc=$?
   if [ -n "$room_local" ] && "${_SSH[@]}" "test -d ~/$room_remote"; then
     mkdir -p "$room_local" && rsync -a -e "$_RSH" "$NOOK_SCAN_HOST:$room_remote/" "$room_local/" >/dev/null

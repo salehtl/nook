@@ -59,8 +59,9 @@ struct ServerClientTests {
         }
         #expect(current.status == .done, "\(current.message)")
         let room = try #require(current.result)
-        #expect(room.roomUrl == "/planner/")
-        #expect(client.siteURL(try #require(room.roomUrl))?.absoluteString == server.absoluteString + "/planner/")
+        // Contract §5: room_url is "/planner/?room=<name>" (§2.7), a site path on the server's own origin.
+        #expect(room.roomUrl == "/planner/?room=\(current.name)")
+        #expect(client.siteURL(try #require(room.roomUrl))?.absoluteString == server.absoluteString + "/planner/?room=\(current.name)")
 
         // Same capture again: idempotent, the existing job comes back.
         _ = try CaptureStore.makeZip(of: folder, into: uploader.zipFolder)
@@ -98,8 +99,8 @@ struct ServerClientTests {
         #expect(sawUpload)
         guard case .finished(let job) = store.phase(for: capture) else { return }
         #expect(job.status == .done)
-        #expect(job.result?.roomUrl == "/planner/")
-        #expect(store.roomURL(for: capture)?.absoluteString == server.absoluteString + "/planner/")
+        #expect(job.result?.roomUrl == "/planner/?room=\(job.name)")
+        #expect(store.roomURL(for: capture)?.absoluteString == server.absoluteString + "/planner/?room=\(job.name)")
         #expect(!store.phase(for: capture).canSend, "a done job isn't sent again")
 
         // The job ID lives outside the capture folder and survives a new store (an app relaunch).
@@ -134,6 +135,7 @@ struct ServerClientTests {
         #expect(r.httpMethod == "POST")
         #expect(r.url?.absoluteString == "https://nook.salehtl.com/api/scan/captures")
         #expect(r.value(forHTTPHeaderField: "Content-Type") == "application/zip")
+        #expect(r.value(forHTTPHeaderField: "X-Nook") == "1", "contract §2.9: mutations carry X-Nook: 1")
 
         let prefixed = ServerClient(base: try #require(URL(string: "http://127.0.0.1:8798/nook")))
         #expect(prefixed.endpoint("health").absoluteString == "http://127.0.0.1:8798/nook/api/scan/health")

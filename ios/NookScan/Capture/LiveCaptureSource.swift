@@ -20,6 +20,8 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
     var onIssue: ((Issue) -> Void)?
     private let lock = NSLock()
     private var planes: [UUID: (y: Float, area: Float)] = [:]
+    /// Vertical planes (walls, mostly), for lining up a separate RoomPlan pass (contract §4.12). Guarded by `lock`.
+    private var verticalPlanes: [UUID: WallPlane] = [:]
     /// What `lockCamera` locked, for checking stills against it. Guarded by `lock`.
     private var cameraLock = CameraLock.none
     /// Stills are copied and checked here, never on the delegate queue.
@@ -36,11 +38,17 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
         return FloorEstimator.floorY(planes: Array(planes.values))
     }
 
+    var wallPlanes: [WallPlane] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(verticalPlanes.values)
+    }
+
     func start(onFrame: @escaping (CaptureFrame) -> Void, onEnd: @escaping () -> Void) {
         self.onFrame = onFrame
         let config = ARWorldTrackingConfiguration()
         config.worldAlignment = .gravity
-        config.planeDetection = [.horizontal]
+        // Vertical planes only feed the RoomPlan alignment; they don't change what the camera records.
+        config.planeDetection = [.horizontal, .vertical]
         if hasDepth { config.frameSemantics.insert(.sceneDepth) }
         // The format ARKit recommends for stills (e.g. 1920 × 1440 video with 12 MP stills). Without it a still may
         // be no larger than the video frame.
@@ -198,14 +206,24 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
 
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
         lock.lock(); defer { lock.unlock() }
-        for a in anchors { planes[a.identifier] = nil }
+        for a in anchors { planes[a.identifier] = nil; verticalPlanes[a.identifier] = nil }
     }
 
     private func updatePlanes(_ anchors: [ARAnchor]) {
         lock.lock(); defer { lock.unlock() }
-        for case let p as ARPlaneAnchor in anchors where p.alignment == .horizontal {
+        for case let p as ARPlaneAnchor in anchors {
             let center = p.transform * SIMD4<Float>(p.center, 1)
-            planes[p.identifier] = (center.y, p.planeExtent.width * p.planeExtent.height)
+            switch p.alignment {
+            case .horizontal:
+                planes[p.identifier] = (center.y, p.planeExtent.width * p.planeExtent.height)
+            case .vertical:
+                // An ARKit plane lies in its anchor's local XZ, so its normal is the local Y axis.
+                var m = p.transform
+                m.columns.3 = center
+                verticalPlanes[p.identifier] = WallPlane(transform: m, width: p.planeExtent.width, normalColumn: 1)
+            @unknown default:
+                break
+            }
         }
     }
 }

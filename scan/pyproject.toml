@@ -1,7 +1,7 @@
 [project]
 name = "nook-scan"
-version = "0.2.0"
-description = "nook-scan: train a nook-scan capture (iPhone, ARKit poses) into the room splat with Brush"
+version = "0.3.0"
+description = "nook-scan: train a nook-scan capture (iPhone, ARKit poses) into the room splat with gsplat"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "jsonschema>=4.23",

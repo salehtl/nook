@@ -73,7 +73,7 @@ let
 in
 pkgs.stdenvNoCC.mkDerivation {
   pname = "nook-gsplat";
-  version = "0.1.0";
+  version = "0.2.0"; # 0.2.0: --stills-max-size (contract §4.9.1)
 
   src = lib.fileset.toSource {
     root = ../gsplat;

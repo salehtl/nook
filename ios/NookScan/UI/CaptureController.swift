@@ -30,8 +30,13 @@ final class CaptureController: ObservableObject, Identifiable {
     @Published private(set) var interrupted = false
     /// The last failure can be fixed in the Settings app (camera access).
     @Published private(set) var needsSettings = false
+    /// The separate RoomPlan pass (contract §4.12), started once the photo passes are saved, or nil when it isn't
+    /// offered (no LiDAR, turned off in Settings, replay).
+    @Published private(set) var roomPlan: RoomPlanPass?
     private let acceptLock = NSLock()
     private var accepting = true
+    /// The last camera pose the source delivered (guarded by `acceptLock`): where the RoomPlan pass will start.
+    private var lastPose: simd_float4x4?
 
     let source: CaptureSource
     let capturesRoot: URL
@@ -53,6 +58,9 @@ final class CaptureController: ObservableObject, Identifiable {
     }
 
     var isLive: Bool { source is LiveCaptureSource }
+
+    /// Whether a RoomPlan pass follows the photo passes: a live LiDAR capture with the setting on.
+    var offersRoomPlan: Bool { isLive && source.hasDepth && RoomPlanSettings.isSupported && RoomPlanSettings.isEnabled }
 
     func start() {
         guard !started else { return }
@@ -104,7 +112,10 @@ final class CaptureController: ObservableObject, Identifiable {
     }
 
     private func process(_ frame: CaptureFrame, recorder: CaptureRecorder, total: Int?) {
-        acceptLock.lock(); let ok = accepting; acceptLock.unlock()
+        acceptLock.lock()
+        let ok = accepting
+        if ok, frame.tracking.isNormal { lastPose = frame.transform }
+        acceptLock.unlock()
         guard ok else { return }
         let decision = recorder.handle(frame)
         motion.update(timestamp: frame.timestamp, transform: frame.transform)
@@ -143,6 +154,8 @@ final class CaptureController: ObservableObject, Identifiable {
         phase = .saving
         source.stop()
         let floorY = source.floorY
+        acceptLock.lock(); let endPose = lastPose; acceptLock.unlock()
+        let anchors = CaptureAnchors(floorY: floorY, walls: source.wallPlanes, endPose: endPose)
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result { try recorder.finish(floorY: floorY) }
             DispatchQueue.main.async {
@@ -155,6 +168,11 @@ final class CaptureController: ObservableObject, Identifiable {
                 case .success(let summary):
                     self.frameCount = summary.frameCount
                     self.phase = .saved(summary)
+                    if self.offersRoomPlan, summary.frameCount >= Self.minFrames {
+                        let pass = RoomPlanPass(folder: summary.folder, anchors: anchors)
+                        self.roomPlan = pass
+                        pass.start()
+                    }
                 case .failure(let error):
                     try? FileManager.default.removeItem(at: recorder.folder)
                     self.phase = .failed(error.localizedDescription)
@@ -178,6 +196,7 @@ final class CaptureController: ObservableObject, Identifiable {
         case .saving:
             discardRequested = true
         case .saved:
+            roomPlan?.skip()
             phase = .failed("Discarded")
             try? FileManager.default.removeItem(at: recorder.folder)
         case .failed:

@@ -31,7 +31,8 @@
 //   getEyeHeight()         1.15 / 1.6 m in seated / standing, null in orbit
 //   getRoomStatus()        status line text ("placeholder 3.5 × 4 × 2.7 m", "loading …", …)
 //   getRoomEuler()         { yaw, pitch, roll } degrees, the display decomposition of the room quaternion
-//   getItems()             [{ uid, id, name, lib, render, hasGlb, hasSplat, position, rotation_y_deg }]
+//   getItems()             [{ uid, id, name, lib, render, hasGlb, hasSplat, position ([x, elevation, z]), rotation_y_deg,
+//                            mounted: 'floor'|'wall', missing (a placeholder box for a piece the library lost, §2.8) }]
 //   getItem(uid)           one of the above, or null
 //   getItemBounds(uid)     { min, max } world AABB (m), or null
 //   getSelected()          selected uid or null;   getDrag() { mode: 'move'|'rotate', uid } while dragging, else null
@@ -47,6 +48,8 @@
 //   getLayouts()           saved layout names (last refresh);   getLayoutName() current layout name
 //   getLayoutDetails()     [{ name, items?, updated?, legacy? }] (details only from a rooms server)
 //   getRenders()           render metadata, newest first;   isRenderMock()
+//   getShell()             { available, loaded, visible, walls: [{ id, lengthCm, heightCm }], selected: { id, a, b, lengthCm } | null }
+//   getHang()              { uid } while Hang on wall waits for a wall tap, else null;   getElevation(uid) m
 //   getState() / getRenderSettings()   the window.nook shapes (contract §2.4, §2.6, §2.7)
 //   errors                 string[] of every reported error (window.nook.errors)
 //   canvas, three: { scene, camera, renderer, orbit }   for overlays and advanced input
@@ -60,9 +63,12 @@
 //   saveRoom() (PUT /api/rooms/<name>, or /api/room without a name), revertRoom(), frameRoom(),
 //   setRoomEuler({yaw,pitch,roll}), setRoomPosition(i, v), setRoomScale(v), setPlaceholderSize(key, v), setGridVisible(on)
 //   addItemInternal(id, opts), moveItemInternal(uid, opts), removeItemInternal(uid), clearItemsInternal(),
-//   toggleRender(uid, 'glb'|'splat'), select(uid|null), rotateSelected(deg), setSnap(on) (Shift: 5 cm moves, 15° grip)
-//   beginItemDrag(uid, x, y) / beginRotateDrag(uid, x, y) → bool, dragTo(x, y, { snapTo }), endItemDrag()
+//   toggleRender(uid, 'glb'|'splat'), select(uid|null), rotateSelected(deg), setSnap(on) (Shift: lift drags, 15° grip)
+//   beginItemDrag(uid, x, y, { lift }) / beginRotateDrag(uid, x, y) → bool, dragTo(x, y, { snapTo }), endItemDrag()
 //   removeItemWithUndo(uid) → snapshot, restoreItem(snapshot) (same uid, place, turn, render; selects it)
+//   §2.10: setElevation(uid, m), nudgeElevation(uid, dm), dropToFloor(uid), hangItem(uid, { point, normal }),
+//   startHang(uid?) / cancelHang() (the next tap hangs it), wallAt(x, y) → { point, normal, source } | null
+//   §2.7 v4: setShell(on), selectWall(id|null);   reloadLibrary() (after a library change, §2.8)
 //   setViewInternal(view), gotoViewpoint(i, { glide }), stepViewpoint(+1|-1, { glide }), lookBy(dxPx, dyPx),
 //   setMove({forward, side, fast}), walkTo(x, y) (first person: glide to the floor there, chalk target)
 //   tap(clientX, clientY) (pick / measure / select, or walk in first person, at a screen point)
@@ -89,6 +95,8 @@
 //   'grid'      { visible }
 //   'status'    { text }                       room status line
 //   'items'     { change: 'add'|'remove'|'move'|'render', uid }
+//   'hang'      { active, uid, hung?, source? }        Hang on wall started / ended (hung: it was placed)
+//   'shell'     getShell()                             the measured shell loaded, shown, hidden or a wall tapped
 //   'selection' { uid, gizmoMode }
 //   'drag'      { mode: 'move'|'rotate', uid, phase: 'start'|'end' }
 //   'view'      { view };   'viewpoint' { index, count };   'walk' { to }
@@ -129,6 +137,13 @@ export const dimsText = (d) => (d ? `${fmtCm(d.w)} × ${fmtCm(d.d)} × ${fmtCm(d
 export const wrapDeg = (d) => { let x = ((d + 180) % 360 + 360) % 360 - 180; if (x === -180) x = 180; return x }
 // Fire-and-forget wrapper for UI handlers: failures are already reported, never thrown.
 export const quiet = (p) => { Promise.resolve(p).catch(() => {}) }
+// §2.9: every POST, PUT, PATCH and DELETE the page makes carries X-Nook: 1 (the server refuses it otherwise).
+export function withNook(opts = {}) {
+  if (!/^(POST|PUT|PATCH|DELETE)$/i.test(opts?.method || 'GET')) return opts
+  return { ...opts, headers: { ...(opts.headers || {}), 'X-Nook': '1' } }
+}
+export const MAX_ELEVATION = 4 // m (§2.10)
+const clampElev = (y) => Math.min(MAX_ELEVATION, Math.max(0, y))
 
 // --- events, errors + toasts ------------------------------------------------
 const events = new EventTarget()
@@ -385,6 +400,7 @@ function buildPlaceholder({ w, d, h }) {
 }
 
 function applyRoomTransform() {
+  applyShellTransform()
   const m = room.mesh
   if (!m) return
   const t = roomConfig.transform
@@ -470,6 +486,7 @@ async function loadRoomInternal(cfg, { fileBytes = null, fileName = null, frame 
   const prev = { config: roomConfig, dropped: room.dropped, hadSplat: room.kind === 'splat' && !!room.mesh && room.loaded, name: undo ? undo.name : roomName, baseline: roomBaseline, saved: undo ? undo.saved : savedRoomConfig, failed: room.failed, error: room.error }
   if (name === undefined) name = !fileBytes && !room.dropped && next.splat && next.splat === roomConfig.splat ? roomName : null
   roomName = fileBytes ? null : name
+  if (roomName !== shell.room || !roomName) clearShell()
   roomConfig = next
   roomBaseline = roomSig(next)
   vpBase = transformMatrix(roomConfig.transform)
@@ -523,6 +540,7 @@ async function loadRoomInternal(cfg, { fileBytes = null, fileName = null, frame 
         if (prev.hadSplat) room.loaded = true
         else showPlaceholder()
         vpBase = transformMatrix(roomConfig.transform)
+        if (prev.name) quiet(loadShell(prev.name, roomsList.find((r) => r.name === prev.name)?.roomplan_url || null))
         syncRoom('cancelled')
         quiet(refreshLayouts())
       }
@@ -768,6 +786,7 @@ async function openRoom(name) {
 async function afterRoomChosen(name, list, loading) {
   const token = roomToken
   quiet(refreshLayouts())
+  if (name) quiet(loadShell(name, (list || roomsList).find((r) => r.name === name)?.roomplan_url || null))
   await loading
   const entry = (list || roomsList).find((r) => r.name === name)
   if (name && roomsApi && entry && !entry.thumb_url && token === roomToken && room.kind === 'splat') quiet(saveThumbnail(name))
@@ -841,6 +860,153 @@ async function revertRoom() {
   await loadRoomInternal(cfg, { frame: false, name: room.dropped ? null : roomName })
 }
 
+// --- measured shell (§2.7 v4): walls, floor, doors and windows from <room>.roomplan.json (§4.12), in the room's
+// transform like the splat. See-through, drawn over the scan; a tap on a wall shows its length. Hanging an item
+// (§2.10) uses its wall planes whether it's shown or not.
+const shellGroup = new THREE.Group()
+shellGroup.name = 'shell'
+shellGroup.visible = false
+scene.add(shellGroup)
+const shell = { room: null, url: null, loading: null, loaded: false, visible: false, walls: [], center: null, selected: null }
+const SHELL_COLOR = { walls: 0xd9a441, floors: 0xece8e0, doors: 0x8cc4a0, windows: 0x8fb8d8, openings: 0x8fb8d8, objects: 0xa39e94 }
+function emitShell() { emit('shell', getShell()) }
+// roomplan.json matrices are 4 × 4 row-major, nested or flat.
+function mat4Of(t) {
+  const a = Array.isArray(t?.[0]) ? t.flat() : t
+  return Array.isArray(a) && a.length === 16 && a.every(isNum) ? new THREE.Matrix4().set(...a) : null
+}
+function applyShellTransform() {
+  const t = roomConfig.transform
+  shellGroup.position.fromArray(t.position)
+  shellGroup.quaternion.fromArray(t.quaternion).normalize()
+  shellGroup.scale.setScalar(t.scale)
+  shellGroup.updateMatrixWorld(true)
+}
+function clearShell() {
+  for (const c of [...shellGroup.children]) {
+    shellGroup.remove(c)
+    c.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.() })
+  }
+  Object.assign(shell, { room: null, url: null, loading: null, loaded: false, visible: false, walls: [], center: null, selected: null })
+  shellGroup.visible = false
+}
+function buildShell(doc) {
+  const add = (obj, m, z = 0) => {
+    obj.matrixAutoUpdate = false
+    obj.matrix.copy(m)
+    if (z) obj.matrix.multiply(new THREE.Matrix4().makeTranslation(0, 0, z))
+    obj.renderOrder = 20
+    obj.raycast = () => {}
+    shellGroup.add(obj)
+    return obj
+  }
+  const centers = []
+  for (const kind of ['floors', 'walls', 'doors', 'windows', 'openings', 'objects']) {
+    for (const el of Array.isArray(doc?.[kind]) ? doc[kind] : []) {
+      const m = mat4Of(el?.transform)
+      const d = el?.dimensions
+      if (!m || !Array.isArray(d) || !d.slice(0, 2).every((v) => isNum(v) && v > 0)) continue
+      const color = SHELL_COLOR[kind]
+      if (kind === 'objects') {
+        const geo = new THREE.BoxGeometry(d[0], d[1], Math.max(0.01, isNum(d[2]) ? d[2] : 0.01))
+        add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.35, depthWrite: false })), m)
+        geo.dispose()
+        continue
+      }
+      const geo = new THREE.PlaneGeometry(d[0], d[1])
+      const opening = kind === 'doors' || kind === 'windows' || kind === 'openings'
+      const fillOpacity = kind === 'walls' ? 0.035 : kind === 'floors' ? 0.03 : 0.08
+      const fill = add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: kind === 'walls' ? 0xece8e0 : color, transparent: true, opacity: fillOpacity, side: THREE.DoubleSide, depthWrite: false })), m, opening ? 0.004 : 0)
+      const edges = add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color, transparent: true, opacity: kind === 'floors' ? 0.45 : 0.85, depthWrite: false })), m, opening ? 0.004 : 0)
+      if (kind === 'walls') {
+        shell.walls.push({ id: String(el.id ?? `wall-${shell.walls.length}`), w: d[0], h: d[1], matrix: m, fill, edges, fillOpacity })
+        centers.push(new THREE.Vector3().setFromMatrixPosition(m))
+      }
+    }
+  }
+  shell.center = centers.length ? centers.reduce((a, b) => a.add(b), new THREE.Vector3()).multiplyScalar(1 / centers.length) : null
+}
+async function loadShell(name, url) {
+  if (shell.room === name && shell.url === url && (shell.loaded || shell.loading)) return shell.loading
+  const visible = shell.room === name && shell.visible
+  clearShell()
+  shell.room = name
+  shell.url = url
+  if (!url) { emitShell(); return null }
+  const p = (async () => {
+    let doc
+    try { doc = await apiJson(url) } catch (e) { if (shell.url === url) shell.loading = null; throw reportError("Could not read this room's measured shell", e) }
+    if (shell.url !== url || shell.room !== name) return
+    buildShell(doc)
+    shell.loaded = true
+    applyShellTransform()
+    emitShell()
+  })()
+  shell.loading = p
+  shell.visible = visible
+  shellGroup.visible = visible
+  emitShell()
+  return p
+}
+function setShell(on) {
+  if (on && !shell.url) { toast("This room has no measured shell: scan it with RoomPlan (a phone with LiDAR) to get one.", 'info'); on = false }
+  shell.visible = !!on
+  shellGroup.visible = shell.visible
+  if (!shell.visible) selectWall(null)
+  emitShell()
+}
+// The shell wall under the current ray (setRay first): its inner face (toward the room's middle) seen from here
+// wins, so from outside the room you reach the far wall through the near one. → { wall, point, normal, distance }
+function shellWallHit() {
+  if (!shell.walls.length) return null
+  shellGroup.updateMatrixWorld(true)
+  const center = shell.center ? shell.center.clone().applyMatrix4(shellGroup.matrixWorld) : null
+  let inner = null, any = null
+  for (const w of shell.walls) {
+    const M = shellGroup.matrixWorld.clone().multiply(w.matrix)
+    const ray = raycaster.ray.clone().applyMatrix4(M.clone().invert())
+    if (Math.abs(ray.direction.z) < 1e-9) continue
+    const t = -ray.origin.z / ray.direction.z
+    if (!(t > 0)) continue
+    const lp = ray.origin.clone().addScaledVector(ray.direction, t)
+    if (Math.abs(lp.x) > w.w / 2 || Math.abs(lp.y) > w.h / 2) continue
+    const point = lp.setZ(0).applyMatrix4(M)
+    const distance = point.distanceTo(raycaster.ray.origin)
+    const n = new THREE.Vector3(0, 0, 1).transformDirection(M)
+    if (center && n.dot(center.clone().sub(point)) < 0) n.negate()
+    const hit = { wall: w, point, normal: n, distance }
+    const facing = n.dot(raycaster.ray.origin.clone().sub(point)) > 0
+    if (facing && (!inner || distance < inner.distance)) inner = hit
+    if (!any || distance < any.distance) any = hit
+  }
+  if (any && !inner) any.normal.negate() // seen from outside every wall: face the camera
+  return inner || any
+}
+function selectWall(id) {
+  if ((shell.selected || null) === (id || null)) return
+  shell.selected = id || null
+  for (const w of shell.walls) {
+    const on = w.id === shell.selected
+    w.fill.material.opacity = on ? 0.16 : w.fillOpacity
+    w.fill.material.color.setHex(on ? SHELL_COLOR.walls : 0xece8e0)
+    w.edges.material.color.setHex(on ? 0xffffff : SHELL_COLOR.walls)
+  }
+  emitShell()
+}
+// { available, loaded, visible, walls: [{ id, lengthCm, heightCm }], selected: { id, a, b, lengthCm } | null } (world m)
+function getShell() {
+  shellGroup.updateMatrixWorld(true)
+  const k = roomConfig.transform.scale
+  const sel = shell.walls.find((w) => w.id === shell.selected)
+  let selected = null
+  if (sel) {
+    const M = shellGroup.matrixWorld.clone().multiply(sel.matrix)
+    const a = new THREE.Vector3(-sel.w / 2, -sel.h / 2, 0).applyMatrix4(M), b = new THREE.Vector3(sel.w / 2, -sel.h / 2, 0).applyMatrix4(M)
+    selected = { id: sel.id, a: a.toArray(), b: b.toArray(), lengthCm: Math.round(a.distanceTo(b) * 1000) / 10 }
+  }
+  return { available: !!shell.url, loaded: shell.loaded, visible: shell.visible, walls: shell.walls.map((w) => ({ id: w.id, lengthCm: Math.round(w.w * k * 1000) / 10, heightCm: Math.round(w.h * k * 1000) / 10 })), selected }
+}
+
 // --- environment from the scan (contract §2.6.2) --------------------------------------
 function useNeutralEnv() {
   scene.environment = neutralEnv
@@ -866,7 +1032,7 @@ function bakeEnvironment(probe = env.customProbe) {
     if (room.kind !== 'splat' || !room.mesh || !room.loaded) { useNeutralEnv(); return }
     const token = roomToken
     const center = probe ? new THREE.Vector3().fromArray(probe) : defaultProbe()
-    const hide = [grid, walkTarget.group, placeholderGroup, ...[...items.values()].map((r) => r.group)]
+    const hide = [grid, walkTarget.group, placeholderGroup, shellGroup, ...[...items.values()].map((r) => r.group)]
     const background = scene.background
     baking = true
     spark.autoUpdate = false
@@ -961,11 +1127,16 @@ function makeContactShadow(rec) {
 
 function setContactShadows(on) {
   contactShadows = !!on
-  for (const r of items.values()) {
-    if (r.shadow) r.shadow.visible = contactShadows
-    if (r.proxy) r.proxy.visible = contactShadows
-  }
+  for (const r of items.values()) syncShadow(r)
   emitLook()
+}
+// The blob stays on the floor (it's a child of the item, so it's shifted down by the elevation); a raised item (its
+// bottom more than 2 cm up, §2.10) has none.
+function syncShadow(rec) {
+  const y = rec.group.position.y
+  const on = contactShadows && y <= 0.02
+  if (rec.shadow) { rec.shadow.visible = on; rec.shadow.position.y = SHADOW_Y - y }
+  if (rec.proxy) rec.proxy.visible = on
 }
 
 // --- library + items --------------------------------------------------------
@@ -1029,7 +1200,27 @@ function loadSplatBytes(url) {
   return splatCache.get(url)
 }
 
+// A piece the library doesn't have any more (§2.8): a dashed box at its dims, so the layout keeps its place.
+const MISSING_DIMS = { w: 50, d: 50, h: 50 }
+const missingFill = new THREE.MeshBasicMaterial({ color: 0xe8735a, transparent: true, opacity: 0.14, depthWrite: false })
+const missingEdge = new THREE.LineDashedMaterial({ color: 0xe8735a, dashSize: 0.05, gapSize: 0.035, transparent: true, opacity: 0.95 })
+function missingChild(dims) {
+  const w = dims.w / 100, d = dims.d / 100, hgt = dims.h / 100
+  const geo = new THREE.BoxGeometry(w, hgt, d).translate(0, hgt / 2, 0)
+  const g = new THREE.Group()
+  g.name = 'missing-item'
+  const fillMesh = new THREE.Mesh(geo, missingFill)
+  fillMesh.renderOrder = 3
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), missingEdge)
+  edges.computeLineDistances()
+  edges.raycast = () => {}
+  g.add(fillMesh, edges)
+  return { obj: g, box: new THREE.Box3(new THREE.Vector3(-w / 2, 0, -d / 2), new THREE.Vector3(w / 2, hgt, d / 2)) }
+}
+const validDims = (d) => d && typeof d === 'object' && ['w', 'd', 'h'].every((k) => isNum(d[k]) && d[k] > 0)
+
 async function buildChild(lib, render) {
+  if (lib.missing) return missingChild(lib.dims_cm)
   if (render === 'splat') {
     const url = assetUrl(lib.assets.splat)
     const bytes = await loadSplatBytes(url)
@@ -1052,6 +1243,7 @@ async function buildChild(lib, render) {
 // GLB clones share geometry/materials with the cached template, so only splat meshes are disposed.
 function disposeChild(obj) {
   if (obj instanceof SplatMesh) { try { obj.dispose() } catch { /* ignore */ } }
+  if (obj?.name === 'missing-item') obj.traverse((c) => c.geometry?.dispose())
 }
 
 async function setRender(rec, render) {
@@ -1070,6 +1262,7 @@ async function setRender(rec, render) {
   rec.proxy = proxy
   rec.group.add(shadow)
   if (proxy) rec.group.add(proxy)
+  syncShadow(rec)
 }
 
 function disposeContactShadow(rec) {
@@ -1115,27 +1308,38 @@ function newUid(id) {
   return `${id}-${Date.now().toString(36)}${uidCounter.toString(36)}`
 }
 
+// opts: { position: [x, elevation, z], rotation_y_deg, render, uid, mounted: 'floor'|'wall',
+//         missing: dims_cm (a layout's piece the library doesn't have: a placeholder box at those dims, §2.8) }
 async function addItemInternal(id, opts = {}) {
-  const lib = library.find((i) => i.id === id)
-  if (!lib) throw reportError(`Unknown library item "${id}"`)
   opts = opts || {}
-  const render = pickRender(lib, opts.render)
-  const pos = Array.isArray(opts.position) && opts.position.length >= 3 && isNum(opts.position[0]) && isNum(opts.position[2])
-    ? opts.position : defaultSpot()
+  let lib = library.find((i) => i.id === id)
+  if (!lib && opts.missing && typeof id === 'string' && id) {
+    lib = { id, name: id.replace(/-/g, ' ').replace(/^./, (c) => c.toUpperCase()), dims_cm: validDims(opts.missing) ? { ...opts.missing } : { ...MISSING_DIMS }, assets: {}, missing: true }
+  }
+  if (!lib) throw reportError(`Unknown library item "${id}"`)
+  const render = lib.missing ? 'glb' : pickRender(lib, opts.render)
+  const given = Array.isArray(opts.position) && opts.position.length >= 3 && isNum(opts.position[0]) && isNum(opts.position[2])
+  const pos = given ? opts.position : defaultSpot()
   const rot = isNum(opts.rotation_y_deg) ? opts.rotation_y_deg : 0
   const uid = typeof opts.uid === 'string' && opts.uid && !items.has(opts.uid) ? opts.uid : newUid(id)
   const gen = itemsGen
   const group = new THREE.Group()
   group.rotation.order = 'YXZ'
-  group.position.set(pos[0], 0, pos[2])
+  group.position.set(pos[0], given && isNum(pos[1]) ? clampElev(pos[1]) : 0, pos[2])
   group.rotation.set(0, rot * DEG, 0)
   group.userData.uid = uid
   group.name = `item:${uid}`
-  const rec = { uid, id, lib, render, group, child: null, localBox: null, rotationDeg: rot, shadow: null, proxy: null }
+  const rec = { uid, id, lib, render, group, child: null, localBox: null, rotationDeg: rot, shadow: null, proxy: null,
+    mounted: opts.mounted === 'wall' ? 'wall' : 'floor', missing: !!lib.missing }
   try {
     await setRender(rec, render)
   } catch (e) {
     throw reportError(`Could not load "${lib.name || id}" (${render})`, e)
+  }
+  // A wall piece (library mount: "wall") placed without a spot starts at a center height of 1.45 m (§2.10).
+  if (!given && lib.mount === 'wall' && rec.localBox) {
+    group.position.y = clampElev(round(1.45 - (rec.localBox.max.y + rec.localBox.min.y) / 2, 6))
+    syncShadow(rec)
   }
   if (gen !== itemsGen) {
     disposeChild(rec.child)
@@ -1148,21 +1352,115 @@ async function addItemInternal(id, opts = {}) {
   return uid
 }
 
+// position[1] is the elevation (§2.10): the item's bottom above the floor, clamped to 0..4 m. `mounted` 'floor'
+// unhooks a hung item (Drop to floor does that).
 function moveItemInternal(uid, opts = {}) {
   const rec = items.get(uid)
   if (!rec) { reportError(`moveItem: no placed item "${uid}"`); return }
   opts = opts || {}
   if (Array.isArray(opts.position)) {
     if (isNum(opts.position[0])) rec.group.position.x = opts.position[0]
+    if (isNum(opts.position[1])) rec.group.position.y = clampElev(opts.position[1])
     if (isNum(opts.position[2])) rec.group.position.z = opts.position[2]
   }
-  rec.group.position.y = 0
   if (isNum(opts.rotation_y_deg)) {
     rec.rotationDeg = opts.rotation_y_deg
     rec.group.rotation.set(0, opts.rotation_y_deg * DEG, 0)
   }
+  if (opts.mounted === 'floor' || opts.mounted === 'wall') rec.mounted = opts.mounted
   rec.group.updateMatrixWorld(true)
+  syncShadow(rec)
   emit('items', { change: 'move', uid })
+}
+
+// --- elevation and hanging (§2.10) ---------------------------------------------------------------------------
+function getElevation(uid) { const rec = items.get(uid); return rec ? rec.group.position.y : null }
+function setElevation(uid, y) {
+  const rec = items.get(uid)
+  if (!rec || !isNum(y)) return
+  moveItemInternal(uid, { position: [rec.group.position.x, round(clampElev(y), 6), rec.group.position.z] })
+}
+function nudgeElevation(uid, dy) { const y = getElevation(uid); if (y != null) setElevation(uid, Math.round((y + dy) * 1000) / 1000) }
+function dropToFloor(uid) {
+  const rec = items.get(uid)
+  if (!rec) return
+  moveItemInternal(uid, { position: [rec.group.position.x, 0, rec.group.position.z], mounted: 'floor' })
+}
+// The item's frame turned to `yawDeg`: R · local
+const yawVec = (v, yawDeg) => v.applyAxisAngle(new THREE.Vector3(0, 1, 0), yawDeg * DEG)
+// Puts the item's back (its −Z face) on the plane through `point` with `normal` (its front faces that way), its
+// center at the point. The normal is made horizontal. The item stays hung (mounted 'wall') until dropped.
+function hangItem(uid, at) {
+  const rec = items.get(uid)
+  if (!rec) { reportError(`hangItem: no placed item "${uid}"`); return }
+  const point = at?.point, normal = at?.normal
+  if (!(Array.isArray(point) && point.length === 3 && point.every(isNum) && Array.isArray(normal) && normal.length === 3 && normal.every(isNum))) {
+    reportError('hangItem needs { point: [x, y, z], normal: [x, y, z] }')
+    return
+  }
+  const n = new THREE.Vector3(normal[0], 0, normal[2])
+  if (n.lengthSq() < 1e-9) { reportError('hangItem: the wall normal must not point straight up or down'); return }
+  n.normalize()
+  const yaw = round(Math.atan2(n.x, n.z) / DEG, 6)
+  const b = rec.localBox
+  const back = yawVec(new THREE.Vector3((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, b.min.z), yaw)
+  const p = new THREE.Vector3().fromArray(point).sub(back)
+  moveItemInternal(uid, { position: [round(p.x, 6), round(clampElev(p.y), 6), round(p.z, 6)], rotation_y_deg: yaw, mounted: 'wall' })
+}
+// The plane a hung item slides on: through its back face, facing where its front faces.
+function wallPlaneOf(rec) {
+  rec.group.updateMatrixWorld(true)
+  const n = yawVec(new THREE.Vector3(0, 0, 1), rec.rotationDeg)
+  const back = new THREE.Vector3(0, 0, rec.localBox.min.z).applyMatrix4(rec.group.matrixWorld)
+  return new THREE.Plane().setFromNormalAndCoplanarPoint(n, back)
+}
+
+// Hang mode: Hang on wall (or a long-press on the phone), then a tap on a wall hangs the selected item there.
+let hang = null // { uid }
+function startHang(uid = selected) {
+  if (!uid || !items.has(uid)) { toast('Select a piece first, then Hang on wall.', 'info', 3000); return false }
+  measure.active = false
+  measure.points = []
+  cancelPickMode()
+  if (selected !== uid) select(uid)
+  hang = { uid }
+  emit('hang', { active: true, uid })
+  return true
+}
+function cancelHang() {
+  if (!hang) return
+  hang = null
+  emit('hang', { active: false, uid: selected })
+}
+// Where a screen point meets a wall: the measured shell's wall plane (exact), a placeholder wall, else the scan with
+// the front turned to face the camera (snapped to 15°). → { point, normal, source: 'shell'|'placeholder'|'scan' } | null
+function wallAt(clientX, clientY) {
+  setRay(clientX, clientY)
+  const sw = shellWallHit()
+  if (sw) return { point: sw.point.toArray(), normal: sw.normal.toArray(), source: 'shell', wall: sw.wall.id }
+  if (placeholderGroup.visible) {
+    const ph = raycaster.intersectObjects(placeholderGroup.children.filter((c) => c.name === 'placeholder-wall'), false)[0]
+    if (ph) {
+      const n = ph.face.normal.clone().transformDirection(ph.object.matrixWorld)
+      return { point: ph.point.toArray(), normal: n.toArray(), source: 'placeholder' }
+    }
+  }
+  const sp = hitRoomSplat()
+  if (!sp) return null
+  const toCam = camera.position.clone().sub(sp.point)
+  const yaw = Math.round(Math.atan2(toCam.x, toCam.z) / DEG / 15) * 15
+  const n = yawVec(new THREE.Vector3(0, 0, 1), yaw)
+  return { point: sp.point.toArray(), normal: [round(n.x, 9), 0, round(n.z, 9)], source: 'scan' }
+}
+function hangAt(clientX, clientY) {
+  const uid = hang?.uid
+  if (!uid || !items.has(uid)) { cancelHang(); return false }
+  const at = wallAt(clientX, clientY)
+  if (!at) { toast(shell.walls.length ? 'No wall there: tap a wall.' : 'No scan there: tap a wall.', 'info', 3000); return false }
+  hangItem(uid, at)
+  hang = null
+  emit('hang', { active: false, uid, hung: true, source: at.source })
+  return true
 }
 
 function rotateSelected(deg) {
@@ -1214,8 +1512,10 @@ function itemInfo(r) {
     render: r.render,
     hasGlb: !!r.lib.assets?.glb,
     hasSplat: !!r.lib.assets?.splat,
-    position: [r.group.position.x, 0, r.group.position.z],
+    position: [r.group.position.x, r.group.position.y, r.group.position.z],
     rotation_y_deg: r.rotationDeg,
+    mounted: r.mounted,
+    missing: !!r.missing,
   }
 }
 
@@ -1224,7 +1524,7 @@ function itemInfo(r) {
 let selected = null
 let gizmoMode = 'translate' // kept for older callers; there is one move model now
 let snap = false            // Shift on desktop: moves snap to 5 cm, the grip to 15°
-const drag = { mode: null, uid: null, off: new THREE.Vector3(), a0: 0, rot0: 0 }
+const drag = { mode: null, uid: null, off: new THREE.Vector3(), a0: 0, rot0: 0, plane: new THREE.Plane() }
 
 function setGizmoMode(mode) {
   gizmoMode = mode === 'rotate' ? 'rotate' : 'translate'
@@ -1234,6 +1534,7 @@ function setGizmoMode(mode) {
 function select(uid) {
   const next = uid && items.has(uid) ? uid : null
   if (drag.mode && drag.uid !== next) endItemDrag()
+  if (hang && hang.uid !== next) cancelHang()
   selected = next
   emit('selection', { uid: selected, gizmoMode })
 }
@@ -1300,15 +1601,32 @@ function floorPointAt(clientX, clientY) {
   return p && p.distanceTo(raycaster.ray.origin) < 60 ? p : null
 }
 
-// Drag to move: the item keeps its offset from the finger, stays on the floor (y = 0), and doesn't rotate.
-function beginItemDrag(uid, clientX, clientY) {
+// Where a screen point's ray meets a plane, or null (behind the camera or too far).
+function planePointAt(plane, clientX, clientY) {
+  setRay(clientX, clientY)
+  const p = raycaster.ray.intersectPlane(plane, new THREE.Vector3())
+  return p && p.distanceTo(raycaster.ray.origin) < 60 ? p : null
+}
+// Drag to move: the item keeps its offset from the finger and doesn't rotate. It slides on its own horizontal plane
+// (y stays its elevation); a hung item slides along its wall; with `lift` (Shift on desktop) it moves up and down only.
+function beginItemDrag(uid, clientX, clientY, { lift = snap } = {}) {
   const rec = items.get(uid)
-  const p = rec && floorPointAt(clientX, clientY)
+  if (!rec) return false
+  let mode = 'move'
+  const plane = new THREE.Plane()
+  if (rec.mounted === 'wall') { mode = 'wall'; plane.copy(wallPlaneOf(rec)) } else if (lift) {
+    mode = 'lift'
+    const n = camera.getWorldDirection(new THREE.Vector3()).setY(0)
+    if (n.lengthSq() < 1e-6) n.set(0, 0, 1)
+    plane.setFromNormalAndCoplanarPoint(n.normalize(), rec.group.position)
+  } else plane.set(new THREE.Vector3(0, 1, 0), -rec.group.position.y)
+  const p = planePointAt(plane, clientX, clientY)
   if (!p) return false
   if (selected !== uid) select(uid)
-  Object.assign(drag, { mode: 'move', uid, off: rec.group.position.clone().sub(p) })
+  Object.assign(drag, { mode, uid, off: rec.group.position.clone().sub(p) })
+  drag.plane.copy(plane)
   orbit.enabled = false
-  emit('drag', { mode: 'move', uid, phase: 'start' })
+  emit('drag', { mode, uid, phase: 'start' })
   return true
 }
 // The grip: the item turns by the angle the finger sweeps around its center (15° steps with `snapTo`).
@@ -1325,12 +1643,18 @@ function beginRotateDrag(uid, clientX, clientY) {
 function dragTo(clientX, clientY, { snapTo = false } = {}) {
   const rec = drag.mode && items.get(drag.uid)
   if (!rec) return
-  const p = floorPointAt(clientX, clientY)
+  const p = drag.mode === 'rotate' ? floorPointAt(clientX, clientY) : planePointAt(drag.plane, clientX, clientY)
   if (!p) return
+  const g = rec.group.position
   if (drag.mode === 'move') {
-    let x = p.x + drag.off.x, z = p.z + drag.off.z
-    if (snap) { x = Math.round(x / 0.05) * 0.05; z = Math.round(z / 0.05) * 0.05 }
-    moveItemInternal(drag.uid, { position: [round(x, 6), 0, round(z, 6)] })
+    moveItemInternal(drag.uid, { position: [round(p.x + drag.off.x, 6), g.y, round(p.z + drag.off.z, 6)] })
+  } else if (drag.mode === 'lift') {
+    let y = clampElev(p.y + drag.off.y)
+    if (snap) y = Math.round(y / 0.01) * 0.01
+    moveItemInternal(drag.uid, { position: [g.x, round(y, 6), g.z] })
+  } else if (drag.mode === 'wall') {
+    const q = p.add(drag.off)
+    moveItemInternal(drag.uid, { position: [round(q.x, 6), round(clampElev(q.y), 6), round(q.z, 6)] })
   } else {
     const c = rec.group.position
     let deg = drag.rot0 + (Math.atan2(p.x - c.x, p.z - c.z) - drag.a0) / DEG
@@ -1351,12 +1675,13 @@ function endItemDrag() {
 function removeItemWithUndo(uid) {
   const rec = items.get(uid)
   if (!rec) return null
-  const snapItem = { uid, id: rec.id, name: rec.lib.name || rec.id, position: [rec.group.position.x, 0, rec.group.position.z], rotation_y_deg: rec.rotationDeg, render: rec.render }
+  const snapItem = { uid, id: rec.id, name: rec.lib.name || rec.id, position: rec.group.position.toArray(), rotation_y_deg: rec.rotationDeg, render: rec.render,
+    mounted: rec.mounted, missing: rec.missing ? { ...rec.lib.dims_cm } : undefined }
   removeItemInternal(uid)
   return snapItem
 }
 async function restoreItem(s) {
-  const uid = await addItemInternal(s.id, { uid: s.uid, position: s.position, rotation_y_deg: s.rotation_y_deg, render: s.render })
+  const uid = await addItemInternal(s.id, { uid: s.uid, position: s.position, rotation_y_deg: s.rotation_y_deg, render: s.render, mounted: s.mounted, missing: s.missing })
   select(uid)
   return uid
 }
@@ -1817,6 +2142,7 @@ function applyTwoPointScale(real) {
 // A click/tap at a screen point: an alignment pick, a measure point, walking (first person) or (de)selecting an item.
 function tap(clientX, clientY) {
   setRay(clientX, clientY)
+  if (hang) return hangAt(clientX, clientY)
   if (pickMode === 'floor') return previewFloorAt(clientX, clientY)
   if (pickMode === 'two') {
     const hit = hitRoomSplat()
@@ -1830,6 +2156,12 @@ function tap(clientX, clientY) {
   }
   const hit = hitItems()
   if (hit) { select(hit.uid); return }
+  // The see-through shell: a tap on a wall shows its length (§2.7 v4)
+  if (shell.visible && !selected) {
+    const sw = shellWallHit()
+    selectWall(sw ? sw.wall.id : null)
+    if (sw) return
+  } else if (shell.selected) selectWall(null)
   select(null)
   if (view !== 'orbit') walkTo(clientX, clientY)
 }
@@ -1837,7 +2169,7 @@ function tap(clientX, clientY) {
 // --- layouts ------------------------------------------------------------------------
 async function apiJson(url, opts) {
   let res
-  try { res = await fetch(url, opts) } catch (e) { throw new Error(`could not reach ${url} (${e.message})`) }
+  try { res = await fetch(url, withNook(opts)) } catch (e) { throw new Error(`could not reach ${url} (${e.message})`) }
   let data = null
   try { data = await res.json() } catch { /* non-JSON */ }
   if (!res.ok) { const err = new Error(data?.error || `${url} returned HTTP ${res.status}`); err.status = res.status; throw err }
@@ -1862,8 +2194,10 @@ function layoutDoc(name) {
       uid: r.uid,
       id: r.id,
       render: r.render,
-      position: [round(r.group.position.x, 6), 0, round(r.group.position.z, 6)],
+      position: [round(r.group.position.x, 6), round(r.group.position.y, 6), round(r.group.position.z, 6)],
       rotation_y_deg: round(r.rotationDeg, 6),
+      ...(r.mounted === 'wall' ? { mounted: 'wall' } : {}),
+      ...(validDims(r.lib.dims_cm) ? { dims_cm: { ...r.lib.dims_cm } } : {}), // a placeholder's size if the piece goes missing (§2.8)
     })),
     camera: { view, position: camera.position.toArray().map((v) => round(v, 5)), target: cameraTarget().map((v) => round(v, 5)) },
   }
@@ -1895,7 +2229,9 @@ async function loadLayoutInternal(name) {
   // Switch rooms only when the layout names a scan we aren't showing; keep the current alignment otherwise.
   if (doc.room && typeof doc.room === 'object') {
     const want = typeof doc.room.splat === 'string' && doc.room.splat ? doc.room.splat : null
-    if (want && (want !== roomConfig.splat || room.dropped || room.kind !== 'splat')) {
+    // A layout of the open room (its room_name, or the same scan file name) keeps the room as it is.
+    const ours = !!roomName && !room.dropped && room.kind === 'splat' && (doc.room_name === roomName || (!doc.room_name && splatStem(want) === roomName))
+    if (want && !ours && (want !== roomConfig.splat || room.dropped || room.kind !== 'splat')) {
       const other = typeof doc.room_name === 'string' && doc.room_name !== roomName && roomsApi ? doc.room_name : null
       try {
         if (other) await openRoom(other)
@@ -1905,11 +2241,17 @@ async function loadLayoutInternal(name) {
   }
   await quietly(async () => {
     clearItemsInternal()
+    const missing = doc.items.filter((it) => it && typeof it.id === 'string' && !library.some((l) => l.id === it.id))
     const results = await Promise.allSettled(doc.items.map((it) => addItemInternal(it.id, {
-      uid: it.uid, position: it.position, rotation_y_deg: it.rotation_y_deg, render: it.render,
+      uid: it.uid, position: it.position, rotation_y_deg: it.rotation_y_deg, render: it.render, mounted: it.mounted,
+      missing: missing.includes(it) ? (validDims(it.dims_cm) ? it.dims_cm : MISSING_DIMS) : undefined,
     })))
     const failed = results.filter((r) => r.status === 'rejected').length
     if (failed) toast(`Layout "${name}": ${failed} of ${doc.items.length} items could not be placed.`, 'error')
+    if (missing.length) {
+      const n = missing.length
+      toast(`${n === 1 ? 'One piece in' : `${n} pieces in`} "${name}" ${n === 1 ? "isn't" : "aren't"} in the library any more: shown as ${n === 1 ? 'a box' : 'boxes'}. Restore ${n === 1 ? 'it' : 'them'} from the Library, or remove ${n === 1 ? 'it' : 'them'}.`, 'info', 9000)
+    }
   })
   if (doc.camera) restoreCamera(doc.camera)
   setLayoutName(name)
@@ -1958,7 +2300,7 @@ export const fmtUsd = (v) => `$${Math.abs(v * 100 - Math.round(v * 100)) < 1e-6 
 // The canvas only, without the planning helpers (grid, walk target; the selection and markers are DOM). `maxPx` caps the long
 // side; `aspect` (w/h) crops the centre to that shape (thumbnails).
 function captureView({ maxPx = CAPTURE_MAX, aspect = null, quality = 0.92 } = {}) {
-  const hide = [grid, walkTarget.group]
+  const hide = [grid, walkTarget.group, shellGroup]
   const vis = hide.map((o) => o.visible)
   for (const o of hide) o.visible = false
   // Center the shot on the camera (the on-screen view is shifted right to clear the sidebar).
@@ -2091,6 +2433,7 @@ function getState() {
       ...(room.kind === 'splat' ? { splatCount: room.splatCount } : {}),
       transform: { position: t.position.slice(), quaternion: t.quaternion.slice(), scale: t.scale },
       viewpoints: viewpoints().length,
+      roomplan: !!shell.url,
     },
     items: [...items.values()].map((r) => {
       const b = worldBounds(r)
@@ -2098,12 +2441,15 @@ function getState() {
         uid: r.uid,
         id: r.id,
         render: r.render,
-        position: [r.group.position.x, 0, r.group.position.z],
+        position: [r.group.position.x, r.group.position.y, r.group.position.z],
         rotation_y_deg: r.rotationDeg,
+        mounted: r.mounted,
+        ...(r.missing ? { missing: true } : {}),
         worldBounds: { min: b.min.toArray(), max: b.max.toArray() },
       }
     }),
     camera: { view, position: camera.position.toArray() },
+    shell: shell.visible,
   }
 }
 
@@ -2209,6 +2555,9 @@ export const engine = {
   isRenderMock: () => renderMock,
   getState,
   getRenderSettings,
+  getShell,
+  getHang: () => (hang ? { uid: hang.uid } : null),
+  getElevation,
   // room
   listRoomsInternal,
   openRoom,
@@ -2243,6 +2592,16 @@ export const engine = {
   endItemDrag,
   removeItemWithUndo,
   restoreItem,
+  setElevation,
+  nudgeElevation,
+  dropToFloor,
+  hangItem,
+  startHang,
+  cancelHang,
+  wallAt,
+  setShell,
+  selectWall,
+  reloadLibrary: () => loadLibrary(),
   // views + input
   setViewInternal,
   gotoViewpoint,

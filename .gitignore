@@ -22,3 +22,5 @@ build/
 result
 result-*
 target/
+library/.lock
+library/.trash/

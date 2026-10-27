@@ -314,7 +314,7 @@ async function setup() {
   if (await P.locator('.ws-hint:not([hidden])').count()) await P.locator('.ws-hint-ok').click()
 
   console.log(`[${secs()} s] uploading the capture`)
-  const up = await fetch(`${BASE}/api/scan/captures`, { method: 'POST', headers: { 'content-type': 'application/zip' }, body: fs.readFileSync(ZIP) })
+  const up = await fetch(`${BASE}/api/scan/captures`, { method: 'POST', headers: { 'content-type': 'application/zip', 'X-Nook': '1' }, body: fs.readFileSync(ZIP) })
   job = await up.json()
   check('upload through the planner proxy starts a job (202)', up.status === 202 && job.name === JOB_NAME, `${up.status} ${fmt(job)}`)
   watcher = setInterval(async () => {

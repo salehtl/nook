@@ -174,6 +174,11 @@ def normalize(src: Path, rotation: np.ndarray, dims_m: np.ndarray, out: Path) ->
         children = {c for n in nodes for c in n.get("children", [])}
         scenes.append({"nodes": [i for i in range(len(nodes)) if i not in children]})
     scene = scenes[doc.setdefault("scene", 0)]
+    for node in nodes:
+        # trimesh 4.x (nixpkgs) calls its graph root "world" and drops the transforms above a node with that
+        # name when it reads the GLB back, so the wrappers below would be ignored. trimesh's own exports use it.
+        if node.get("name") == "world":
+            node["name"] = "world_root"
 
     nodes.append({"name": "nook_orientation", "rotation": quat_xyzw(rotation), "children": list(scene.get("nodes", []))})
     frame = {"name": "nook_item_frame", "children": [len(nodes) - 1]}

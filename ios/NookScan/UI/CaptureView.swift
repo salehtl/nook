@@ -12,6 +12,31 @@ struct CaptureView: View {
     @State private var confirmDiscard = false
 
     var body: some View {
+        Group {
+            if let pass = controller.roomPlan {
+                RoomPlanGate(pass: pass) { captureScreen }
+            } else {
+                captureScreen
+            }
+        }
+        .onAppear {
+            UIApplication.shared.isIdleTimerDisabled = true
+            controller.start()
+        }
+        .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
+            controller.roomPlan?.skip()
+            if controller.phase == .recording { controller.discard() }
+        }
+        .confirmationDialog("Discard this capture?", isPresented: $confirmDiscard, titleVisibility: .visible) {
+            Button("Discard", role: .destructive) {
+                controller.discard()
+                dismiss()
+            }
+        }
+    }
+
+    private var captureScreen: some View {
         ZStack {
             preview.ignoresSafeArea()
             VStack(spacing: 10) {
@@ -19,6 +44,9 @@ struct CaptureView: View {
                     HStack {
                         LockIndicator(state: controller.lockState)
                         Spacer()
+                    }
+                    if controller.lockState != .locking, !isSettling {
+                        PassStrip(pass: controller.guide.pass)
                     }
                 }
                 banners
@@ -29,20 +57,6 @@ struct CaptureView: View {
         }
         .background(Color.black)
         .preferredColorScheme(.dark)
-        .onAppear {
-            UIApplication.shared.isIdleTimerDisabled = true
-            controller.start()
-        }
-        .onDisappear {
-            UIApplication.shared.isIdleTimerDisabled = false
-            if controller.phase == .recording { controller.discard() }
-        }
-        .confirmationDialog("Discard this capture?", isPresented: $confirmDiscard, titleVisibility: .visible) {
-            Button("Discard", role: .destructive) {
-                controller.discard()
-                dismiss()
-            }
-        }
     }
 
     @ViewBuilder private var preview: some View {
@@ -150,6 +164,9 @@ struct CaptureView: View {
                     Text("\(summary.frameCount) frames · \(summary.depthCount) depth maps · \(summary.pointCount) seed points")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    if let pass = controller.roomPlan {
+                        RoomShellStatus(pass: pass)
+                    }
                     if summary.frameCount < CaptureController.minFrames {
                         Text("Too few frames for training (need \(CaptureController.minFrames)).")
                             .font(.footnote)
@@ -194,6 +211,11 @@ struct CaptureView: View {
         }
         .padding(16)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var isSettling: Bool {
+        if case .settling = controller.lockState { return true }
+        return false
     }
 
     private var promptText: String {

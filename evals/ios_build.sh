@@ -42,6 +42,7 @@ check "ReplayCaptureTests.testReplayWritesValidCapture ran" 'grep -q "testReplay
 # v0.2 (contract §4.8, §5): these must exist and pass.
 check "ExposureLockTests ran and passed" 'grep -E "ExposureLock" "$OUT/test.log" | grep -q passed && ! grep -E "ExposureLock" "$OUT/test.log" | grep -q failed'
 check "JobDecodingTests ran and passed" 'grep -E "JobDecoding" "$OUT/test.log" | grep -q passed && ! grep -E "JobDecoding" "$OUT/test.log" | grep -q failed'
+# v4 (§2.9): the mock and the real server refuse an upload without X-Nook: 1, so this also checks the app sends it.
 check "ServerClientTests.testUploadAndPollAgainstServer passed against $NOOK_SERVER_URL" 'grep -q "testUploadAndPollAgainstServer.*passed" "$OUT/test.log"'
 
 # The capture the replay test wrote, found in the simulator's data container.
@@ -49,6 +50,8 @@ CAP=$(find "$HOME/Library/Developer/CoreSimulator/Devices/$UDID/data" -path '*no
 if [ -n "$CAP" ]; then
   CAPDIR=$(dirname "$CAP"); rm -rf "$OUT/replay-capture"; cp -R "$CAPDIR" "$OUT/replay-capture"
   checkl "replay capture passes validate_capture.py (≥ 20 frames)" 'evals/py evals/validate_capture.py "$OUT/replay-capture" --min-frames 20 >"$OUT/validate.out" 2>&1' 'head -n 5 "$OUT/validate.out"'
+  # v4 (§4.12, I4): the replay test writes a v1.3 capture from fixtures/roomplan/ (validated above with the rest).
+  check "I4 replay capture carries RoomPlan (meta.roomplan and roomplan.json)" '[ -f "$OUT/replay-capture/roomplan.json" ] && python3 -c "import json,sys; sys.exit(0 if json.load(open(\"$OUT/replay-capture/meta.json\")).get(\"roomplan\", {}).get(\"sessions\") in (\"shared\", \"separate\") else 1)"'
 else
   bad "replay test wrote <tmp>/nook-eval-capture/transforms.json in the simulator"
 fi
@@ -62,7 +65,7 @@ if [ -n "$APP" ]; then
   P="$APP/Info.plist"
   pl() { plutil -extract "$1" raw -o - "$P" 2>/dev/null; }
   check "bundle id com.salehtl.nookscan" '[ "$(pl CFBundleIdentifier)" = "com.salehtl.nookscan" ]' "$(pl CFBundleIdentifier)"
-  check "version 0.3.0" '[ "$(pl CFBundleShortVersionString)" = "0.3.0" ]' "$(pl CFBundleShortVersionString) ($(pl CFBundleVersion))"
+  check "version 0.4.0" '[ "$(pl CFBundleShortVersionString)" = "0.4.0" ]' "$(pl CFBundleShortVersionString) ($(pl CFBundleVersion))"
   check "NSCameraUsageDescription is set" '[ -n "$(pl NSCameraUsageDescription)" ]'
   check "ITSAppUsesNonExemptEncryption is false" '[ "$(pl ITSAppUsesNonExemptEncryption)" = "false" ]'
   check "UIRequiredDeviceCapabilities includes arkit" 'plutil -extract UIRequiredDeviceCapabilities json -o - "$P" 2>/dev/null | grep -q arkit'

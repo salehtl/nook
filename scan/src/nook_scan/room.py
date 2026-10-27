@@ -105,10 +105,54 @@ def pick_viewpoints(poses: np.ndarray, floor_y: float, n: int = MAX_VIEWPOINTS) 
     return sorted(picked)
 
 
-def viewpoints(cap, floor_y: float) -> list[dict]:
+def _qmul(a, b) -> np.ndarray:
+    """Hamilton product of [x, y, z, w] quaternions."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array([aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+                     aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz])
+
+
+def _qrot(q, v) -> np.ndarray:
+    u, w = np.asarray(q[:3], float), float(q[3])
+    v = np.asarray(v, float)
+    return v + 2 * np.cross(u, np.cross(u, v) + w * v)
+
+
+def in_room(vp: dict, transform: dict) -> dict:
+    """A viewpoint in capture world coordinates moved into room coordinates by a room transform (position, quaternion,
+    scale), as the planner places the splat."""
+    q = np.asarray(transform["quaternion"], float)
+    q /= np.linalg.norm(q)
+    p = float(transform["scale"]) * _qrot(q, vp["position"]) + np.asarray(transform["position"], float)
+    r = _qmul(q, vp["quaternion"])
+    r = r / np.linalg.norm(r) * (1 if r[3] >= 0 else -1)
+    return {"position": [round(float(x), 4) + 0.0 for x in p], "quaternion": [round(float(x), 6) + 0.0 for x in r],
+            "fov_y_deg": vp["fov_y_deg"]}
+
+
+def viewpoints(cap, floor_y: float, transform: dict | None = None) -> list[dict]:
+    """Up to MAX_VIEWPOINTS planner viewpoints. Without `transform`, the room is the capture lifted by -floor_y (a new
+    scan); with one (a retrain keeping its parent's alignment), each pose is moved by it."""
     poses = cap.poses()
-    return [viewpoint(poses[i], cap.intrinsics(cap.frames[i]), cap.size(cap.frames[i]), floor_y)
-            for i in pick_viewpoints(poses, floor_y)]
+    picks = pick_viewpoints(poses, floor_y)
+    if transform is None:
+        return [viewpoint(poses[i], cap.intrinsics(cap.frames[i]), cap.size(cap.frames[i]), floor_y) for i in picks]
+    return [in_room(viewpoint(poses[i], cap.intrinsics(cap.frames[i]), cap.size(cap.frames[i]), 0.0), transform) for i in picks]
+
+
+def read_config(room_dir: Path, name: str) -> dict:
+    """A room's config, first match wins (contract §2.7): <name>.room.json; room.json when its splat is this room's;
+    else {}."""
+    own = room_dir / f"{name}.room.json"
+    for path in (own, room_dir / "room.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and (path == own or Path(str(data.get("splat") or "")).stem == name):
+            return data
+    return {}
 
 
 def updated(existing: dict, ply: Path, room_dir: Path, floor_y: float, views: list[dict] | None = None) -> dict:
@@ -119,6 +163,20 @@ def updated(existing: dict, ply: Path, room_dir: Path, floor_y: float, views: li
     room["splat"] = splat_url(ply, room_dir)
     room["transform"] = {"position": [0, round(-floor_y, 4) + 0.0, 0], "quaternion": [0, 0, 0, 1], "scale": 1}
     room["viewpoints"] = views or None   # replaces the previous scan's viewpoints; null when none qualified
+    return room
+
+
+def retrained(parent_cfg: dict, parent: str | None, ply: Path, room_dir: Path, floor_y: float, title: str | None) -> dict:
+    """The config of a retrained room (contract §5.1): its parent's transform and look, and `saved` (it's the same
+    capture, so the same world frame, already aligned), with `parent` and `title` set. Viewpoints are the caller's."""
+    room = {"version": 1, "splat": splat_url(ply, room_dir)}
+    room["transform"] = parent_cfg.get("transform") or {"position": [0, round(-floor_y, 4) + 0.0, 0], "quaternion": [0, 0, 0, 1], "scale": 1}
+    for key in ("look", "saved"):
+        if parent_cfg.get(key) is not None:
+            room[key] = parent_cfg[key]
+    room["parent"] = parent
+    if title:
+        room["title"] = title
     return room
 
 

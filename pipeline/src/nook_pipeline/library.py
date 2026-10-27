@@ -1,5 +1,7 @@
 """library.json upserts and costs.csv rows (contract §3.5). All writes are atomic (temp file, then rename)."""
+import contextlib
 import csv
+import fcntl
 import io
 import json
 import os
@@ -14,6 +16,22 @@ def atomic_write(path: Path, text: str) -> None:
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+@contextlib.contextmanager
+def locked(lib_dir: Path):
+    """Hold <library>/.lock (flock) for the block, so planner/serve.py and other nook-add runs never interleave."""
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    with open(lib_dir / ".lock", "a+") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("nook-add: waiting for another library write to finish (<library>/.lock)", flush=True)
+            fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def load(lib_dir: Path) -> dict:
@@ -44,7 +62,29 @@ def upsert(lib_dir: Path, data: dict, entry: dict) -> bool:
     return bool(idx)
 
 
+def fmt_cost(cost: float) -> str:
+    return f"{cost:.2f}" if round(cost, 2) == round(cost, 6) else f"{cost:.4f}"
+
+
+@contextlib.contextmanager
+def costs_locked(lib_dir: Path):
+    """Hold <library>/costs.csv.lock (flock) for the block: planner/serve.py appends its render rows under the same
+    small lock (contract §2.9), never the library lock, so a render never waits for a whole nook-add run."""
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    with open(lib_dir / "costs.csv.lock", "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def append_cost(lib_dir: Path, date: str, item_id: str, engine: str, cost: float, mock: bool, source: str) -> None:
+    with costs_locked(lib_dir):
+        _append_cost(lib_dir, date, item_id, engine, cost, mock, source)
+
+
+def _append_cost(lib_dir: Path, date: str, item_id: str, engine: str, cost: float, mock: bool, source: str) -> None:
     path = lib_dir / "costs.csv"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     if not text.strip():
@@ -53,5 +93,5 @@ def append_cost(lib_dir: Path, date: str, item_id: str, engine: str, cost: float
         text += "\n"
     row = io.StringIO()
     csv.writer(row, lineterminator="\n").writerow(
-        [date, item_id, engine, f"{cost:.2f}", "true" if mock else "false", source])
+        [date, item_id, engine, fmt_cost(cost), "true" if mock else "false", source])
     atomic_write(path, text + row.getvalue())

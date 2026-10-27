@@ -1,4 +1,9 @@
-"""What GPU the trainer runs on (kakapo's NVIDIA card) and how many splats it can hold."""
+"""What GPU the trainer runs on (kakapo's NVIDIA card), how many splats it trains, and how fast (contract §4.9.1).
+
+The caps are constants per GPU class, never computed from free VRAM, so `nook-scan train --dry-run` gives the same
+answer on the Mac as on kakapo. A machine whose GPU is unknown (the Mac, a service without nvidia-smi) counts as the
+small class, kakapo's.
+"""
 
 import functools
 import glob
@@ -11,9 +16,17 @@ import sys
 # Where nvidia-smi lives when it isn't on a service's PATH (NixOS puts the driver's tools in the system profile).
 NVIDIA_SMI = ("nvidia-smi", "/run/current-system/sw/bin/nvidia-smi", "/usr/bin/nvidia-smi")
 
-MAX_SPLATS_LARGE = 1_500_000   # Spark still loads the room PLY in the browser next to the furniture
-MAX_SPLATS_SMALL = 1_200_000   # gsplat on kakapo's RTX 2060 (6 GB) peaks at ~2.5 GB with this cap at full resolution
-SMALL_VRAM_GB = 10
+SMALL_VRAM_GB = 10             # the small class: 6-10 GB (kakapo's RTX 2060); above this, the large class
+# Training caps (`train_max_splats`). gsplat on the RTX 2060 peaked at 2.45 GB with 1.2M splats at 1920 px (0a run A),
+# so 2M leaves room for higher step counts and stills; 0a's B runs set the final numbers.
+TRAIN_MAX_SPLATS = {"small": 2_000_000, "large": 3_000_000}
+# What the room is pruned to after cropping (`deliver_max_splats`): Spark loads it in the browser and on phones,
+# next to the furniture.
+DELIVER_MAX_SPLATS = 1_500_000
+# Speed for `eta_s`: seconds per 1,000 steps per million splats, whole run (preparing, training, cropping, writing).
+# Placeholder from 0a run A on the RTX 2060: 20k steps at 1.2M splats, 1,089 frames at 1920 px, 1,163 s in total.
+# The large class isn't measured; it uses the same number until it is.
+SECONDS_PER_KSTEP_MSPLAT = {"small": 1163 / (20 * 1.2), "large": 1163 / (20 * 1.2)}
 
 
 def _run(cmd: list[str]) -> str:
@@ -48,8 +61,16 @@ def info() -> dict:
     return {"name": None, "vram_gb": None}
 
 
-def default_max_splats() -> int:
-    """The large cap only on a GPU known to have SMALL_VRAM_GB or more; an unknown or small one (6 GB on kakapo) gets
-    the small cap."""
+def gpu_class() -> str:
+    """"large" only on a GPU known to have more than SMALL_VRAM_GB; an unknown or small one (6 GB on kakapo) is "small"."""
     vram = info()["vram_gb"]
-    return MAX_SPLATS_LARGE if vram and vram >= SMALL_VRAM_GB else MAX_SPLATS_SMALL
+    return "large" if vram and vram > SMALL_VRAM_GB else "small"
+
+
+def train_max_splats() -> int:
+    return TRAIN_MAX_SPLATS[gpu_class()]
+
+
+def eta_s(steps: int, max_splats: int) -> int:
+    """Estimated seconds for a whole training run at this cap (the splat count grows to the cap early on)."""
+    return round(SECONDS_PER_KSTEP_MSPLAT[gpu_class()] * steps / 1000 * max_splats / 1e6)

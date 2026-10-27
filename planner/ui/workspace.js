@@ -10,13 +10,18 @@
 //                point floats 40 px above the finger inside a loupe); the pick-floor marker
 //   cards        loading a room (B7: progress, Cancel → Rooms), can't load (Try again, Back to rooms), the one-time
 //                gesture hint (phone, D5.2)
-// ctx.workspace (for the other areas): { requestRender(), openScan(scan), startPickFloor(), startCheckSize(), startMeasure() }
+//   v4 (§2.10, §2.7): the selected piece's height (desktop: − value + in the selection bar, PageUp/PageDown; phone: the
+//                lift column at the right edge: + / − held repeats, a vertical drag handle, the height in cm editable),
+//                Hang on wall (then tap a wall: a mode like Measure) and Drop to floor, a guide line from a raised piece
+//                to the floor, "missing item" for a piece the library doesn't have; the see-through shell toggle
+//                (top bar / rail, rooms with a measured shell) and a tapped wall's length.
+// ctx.workspace (for the other areas): { requestRender(), openScan(scan), startPickFloor(), startCheckSize(), startMeasure(), toggleShell() }
 // Events it sends on shell.events (cancelable; call preventDefault() to take over, else the fallback runs):
 //   'render-request' {}          Render pressed      → fallback: a confirm dialog, then engine.renderViewInternal()
 //   'open-render'    { meta }    "Render ready · View" → fallback: open the Renders panel
 //   'open-scan'      { scan }    a scan chip tapped  → fallback: open Rooms
 import { ring, unsavedGlyph, icon } from './icons.js'
-import { dimsText, quiet, fmtUsd, renderPrice, RENDER_MODELS } from '../engine.js'
+import { dimsText, quiet, fmtUsd, renderPrice, RENDER_MODELS, MAX_ELEVATION } from '../engine.js'
 import { roomTitle, friendlyDate, scanDate, fmtBytes, fmtEta } from '../data.js'
 
 const NS = 'http://www.w3.org/2000/svg'
@@ -73,7 +78,10 @@ export function mount(ctx) {
   const frameBtn = toolBtn('frame', 'Frame', 'F', () => frame())
   const renderBtn = toolBtn('render', 'Render', null, () => requestRender(), '.is-strong')
   renderBtn.dataset.tip = 'Render this view (paid)'
-  const right = h('div.ws-top-right', views, h('span.ws-divider'), measureBtn, frameBtn, renderBtn)
+  const shellBtn = toolBtn('shell', 'Shell', null, () => toggleShell())
+  Object.assign(shellBtn.dataset, { nook: 'shell', tip: 'See-through measured walls · tap a wall for its length' })
+  shellBtn.hidden = true
+  const right = h('div.ws-top-right', views, h('span.ws-divider'), shellBtn, measureBtn, frameBtn, renderBtn)
   shell.mounts.topbar.append(left, right, banner)
 
   // --- phone rail ------------------------------------------------------------------------------------------------
@@ -81,7 +89,8 @@ export function mount(ctx) {
   const railMeasure = h('button.ws-rail-btn', { type: 'button', 'aria-label': 'Measure', onclick: () => toggleMeasure() }, icon('measure'))
   const railFrame = h('button.ws-rail-btn', { type: 'button', 'aria-label': 'Frame the room', onclick: () => frame() }, icon('frame'))
   const railRender = h('button.ws-rail-btn', { type: 'button', 'aria-label': 'Render this view', onclick: () => requestRender() }, icon('render'))
-  const rail = h('div.ws-rail', railView, h('span.ws-rail-div'), railMeasure, railFrame, railRender)
+  const railShell = h('button.ws-rail-btn', { type: 'button', 'aria-label': 'Measured walls', hidden: true, dataset: { nook: 'shell' }, onclick: () => toggleShell() }, icon('shell'))
+  const rail = h('div.ws-rail', railView, h('span.ws-rail-div'), railShell, railMeasure, railFrame, railRender)
   shell.mounts.rail.append(rail)
 
   function viewMenu(anchor) {
@@ -100,6 +109,11 @@ export function mount(ctx) {
     if (!active) engine.clearMeasure()
     engine.setMeasureActive(active)
   }
+  function toggleShell() {
+    const on = !engine.getShell().visible
+    engine.setShell(on)
+    if (on && engine.getShell().visible) shell.toast(phone() ? 'Tap a wall to see its length.' : 'Click a wall to see its length.', { id: 'shell-hint', ms: 3000 })
+  }
 
   // --- bottom: bars (in #modebar) and cards ------------------------------------------------------------------
   const selBar = h('div.ws-selbar', { hidden: true })
@@ -108,7 +122,8 @@ export function mount(ctx) {
   const walkBar = h('div.ws-walkbar', { hidden: true })
   const loadCard = h('div.ws-loadcard', { hidden: true, role: 'status' })
   const hint = h('div.ws-hint', { hidden: true })
-  shell.mounts.modebar.append(selBar, walkBar, modeBar, sizeCard, loadCard, hint)
+  const lift = h('div.ws-lift', { hidden: true, role: 'group', 'aria-label': 'Height above the floor' })
+  shell.mounts.modebar.append(selBar, walkBar, modeBar, sizeCard, loadCard, hint, lift)
 
   // --- overlay: footprint, label, grip, points, loupe ---------------------------------------------------------
   const svg = document.createElementNS(NS, 'svg')
@@ -122,7 +137,12 @@ export function mount(ctx) {
   floorMark.innerHTML = '<ellipse rx="96" ry="24" class="a"/><ellipse rx="48" ry="12" class="b"/><path d="M-26 0h52M0 -7v14" class="c"/><circle r="22" class="d"/><circle r="8" class="e"/>'
   // Check room (B4): chalk dimension lines on the room's box, width along the far floor edge, height up its corner
   const dimLines = [0, 1].map(() => { const g = mk('g', { class: 'ws-dim' }); g.append(mk('line', { class: 'l' }), mk('line', { class: 't' }), mk('line', { class: 't' })); return g })
-  svg.append(fpPoly, fpStem, mLineShadow, mLine, floorMark, ...dimLines)
+  // §2.10: a raised piece's guide line to the floor; §2.7: the tapped shell wall's length along its foot
+  const guide = mk('line', { class: 'ws-guide' })
+  const guideDot = mk('ellipse', { class: 'ws-guide-dot', rx: 7, ry: 3 })
+  const wallDim = mk('g', { class: 'ws-dim is-wall' })
+  wallDim.append(mk('line', { class: 'l' }), mk('line', { class: 't' }), mk('line', { class: 't' }))
+  svg.append(guide, guideDot, fpPoly, fpStem, mLineShadow, mLine, floorMark, ...dimLines, wallDim)
   const label = h('div.ws-label', { 'aria-hidden': 'true' })
   const grip = h('button.ws-grip', { type: 'button', 'aria-label': 'Rotate (drag)', dataset: { tip: 'Drag to rotate', kbd: 'R' } }, h('span', glyph(G.grip, 16, 16, 1.7)))
   const pill = h('div.ws-dist')
@@ -133,7 +153,8 @@ export function mount(ctx) {
   const loupe = h('div.ws-loupe', loupeCanvas, glyph('<path d="M32 18v10M32 36v10M18 32h10M36 32h10" stroke="#ECE8E0"/><circle cx="32" cy="32" r="3.5" fill="#D9A441" stroke="none"/>', 64, 64))
   const lookHint = h('div.ws-lookhint', 'Drag to look · click the floor to walk there')
   const dimTags = [0, 1].map(() => h('div.ws-dimtag', { hidden: true }))
-  shell.mounts.overlays.append(svg, label, grip, pill, floorTag, ...handles, ...handleTags, loupe, lookHint, ...dimTags)
+  const wallTag = h('div.ws-dimtag.is-wall', { hidden: true })
+  shell.mounts.overlays.append(svg, label, grip, pill, floorTag, ...handles, ...handleTags, loupe, lookHint, ...dimTags, wallTag)
 
   // --- helpers ---------------------------------------------------------------------------------------------------
   const set = (el, show) => { el.hidden = !show; return show }
@@ -247,31 +268,141 @@ export function mount(ctx) {
     if (!it) return
     const splatRoom = engine.getRoom().kind === 'splat'
     const items = []
+    if (it.missing) items.push({ label: 'Why a box?', icon: 'warning', onSelect: explainMissing })
     if (it.hasGlb && it.hasSplat) items.push({ label: it.render === 'splat' ? 'Show as GLB' : 'Show as splat', icon: 'flip', onSelect: () => quiet(engine.toggleRender(it.uid, it.render === 'splat' ? 'glb' : 'splat')) })
+    if (phone()) {
+      items.push({ label: engine.getHang() ? 'Stop hanging' : 'Hang on wall', icon: 'hang', nook: 'hang', onSelect: toggleHang })
+      items.push({ label: 'Drop to floor', icon: 'drop', nook: 'drop', disabled: !raisedOrHung(), onSelect: drop })
+    }
     items.push({ label: 'Relight here', icon: 'render', disabled: !splatRoom, onSelect: () => quiet(engine.relightInternal([it.position[0], 1.0, it.position[2]])) })
     items.push({ label: 'Sit here', icon: 'seated', kbd: '2', onSelect: () => engine.setViewInternal('seated') })
     shell.menu(anchor, items, { align: phone() ? 'start' : 'end', above: true })
   }
+  function explainMissing() {
+    const it = engine.getItem(engine.getSelected())
+    shell.toast(`${it?.name || 'This piece'} isn't in the library any more, so it shows as a box at its size. Restore it from Library › Recently removed, or Remove it here.`, { id: 'missing-why', ms: 9000 })
+  }
+
+  // --- height above the floor, hanging (§2.10) ---------------------------------------------------------------------
+  const selUid = () => engine.getSelected()
+  const elevCm = () => { const y = selUid() ? engine.getElevation(selUid()) : 0; return Math.round((y || 0) * 100) }
+  const setElevCm = (v) => { const u = selUid(); if (u) engine.setElevation(u, Math.min(MAX_ELEVATION * 100, Math.max(0, Math.round(v))) / 100) }
+  const nudge = (cm) => { const u = selUid(); if (u) engine.nudgeElevation(u, cm / 100) }
+  const raisedOrHung = () => { const it = engine.getItem(selUid()); return !!it && (it.position[1] > 0.0005 || it.mounted === 'wall') }
+  function toggleHang() { if (engine.getHang()) engine.cancelHang(); else engine.startHang(selUid()) }
+  function drop() {
+    const u = selUid()
+    if (!u) return
+    engine.cancelHang()
+    engine.dropToFloor(u)
+  }
+  // + / − : one cm a tap (on pointer down, so a quick tap counts once), held repeats faster
+  function holdBtn(cls, dir, label, nookName, size) {
+    let t = null, n = 0
+    const stop = () => { clearTimeout(t); t = null }
+    return h(`button.${cls}`, {
+      type: 'button', 'aria-label': label, dataset: { nook: nookName, tip: label, kbd: dir > 0 ? 'PgUp' : 'PgDn' },
+      onpointerdown: (e) => {
+        if (e.button) return
+        n = 0
+        nudge(dir)
+        const go = () => { n++; nudge(dir * (n > 14 ? 5 : 1)); t = setTimeout(go, n > 8 ? 50 : 100) }
+        t = setTimeout(go, 450)
+      },
+      onpointerup: stop, onpointerleave: stop, onpointercancel: stop, oncontextmenu: (e) => e.preventDefault(),
+      onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); nudge(dir) } },
+    }, icon(dir > 0 ? 'plus' : 'minus', { size }))
+  }
+  const elevInputs = new Set()
+  function elevInput(cls) {
+    const input = h(`input.${cls}.tnum`, { type: 'text', inputmode: 'numeric', enterkeyhint: 'done', autocomplete: 'off', spellcheck: false, 'aria-label': 'Height above the floor, cm', dataset: { nook: 'elev-value' } })
+    const commit = () => {
+      const v = parseFloat(String(input.value).replace(',', '.').replace('−', '-'))
+      if (Number.isFinite(v)) setElevCm(v)
+      input.value = String(elevCm())
+    }
+    input.addEventListener('change', commit)
+    input.addEventListener('focus', () => input.select())
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); input.blur() }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); input.value = String(elevCm()); input.blur() }
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); nudge((e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 10 : 1)) }
+    })
+    elevInputs.add(input)
+    return input
+  }
+  const dropBtns = new Set(), hangBtns = new Set()
+  function syncElev() {
+    const cm = String(elevCm())
+    for (const i of elevInputs) if (i.isConnected && document.activeElement !== i && i.value !== cm) i.value = cm
+    const can = raisedOrHung()
+    for (const b of dropBtns) b.disabled = !can
+    for (const b of hangBtns) b.setAttribute('aria-pressed', String(!!engine.getHang()))
+  }
+  function buildLift() {
+    elevInputs.clear(); dropBtns.clear(); hangBtns.clear()
+    if (!phone()) { lift.replaceChildren(); return }
+    // the vertical drag handle: up raises, 2 px a centimetre
+    const handle = h('div.ws-lift-grip', { role: 'slider', 'aria-label': 'Drag up or down to raise or lower', 'aria-valuemin': '0', 'aria-valuemax': String(MAX_ELEVATION * 100) }, h('i'), h('i'), h('i'))
+    let d = null
+    handle.addEventListener('pointerdown', (e) => { d = { id: e.pointerId, y0: e.clientY, cm0: elevCm() }; handle.setPointerCapture?.(e.pointerId); handle.classList.add('is-active'); e.preventDefault() })
+    handle.addEventListener('pointermove', (e) => { if (d && e.pointerId === d.id) setElevCm(d.cm0 + (d.y0 - e.clientY) / 2) })
+    const end = () => { d = null; handle.classList.remove('is-active') }
+    handle.addEventListener('pointerup', end)
+    handle.addEventListener('pointercancel', end)
+    const hangB = h('button.ws-lift-btn.is-tool', { type: 'button', 'aria-label': 'Hang on wall', dataset: { nook: 'hang' }, onclick: toggleHang }, icon('hang'))
+    const dropB = h('button.ws-lift-btn.is-tool', { type: 'button', 'aria-label': 'Drop to floor', dataset: { nook: 'drop' }, onclick: drop }, icon('drop'))
+    hangBtns.add(hangB); dropBtns.add(dropB)
+    fill(lift,
+      holdBtn('ws-lift-btn', 1, 'Up 1 cm', 'elev-up', 20),
+      h('label.ws-lift-value', elevInput('ws-lift-input'), h('span', 'cm')),
+      handle,
+      holdBtn('ws-lift-btn', -1, 'Down 1 cm', 'elev-down', 20),
+      h('span.ws-lift-div'),
+      hangB, dropB)
+    syncElev()
+  }
   function buildSelBar() {
+    elevInputs.clear(); dropBtns.clear(); hangBtns.clear()
+    const sel = engine.getItem(selUid())
+    const missing = !!sel?.missing
     if (phone()) {
-      const it = (g, text, onclick, cls = '') => h(`button.ws-sb-item${cls}`, { type: 'button', onclick }, g, h('span', text))
+      const it = (g, text, onclick, cls = '', ds = null) => h(`button.ws-sb-item${cls}`, { type: 'button', onclick, dataset: ds }, g, h('span', text))
       fill(selBar,
+        missing ? it(icon('warning'), 'Missing', explainMissing, '.is-narrow.is-missing', { nook: 'missing-item' }) : null,
         it(glyph(G.rotL), '−15°', () => engine.rotateSelected(-15)),
         it(glyph(G.rotR), '+15°', () => engine.rotateSelected(15)),
-        it(icon('more'), 'More', (e) => itemMenu(e.currentTarget), '.is-narrow'),
+        missing ? null : it(icon('more'), 'More', (e) => itemMenu(e.currentTarget), '.is-narrow'),
         it(glyph(G.trash), 'Remove', removeSelected, '.is-narrow.is-danger'),
         h('span.ws-spacer'),
         h('button.ws-done', { type: 'button', onclick: () => engine.select(null) }, 'Done'))
+      buildLift()
     } else {
       const it = (g, text, key, tip, onclick, cls = '') => h(`button.ws-sb-item${cls}`, { type: 'button', onclick, dataset: { tip, kbd: key } }, g, text ? h('span', text) : null, key ? kbd(key) : null)
+      const hangB = it(icon('hang', { size: 16, stroke: 1.75 }), 'Hang on wall', 'H', 'Hang on wall, then click a wall', toggleHang)
+      hangB.dataset.nook = 'hang'
+      const dropB = it(icon('drop', { size: 16, stroke: 1.75 }), 'Drop to floor', null, 'Back down to the floor', drop)
+      dropB.dataset.nook = 'drop'
+      hangBtns.add(hangB); dropBtns.add(dropB)
       fill(selBar,
+        missing ? h('button.ws-missing', { type: 'button', dataset: { nook: 'missing-item', tip: 'Removed from the library: shown as a box at its size' }, onclick: explainMissing }, icon('warning', { size: 16, stroke: 1.75 }), h('span', 'Missing item')) : null,
+        missing ? h('span.ws-divider') : null,
         it(glyph(G.rotL, 16, 20, 1.6), '−15°', '⇧R', 'Rotate back 15°', () => engine.rotateSelected(-15)),
         it(glyph(G.rotR, 16, 20, 1.6), '+15°', 'R', 'Rotate 15°', () => engine.rotateSelected(15)),
         h('span.ws-divider'),
-        h('button.ws-sb-item.is-icon', { type: 'button', 'aria-label': 'More', dataset: { tip: 'More' }, onclick: (e) => itemMenu(e.currentTarget) }, icon('more', { size: 16 })),
+        h('div.ws-elev', { role: 'group', 'aria-label': 'Height above the floor', dataset: { tip: 'Height above the floor · Shift+drag, PageUp / PageDown' } },
+          h('span.ws-elev-cap', 'Height'),
+          holdBtn('ws-elev-btn', -1, 'Down 1 cm', 'elev-down', 16),
+          h('label.ws-elev-field', elevInput('ws-elev-input'), h('span', 'cm')),
+          holdBtn('ws-elev-btn', 1, 'Up 1 cm', 'elev-up', 16)),
+        hangB, dropB,
+        h('span.ws-divider'),
+        missing ? null : h('button.ws-sb-item.is-icon', { type: 'button', 'aria-label': 'More', dataset: { tip: 'More' }, onclick: (e) => itemMenu(e.currentTarget) }, icon('more', { size: 16 })),
         it(glyph(G.trash, 16, 20, 1.6), 'Remove', 'Del', 'Remove from the room', removeSelected, '.is-danger'),
         h('button.ws-done', { type: 'button', onclick: () => engine.select(null), dataset: { tip: 'Deselect' } }, h('span', 'Done'), h('kbd.kbd.is-ink', 'Esc')))
+      lift.replaceChildren()
     }
+    syncElev()
   }
 
   // --- walk bar -------------------------------------------------------------------------------------------------
@@ -327,11 +458,17 @@ export function mount(ctx) {
       const text = m.points === 0 ? (desk ? 'Click a point to start' : 'Tap a point to start') : m.points === 1 ? (desk ? 'Click where it ends' : 'Tap where it ends') : desk ? 'Drag a point to adjust, click to start again' : 'Drag a point; it floats above your finger'
       return { ic: icon('measure', { size: desk ? 16 : 20, stroke: desk ? 1.6 : 1.5 }), cap: 'Measure', text }
     }
+    if (kind === 'hang') {
+      const name = engine.getItem(engine.getHang()?.uid)?.name || 'it'
+      const walls = engine.getShell().walls.length
+      return { ic: icon('hang', { size: desk ? 16 : 20 }), cap: 'Hang on wall', text: `${desk ? 'Click' : 'Tap'} a wall to hang ${name} there${walls ? '' : ', facing you'}` }
+    }
     if (kind === 'floor') return { ic: glyph(G.floor, desk ? 16 : 20), cap: 'Pick floor', text: pick.floor ? (desk ? 'Click again to move the point' : 'Tap again to move the point') : desk ? 'Click open floor, away from furniture' : 'Tap open floor, away from furniture' }
     const text = pick.points === 0 ? `${desk ? 'Click' : 'Tap'} one end of something you know` : pick.points === 1 ? `Now the other end` : 'Type the real distance from A to B'
     return { ic: glyph(G.size, desk ? 16 : 20), cap: 'Check size', text }
   }
   function modeKind() {
+    if (engine.getHang()) return 'hang'
     const pick = engine.getPick()
     if (pick.mode === 'floor') return 'floor'
     if (pick.mode === 'two') return 'two'
@@ -339,6 +476,7 @@ export function mount(ctx) {
     return null
   }
   function endMode() {
+    engine.cancelHang()
     engine.cancelPickMode()
     engine.clearMeasure()
     engine.setMeasureActive(false)
@@ -350,6 +488,7 @@ export function mount(ctx) {
     if (!phone()) {
       const pick = engine.getPick()
       if (kind === 'measure') kids.push(h('button.ws-bn-btn', { type: 'button', onclick: () => engine.clearMeasure() }, 'Clear'), h('button.ws-bn-btn.is-primary', { type: 'button', onclick: endMode }, h('span', 'Done'), h('kbd.kbd.is-ink', 'Esc')))
+      else if (kind === 'hang') kids.push(h('button.ws-bn-btn', { type: 'button', onclick: endMode }, h('span', 'Cancel'), kbd('Esc')))
       else if (kind === 'floor') {
         kids.push(h('span.ws-bn-meta', pick.floor ? floorText(pick.floor).join(' · ') : ''),
           h('button.ws-bn-btn', { type: 'button', onclick: endMode }, 'Cancel'),
@@ -368,7 +507,10 @@ export function mount(ctx) {
     const pick = engine.getPick()
     const txt = (a, b) => h('div.ws-mb-text', h('b', a), h('span', b))
     const btn = (t, onclick, primary, disabled) => h(`button.ws-mb-btn${primary ? '.is-primary' : ''}`, { type: 'button', onclick, disabled }, t)
-    if (kind === 'measure') {
+    if (kind === 'hang') {
+      const name = engine.getItem(engine.getHang()?.uid)?.name || 'the piece'
+      fill(modeBar, txt(`Hang ${name}`, 'Tap a wall: its back goes flat on it'), btn('Cancel', endMode, true))
+    } else if (kind === 'measure') {
       const m = engine.getMeasure()
       fill(modeBar, m ? txt(`${m.meters.toFixed(2)} m · ${cm(m.meters)} cm`, 'Tap the floor to start again') : txt('No measurement yet', engine.getMeasureState().points ? 'Tap the second point' : 'Tap two points'),
         btn('Clear', () => engine.clearMeasure(), false, !engine.getMeasureState().points), btn('Done', endMode, true))
@@ -504,13 +646,22 @@ export function mount(ctx) {
     railMeasure.setAttribute('aria-pressed', String(kind === 'measure'))
     fill(railView, icon(view))
     railView.setAttribute('aria-label', `View: ${VIEW_LABEL[view]}`)
-    for (const b of [...views.querySelectorAll('button'), measureBtn, frameBtn, renderBtn, railView, railMeasure, railFrame, railRender]) b.disabled = loadingOrFailed
+    for (const b of [...views.querySelectorAll('button'), measureBtn, frameBtn, renderBtn, railView, railMeasure, railFrame, railRender, shellBtn, railShell]) b.disabled = loadingOrFailed
+    const sh = engine.getShell()
+    shellBtn.hidden = railShell.hidden = !sh.available
+    shellBtn.setAttribute('aria-pressed', String(sh.visible))
+    railShell.setAttribute('aria-pressed', String(sh.visible))
+    railShell.setAttribute('aria-label', sh.visible ? 'Hide the measured walls' : 'Show the measured walls')
     renderBanner(kind)
     chips.hidden = phone() && !!kind
     renderModeBar(kind)
     renderSizeCard()
     const showSel = !!sel && !kind && !loadingOrFailed
-    if (set(selBar, showSel) && !selBar.childElementCount) buildSelBar()
+    const it = sel ? engine.getItem(sel) : null
+    const selSig = `${sel}|${it?.missing ? 1 : 0}|${shell.mode}`
+    if (set(selBar, showSel) && (!selBar.childElementCount || selBar.dataset.sig !== selSig)) { selBar.dataset.sig = selSig; buildSelBar() }
+    set(lift, showSel && phone())
+    if (showSel) syncElev()
     const walking = view !== 'orbit' && !loadingOrFailed && !(phone() && kind)
     const vp = engine.getViewpoints()
     const sig = `${view}|${vp.index}|${vp.count}|${shell.mode}`
@@ -519,7 +670,7 @@ export function mount(ctx) {
     root.dataset.wsWalk = walking ? '1' : ''
     renderHint()
   }
-  const rebuild = () => { selBar.replaceChildren(); hint.replaceChildren(); walkBar.dataset.sig = ''; sync() }
+  const rebuild = () => { selBar.replaceChildren(); lift.replaceChildren(); hint.replaceChildren(); walkBar.dataset.sig = ''; sync() }
 
   // Phone: a mode (measure, pick) closes the sheet so the bars and the room are visible; it comes back after.
   function modeStarted() {
@@ -532,7 +683,17 @@ export function mount(ctx) {
   }
 
   for (const ev of ['room', 'dirty', 'view', 'viewpoint', 'selection', 'grid', 'look']) on(engine.events, ev, sync)
-  on(engine.events, 'items', (e) => { if (e.detail.change !== 'move') sync() })
+  on(engine.events, 'items', (e) => { if (e.detail.change !== 'move') sync(); else if (e.detail.uid === engine.getSelected()) syncElev() })
+  on(engine.events, 'shell', () => sync())
+  on(engine.events, 'hang', (e) => {
+    if (e.detail.active) modeStarted()
+    sync()
+    if (!e.detail.active) modeEnded()
+    if (e.detail.hung) {
+      const name = engine.getItem(e.detail.uid)?.name || 'It'
+      shell.toast(`${name} is on the wall${e.detail.source === 'scan' ? ', facing you' : ''}. Drag it to slide it along; Drop to floor takes it down.`, { kind: 'ok', id: 'hung', ms: 5000 })
+    }
+  })
   on(engine.events, 'measure', (e) => { if (e.detail.active && !banner.dataset.on) modeStarted(); banner.dataset.on = e.detail.active ? '1' : ''; sync(); if (!e.detail.active) modeEnded() })
   on(engine.events, 'pick', (e) => {
     const ph = e.detail.phase
@@ -625,11 +786,22 @@ export function mount(ctx) {
       const gx = fr.x + dx * 24 - 22, gy = fr.y + dy * 24 - 22
       px(grip, gx, gy)
       const it = engine.getItem(sel)
-      const text = `${it.name}|${dimsText(it.lib?.dims_cm)}`
+      const up = Math.round(it.position[1] * 100)
+      const where = it.mounted === 'wall' ? `on the wall · ${up} cm up` : up > 0 ? `${up} cm up` : ''
+      const text = `${it.name}|${dimsText(it.lib?.dims_cm)}|${where}|${it.missing ? 1 : 0}`
       if (label.dataset.text !== text) {
         label.dataset.text = text
-        fill(label, h('b', it.name), it.lib?.dims_cm ? h('span', dimsText(it.lib.dims_cm)) : null)
+        fill(label, h('b', it.missing ? `${it.name} · missing` : it.name), it.lib?.dims_cm ? h('span', dimsText(it.lib.dims_cm)) : null, where ? h('span.ws-label-up', where) : null)
       }
+      // a raised piece: a faint line from under its middle down to the floor
+      if (it.position[1] > 0.02) {
+        const top = engine.worldToScreen(f.center), foot = engine.worldToScreen([f.center[0], 0, f.center[2]])
+        if (top.visible && foot.visible) {
+          guide.setAttribute('x1', top.x.toFixed(1)); guide.setAttribute('y1', top.y.toFixed(1)); guide.setAttribute('x2', foot.x.toFixed(1)); guide.setAttribute('y2', foot.y.toFixed(1))
+          guideDot.setAttribute('cx', foot.x.toFixed(1)); guideDot.setAttribute('cy', foot.y.toFixed(1))
+          guide.style.display = guideDot.style.display = ''
+        } else guide.style.display = guideDot.style.display = 'none'
+      } else guide.style.display = guideDot.style.display = 'none'
       const front = [s[0], s[1]]
       const lx = Math.min(...front.map((p) => p.x)), lw = label.offsetWidth || 140, lh = label.offsetHeight || 40
       let ly = Math.max(...s.map((p) => p.y)) + 10
@@ -639,8 +811,10 @@ export function mount(ctx) {
       label.hidden = grip.hidden = false
     } else {
       fpPoly.style.display = fpStem.style.display = 'none'
+      guide.style.display = guideDot.style.display = 'none'
       hide(label, grip)
     }
+    drawWall()
     // measure / check-size points
     const pts = kind === 'measure' ? engine.getMeasurePoints() : kind === 'two' ? engine.getPick().pointList : []
     const sp = pts.map((p) => engine.worldToScreen(p))
@@ -719,6 +893,25 @@ export function mount(ctx) {
       tag.hidden = false
     })
   }
+  // The tapped shell wall: a dimension line along its foot, with its length in cm.
+  function drawWall() {
+    const sh = engine.getShell()
+    const w = sh.visible && !busy() ? sh.selected : null
+    const a = w && engine.worldToScreen(w.a), b = w && engine.worldToScreen(w.b)
+    if (!w || !a.visible || !b.visible) { wallDim.style.display = 'none'; wallTag.hidden = true; return }
+    const [l, t1, t2] = wallDim.children
+    const seg = (el, x1, y1, x2, y2) => { el.setAttribute('x1', x1.toFixed(1)); el.setAttribute('y1', y1.toFixed(1)); el.setAttribute('x2', x2.toFixed(1)); el.setAttribute('y2', y2.toFixed(1)) }
+    seg(l, a.x, a.y, b.x, b.y)
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1, nx = -(b.y - a.y) / len * 7, ny = (b.x - a.x) / len * 7
+    seg(t1, a.x - nx, a.y - ny, a.x + nx, a.y + ny)
+    seg(t2, b.x - nx, b.y - ny, b.x + nx, b.y + ny)
+    wallDim.style.display = ''
+    const cmText = Number.isInteger(w.lengthCm) ? String(w.lengthCm) : w.lengthCm.toFixed(1)
+    const txt = `${cmText} cm`
+    if (wallTag.textContent !== txt) wallTag.textContent = txt
+    wallTag.hidden = false
+    px(wallTag, (a.x + b.x) / 2 - (wallTag.offsetWidth || 64) / 2, (a.y + b.y) / 2 - (wallTag.offsetHeight || 24) - 6)
+  }
   const ZOOM = 2
   function drawLoupe(x, y) {
     const src = engine.canvas
@@ -752,6 +945,7 @@ export function mount(ctx) {
     startPickFloor: () => engine.startPickMode('floor'),
     startCheckSize: () => engine.startPickMode('two'),
     startMeasure: () => { if (!engine.getMeasureState().active) toggleMeasure() },
+    toggleShell,
   }
   sync()
 }

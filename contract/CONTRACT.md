@@ -2,7 +2,7 @@
 
 The shared spec between the **planner** (`planner/`) and the **furniture pipeline** (`pipeline/`). The only thing they share is the files described here. Conventions (units, axes, item frame, slugs) are in [CLAUDE.md](../CLAUDE.md) and apply everywhere.
 
-Schemas: [library.schema.json](library.schema.json), [layout.schema.json](layout.schema.json), [room.schema.json](room.schema.json).
+Schemas: [library.schema.json](library.schema.json), [layout.schema.json](layout.schema.json), [room.schema.json](room.schema.json), [capture.schema.json](capture.schema.json), [roomplan.schema.json](roomplan.schema.json).
 
 ---
 
@@ -14,7 +14,8 @@ library/<id>/model.glb        normalized mesh, always present
 library/<id>/splat.ply        normalized 3DGS splat, optional
 library/<id>/thumb.jpg        square thumbnail, optional
 library/<id>/source.<ext>     the input image or model, as given
-library/<id>/raw/             untouched engine outputs (debugging only)
+library/<id>/raw/             untouched engine outputs (debugging only, never served)
+library/.trash/<id>-<stamp>/  deleted items (§2.8), never served
 library/costs.csv             one row per pipeline run: date,id,engine,cost_usd,mock,input
 room/room.json                room config of the current room (room.schema.json)
 room/<scan>.spz|.ply|...      the scan itself (git-ignored)
@@ -108,7 +109,7 @@ interface Nook {
 }
 ```
 
-`position[1]` passed to `addItem` / `moveItem` is ignored: items always sit on the floor (y = 0). For `render: 'splat'`, `worldBounds` is computed from splat centers (1st–99th percentile is fine).
+`position[1]` is the item's **elevation**: the height of its bottom above the floor, in meters (v4, §2.10; before v4 it was ignored and items always sat on the floor). For `render: 'splat'`, `worldBounds` is computed from splat centers (1st–99th percentile is fine).
 
 ### 2.5 Acceptance criteria: planner
 
@@ -247,6 +248,154 @@ saveRoom(): Promise<void>                    // Save room: PUT /api/rooms/<name>
 - P19. A `room.json` from before v2 (no per-room files) opens with its alignment and viewpoints intact.
 - P20. Usable at 390 × 844 with touch only: every action reachable, targets ≥ 44 px.
 
+**v4 additions (§2.7)**
+- The room object in `GET /api/rooms` gains:
+  - `roomplan_url`: `/room/<name>.roomplan.json` when the room has a measured shell (§4.12), else null
+  - `capture`: the name of the kept capture it was trained from (§5, captures), or null when that capture isn't kept
+  - `parent`: the room it was retrained from, or null
+- `<name>.room.json` gains `parent` (room.schema.json). A retrain writes it (§5).
+- The trainer copies a capture's `roomplan.json` / `roomplan.usdz` next to the scan as `<name>.roomplan.json` / `<name>.roomplan.usdz`. Deleting a room moves them to `.trash/` with the rest.
+- **The planner groups rooms by base name:** `<base>-r<N>` rooms are listed under `<base>` (newest first), with the base room itself as one of them. **Retrain** on a room whose `capture` is null explains "this capture isn't kept, upload again to retrain" (in the retrain sheet, not as a note on every room in the list).
+- **Measured shell (v4 scope):** with `roomplan_url`, the planner offers a see-through shell toggle (walls, floor, doors and windows drawn from `roomplan.json`, in the room's transform) and shows a wall's length when it's tapped. Auto-align and snapping are v4.1.
+
+**Hook additions (v4)**
+
+```ts
+getState().room.roomplan: boolean            // the open room has a measured shell
+setShell(visible: boolean): void             // see-through shell on or off
+getState().shell: boolean
+```
+
+- P21. A room with `roomplan_url` shows the shell when `setShell(true)` is called; tapping a wall shows its length in cm, matching `roomplan.json` within 1 cm.
+- P22. `-rN` rooms are grouped under their base in the rooms list.
+
+### 2.8 Library API (`planner/serve.py`, v4)
+
+Library writes go to the existing `--library-dir` (default the repo's `library/`). `serve.py` gains `--nook-add CMD` (default `uv run --project pipeline nook-add`; the Nix package passes its own binary) and runs it with `--library <library-dir>`. The spend cap (§2.9) reads and writes `--costs-file`. Everything is JSON except the upload body.
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /api/library` | | `200` the `library.json` (with an empty `items` when there's none), plus `"trash": [{id, name, deleted}]` |
+| `POST /api/library/items` | **Raw body** (no multipart: `cgi` is gone from Python 3.13), `Content-Length` required. Headers: `X-Nook-Kind: model \| image`, `X-Nook-Filename: <name.ext>`, `X-Nook-Meta: <base64 of JSON meta>` | `202 {job, cost_usd_estimate}` |
+| `POST /api/library/items/from-url` | JSON `{image_url, ...meta}` | `202 {job, cost_usd_estimate}` |
+| `GET /api/library/jobs` | | `200 {"jobs": [job, ...]}`, newest first |
+| `GET /api/library/jobs/<id>` | | `200` the job object itself (not wrapped), or `404` |
+| `PATCH /api/library/items/<id>` | JSON, any of `name`, `category`, `mount`, `yaw` (0/90/180/270, relative to now), `default_render` (`glb` \| `splat`, only if that asset exists), `dims_cm` | `200` the item, or `202 {job}` when `dims_cm` or `yaw` changed |
+| `DELETE /api/library/items/<id>` | | `200 {"ok": true}`: the item's entry and folder move to `library/.trash/<id>-<UTC stamp>/` |
+| `POST /api/library/items/<id>/restore` | | `200` the item (the newest trashed copy), `404` when none, `409` when an item with that id exists again |
+
+**Meta** (both add routes): `name` (required), `dims_cm` `{w,d,h}` (required), `id` (default: slug of `name`), `category`, `mount` (`floor` \| `wall`, §2.10), `yaw`, `engine` (`sam3d` \| `trellis2` for images; forced to `glb` for models), `prompt`, `resolution`. `400` with one actionable sentence for anything else wrong (a non-slug id, missing dims, unknown engine).
+
+**Bodies:**
+- `model`: a `.glb`, or a `.zip` holding one `.obj` with its `.mtl` and textures. `.gltf` with side files: zip it with an `.obj`, or convert it to `.glb` first (the message says so). `.usdz`: "convert to GLB first".
+- `image`: a JPEG, PNG, HEIC or WebP file (a photo from the phone).
+
+**Limits:** models 200 MB, images 20 MB (`413` beyond, `411` without a length). Zips: only `.obj .mtl .png .jpg .jpeg` files are extracted, nothing else; no absolute paths, no `..`, no links; at most 500 MB unpacked and 1,000 entries (`400` otherwise). Uploads land in a private temp folder, never under a served path.
+
+**Jobs:** one queue, one job at a time. Each runs `nook-add` on a local file (never a URL, see §2.9). The job object:
+
+```json
+{ "id": "l-20261027-101500-ab12", "kind": "add | rescale", "item_id": "eames-ottoman",
+  "status": "queued | running | done | failed", "engine": "sam3d",
+  "cost_usd_estimate": 0.02, "cost_usd": null, "mock": false,
+  "created": "<ISO-8601 UTC>", "started": null, "finished": null,
+  "message": "human-readable status line", "item": null }
+```
+
+When `done`, `item` is the library entry and `cost_usd` what was recorded. A failed job's `message` is `nook-add`'s stderr line. An id that already exists is replaced (upsert, as `nook-add`), and the job's message says so.
+
+**Editing:** `PATCH` changes `name`, `category` and `default_render` in place. A changed `dims_cm` or `yaw` runs `nook-add --rescale <id>` (§3.1) as a job: it refits the item's normalized assets, with no model call and $0.
+
+**Missing items:** a layout that places a deleted item still loads. Layout items carry the item's `dims_cm` (layout.schema.json, v4) so this works. The planner shows a "missing item" placeholder box at its dims (from the layout, or 50 cm cubed) and keeps it in the layout until removed. Restoring the item replaces the placeholder on reload.
+
+**One writer:** every write to the library (`nook-add`, PATCH, DELETE, restore) takes `<library>/.lock` (`flock`), so the server and a `nook-add` run by hand never interleave. PATCH, DELETE and restore wait up to 60 s for a running job, then answer `503 {"error": "library is busy: …"}`. Library jobs live in memory; a restart forgets them (the items they made stay). `library.json` writes stay atomic.
+
+**What `/library/` serves:** item assets only (`<id>/model.glb`, `splat.ply`, `thumb.jpg`, `source.<ext>`) and `library.json`. `raw/`, `.trash/`, `.lock` and `costs.csv` get `404`. Responses carry `X-Content-Type-Options: nosniff`.
+
+**Hook additions (v4)**
+
+```ts
+libraryJobs(): Promise<LibraryJob[]>                         // GET /api/library/jobs
+addItemFromFile(file: File, meta: Meta): Promise<LibraryJob> // POST /api/library/items
+addItemFromUrl(url: string, meta: Meta): Promise<LibraryJob>
+editLibraryItem(id: string, patch: object): Promise<Item | LibraryJob>
+removeLibraryItem(id: string): Promise<void>       // removeItem(uid) still removes a placed item
+restoreLibraryItem(id: string): Promise<Item>
+```
+
+**Acceptance**
+- L8. In mock mode (`NOOK_FAL_MOCK`), a `.glb` upload, an OBJ zip upload, a photo upload and a from-URL add each end in a `done` job and a library that passes `evals/validate_library.py`.
+- L9. Delete, then restore, round-trips the item byte for byte. A layout placing a deleted item loads with a placeholder.
+- L10. A zip with `../x`, an absolute path, a symlink or a `.exe` is refused with `400` and nothing is written.
+- L11. `PATCH dims_cm` refits within §1's tolerances at $0.
+
+### 2.9 Mutating requests and money (v4)
+
+These rules apply to every `POST`, `PUT`, `PATCH` and `DELETE` that `planner/serve.py` answers or proxies, including `/api/render`, the rooms and layouts routes, and `/api/scan/*`.
+
+**Forged requests:** a mutating request needs the header `X-Nook: 1`, and an `Origin` header that's either absent or equal to the page's own origin (`http(s)://` + the request's `Host`). Anything else gets `403 {"error": "cross-site request refused"}`. The planner sends the header on every mutation, and so does the iOS app's upload (`nook-scan serve` checks it too, since the app talks to it through the planner's origin).
+
+**Host names (against DNS rebinding):** every request, reads included, must carry a `Host` that is a loopback name (`127.0.0.1`, `localhost`, `[::1]`, any port) or one given with `--allowed-host NAME` (repeatable; the NixOS module's `allowedHosts`, e.g. `nook.salehtl.com`). Anything else gets `403 {"error": "unknown host name: add it with --allowed-host"}` before any other handling. `nook-scan serve` applies the same rule (its own `--allowed-host`; the planner's proxy talks to it on loopback).
+
+**Paths:** static paths are normalized (percent-decoding, `.` and `..` segments) **before** any rule about what is served, so `/./library/costs.csv` or `/planner/../library/raw/…` get the same `404` as the plain path.
+
+**Spend cap:**
+- `serve.py --daily-spend-usd N` (default `2`). It's a server flag only; no route changes it.
+- It covers every paid call: library adds and `/api/render`.
+- Before a paid call, the server **reserves** the estimate against today's (UTC) total from `costs.csv`, atomically within the server (one mutex; the library lock is held by `nook-add` for its whole run, so it can't be used here). A `nook-add` run by hand isn't reserved. A request that would cross the cap gets `402 {"error": "today's fal budget ($2.00) is used up: $1.98 spent", "spent_usd", "cap_usd"}` and no call is made. A failed call releases its reservation; a successful one records the actual cost.
+- `GET /api/spend` returns `{"day": "YYYY-MM-DD", "spent_usd", "reserved_usd", "cap_usd"}` so the page can show the remaining budget.
+- Mock calls cost $0 and count for nothing.
+- `costs.csv` is `<library-dir>/costs.csv` by default (`--costs-file` overrides it; when `--library-dir` is also given and the two differ, the server refuses to start, since `nook-add` writes `<library-dir>/costs.csv`. Evals that pass only `--costs-file`, to keep render rows out of the repo, are fine). Cost rows are appended under their own small lock, `costs.csv.lock` (`flock`), taken by the server and by `nook-add`, never the library lock, so a render never waits for a running add.
+- A paid job killed at its timeout keeps its reservation for the rest of the day (fal may have charged), and its job says so.
+
+**URL fetches (the from-URL add):**
+- `serve.py` downloads the image **itself**, to a temp file, and passes that file to `nook-add`. `nook-add` never fetches URLs when called by the server.
+- `http` and `https` only. The host is resolved once and the connection goes to that IP (pinned). Every redirect (at most 3) is resolved and checked again.
+- Refused addresses: `0.0.0.0/8`, `127.0.0.0/8`, `::1`, `::`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `100.64.0.0/10`, `fd7a:115c:a1e0::/48`, `fc00::/7`, `fe80::/10`, multicast, and the IPv4-mapped forms of all of these. `400 {"error": "that address is on a private network"}`.
+- The response must have an `image/*` content type and be at most 20 MB. An HTML page gets `400 {"error": "that's a web page: paste the image's own link (right-click the image, Copy Image Address)"}`.
+- 20 s timeout overall.
+- `NOOK_FETCH_ALLOW=<host>:<port>` (evals only, never set by the Nix module) exempts exactly that one host and port, so evals can serve an image from `127.0.0.1`. Every other private address is still refused.
+
+**Acceptance**
+- W1. A mutating request without `X-Nook: 1`, or with a foreign `Origin`, gets `403` on every route above and changes nothing.
+- W2. With `--daily-spend-usd 0.03` and fal mocked as paid (`NOOK_FAL_MOCK_COST=1`, which makes mock runs record their real price), the second $0.02 add is refused with `402` and no call is made.
+- W3. From-URL adds of `http://127.0.0.1/…`, `http://[::ffff:127.0.0.1]/…`, `http://169.254.169.254/…`, a redirect to a private address, and `file:///etc/passwd` are all refused without a connection to the private address.
+- W4. `GET /library/costs.csv`, `/library/.trash/…` and `/library/<id>/raw/…` return `404`.
+
+### 2.10 Raising items and hanging them on walls (v4)
+
+Paintings, shelves, mirrors and wall lamps need to sit above the floor and against a wall.
+
+**Elevation:**
+- A placed item's `position[1]` is the height of its bottom (the item frame's y = 0) above the floor, from 0 to 4 m (clamped). Layouts already store `position` as `[x, y, z]`; v1 layouts have y = 0 and load unchanged.
+- **Desktop:** with an item selected, `Shift`+drag (or `PageUp` / `PageDown`, 1 cm, with `Shift` 10 cm) moves it up and down; plain drag still moves it on its own horizontal plane.
+- **Phone:** the selected item's panel gains an **Up / Down** control: a vertical drag handle plus `+`/`−` buttons (1 cm per tap, held repeats) and the height in cm, editable.
+- The inspector shows the height above the floor. A raised item drops its floor contact shadow (when its bottom is more than 2 cm up) and keeps a faint vertical guide line to the floor while it's selected, so you can see where it is.
+- **Drop to floor** puts it back at y = 0.
+
+**Hang on a wall:**
+- **Hang on wall** (inspector, or long-press on phone), then a tap on a wall, places the selected item with its **back** (the item's −Z face) against the wall, its front (+Z) facing into the room, and its center at the tapped point:
+  - with a measured shell (§2.7, `roomplan_url`): the wall plane from `roomplan.json` gives the exact position and yaw;
+  - without one: the tap's hit on the splat gives the point, and the yaw is set so the front faces the camera, snapped to the nearest 15°. The item is pushed back so its back sits at the hit point.
+- After hanging, the item stays a normal item: drag moves it **along the wall** (keeping its distance from it) until it's dropped to the floor or hung somewhere else. `mounted: "wall"` is stored on the layout item while it's hung.
+- **Library default:** an item may carry `mount: "wall"` (library.schema.json; `nook-add --mount wall`, and the §2.8 meta). Adding such an item starts it in hang mode, at a center height of 1.45 m if placed without a wall tap.
+
+**Hook additions (v4)**
+
+```ts
+addItem(id, opts?: { position?: [x, y, z], ... })     // y is the elevation now
+moveItem(uid, opts: { position?: [x, y, z], ... })    // y honored, clamped to 0..4
+hangItem(uid: string, at: { point: [x, y, z], normal: [x, y, z] }): void   // back against the plane through point with that normal
+selectItem(uid: string | null): void                 // as a tap on the item; null clears the selection
+getState().items[i].mounted: 'floor' | 'wall'
+```
+
+- P23. `moveItem(uid, {position: [x, 1.2, z]})` round-trips through Save and load with y within 1 mm, and `worldBounds.min[1]` is 1.2 ± 0.01.
+- P24. `hangItem` with a wall normal of `[0, 0, 1]` gives `rotation_y_deg` 0 and the item's min z at the wall's z ± 1 cm; with `[-1, 0, 0]`, `rotation_y_deg` −90 (or 270).
+- P25. At 390 × 844, the Up / Down control raises a selected item by 10 cm in 10 taps.
+
+**Test handles (v4):** the controls evals press carry `data-nook` attributes: `elev-up`, `elev-down`, `elev-value` (§2.10), `hang` (Hang on wall), `drop` (Drop to floor), `shell` (§2.7 shell toggle), `lib-add`, `lib-remove`, `lib-undo` (§2.8), `retrain`, `retrain-go`, `retrain-advanced` (§5.1). A placeholder for a missing item has `data-nook="missing-item"` in its inspector.
+
 ---
 
 ## 3. Pipeline
@@ -258,7 +407,7 @@ A uv project in `pipeline/` (Python 3.12) exposing the console script `nook-add`
 ```
 uv run --project pipeline nook-add INPUT --name NAME --dims WxDxH
     [--id SLUG] [--category TEXT] [--engine sam3d|trellis2|glb] [--prompt TEXT]
-    [--yaw 0|90|180|270] [--resolution 512|1024|1536] [--library DIR] [--notes TEXT]
+    [--yaw 0|90|180|270] [--resolution 512|1024|1536] [--library DIR] [--notes TEXT] [--mount floor|wall]
 ```
 
 - `INPUT`: a local image path or an image URL (`sam3d`, `trellis2`), or a local/URL `.glb`/`.gltf` (`glb`). A `.usdz` input should fail with a clear message ("convert to GLB first") unless conversion is implemented.
@@ -313,6 +462,14 @@ A thumbnail is made from the input image (center crop, 256 × 256 JPEG). For `gl
 - L5. GLB textures and materials survive normalization (an input with images still has images).
 - L6. Mock mode makes zero network requests.
 - L7. `--yaw 90` rotates the result 90° around Y (so W and D of the source are swapped before fitting).
+
+**v4 additions**
+- `--engine glb` also accepts a `.zip` holding one `.obj` with its `.mtl` and textures. It's converted to GLB (materials and textures kept, L5) and then normalized as usual. The zip rules of §2.8 apply.
+- `nook-add --rescale <id> [--dims WxDxH] [--yaw 0|90|180|270]`: refits an existing item from its normalized assets: no engine, no model call, `cost_usd: 0`, no new cost row. Without `--dims`, the item's dims are kept. `--yaw` is relative to the item's current orientation. Same self-check and last-line JSON as an add.
+- `--library DIR` is honored for every read and write, including the lock (`<library>/.lock`, §2.8), which `nook-add` takes for the whole run.
+- **Mock mode** accepts a local image (as well as a URL), so the from-URL flow is tested at $0: `serve.py` downloads, then `nook-add` gets a local file.
+- `NOOK_FAL_MOCK_COST=1` (evals only): mock runs record the engine's real price, so the spend cap can be tested without spending.
+- L12. `npm run eval:library` (`evals/library_api.sh`) passes.
 
 ---
 
@@ -393,7 +550,7 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 - I2. The app launches in the simulator with no crash and shows the captures list. Replay mode can produce a capture that appears in the list and can be shared.
 - I3. Release basics:
   - bundle id `com.salehtl.nookscan`, team `8CFG28JHP3`, automatic signing
-  - version 0.2.0 (the build number is set at release)
+  - version 0.4.0 in v4 (the build number is set at release)
   - `NSCameraUsageDescription`, `ITSAppUsesNonExemptEncryption = NO`, `UIRequiredDeviceCapabilities` containing `arkit`
   - a 1024 px app icon
   - deployment target iOS 18.0
@@ -423,6 +580,45 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 **Acceptance**
 - **Q1.** `bash evals/scan_quality.sh` passes when the real capture is present (it's skipped, not failed, when absent). It trains `--quality high` with `--holdout-every 10`, and the Spark-judged held-out mean must be **≥ 22.3 dB**, which is the 20.8 dB baseline + 1.5. It must finish in under 40 minutes on kakapo.
 
+### 4.9.1 Trainer v3: settings scaled to the capture (v4)
+
+The v2 preset trains every capture for the same number of steps, so a 1,200-frame scan comes out undertrained. v3 scales them.
+
+**Scaled settings** (`--quality high`, the default):
+- `steps = clamp(k × n_train, 20,000, 120,000)`, where `n_train` is the number of training frames (after `--holdout-every`). `k = 80` steps per frame (v4 phase 0a: on a 1,089-frame capture at 2M splats, 40 → 80 steps per frame raised held-out PSNR from 21.44 to 22.03 dB).
+- `train_max_splats`: a constant per GPU class (`scan/src/nook_scan/gpu.py`), never computed from free VRAM, so `--dry-run` gives the same answer on any machine. For now: 2,000,000 on a 6–10 GB card (kakapo's RTX 2060), 3,000,000 above 10 GB.
+- High-resolution stills (§4.10) train at `stills_max_size` (default: the same as `max_image_size`, 1920; 0a decides whether 2880 pays off). Video frames stay at `max_image_size`.
+- `deliver_max_splats` (default 1,500,000): after cropping, splats beyond this are pruned, lowest `opacity × volume` first, before the room's SPZ and PLY are written. The planner and phones load the delivered room. `--keep-full-ply` also writes the unpruned crop as `<name>.full.ply`.
+- `--quality draft` stays as v1 (10k steps, 1280 px). Explicit flags beat both presets.
+
+**Flags** (each maps 1:1 to a retrain setting, §5):
+
+| Setting (`settings` key) | Flag | Range |
+|---|---|---|
+| `steps` | `--steps` | 1,000–200,000 |
+| `train_max_splats` | `--max-splats` | 100,000–4,000,000 |
+| `deliver_max_splats` | `--deliver-max-splats` | 100,000–4,000,000 (and ≤ `train_max_splats`) |
+| `max_image_size` | `--max-image-size` | 640–3840 |
+| `stills_max_size` | `--stills-max-size` | 640–4032 |
+| `sh_degree` | `--sh-degree` | 0–3 |
+| `pose_opt` | `--pose-opt` (a real flag now, not `NOOK_GSPLAT_ARGS`) | bool |
+| `holdout_every` | `--holdout-every` | 0 or 2–50 |
+
+`--refine-poses` (`nook-poses`) stays as a CLI flag but isn't offered as a setting: it didn't help.
+
+**Experimental: depth loss and fine-tuning** (CLI only for now, not retrain settings, until a real test shows they help):
+- `--depth-weight W` (0–10, default 0 = off): adds `W ×` an L1 loss in log depth between the rendered expected depth and the frame's LiDAR depth (§4 `depth/`), on pixels with a return under 5 m and away from depth edges. Meant to keep floaters out of the room's free space. Frames without depth train as before.
+- `--init SPLAT`: starts from an existing room of the same capture (its `.spz` or `.ply`, in the capture's world frame) instead of seed points. Position learning starts at a tenth of the usual rate and every SH band is on from step 0, so a few thousand `--steps` fine-tune it. Past `--max-splats`, the most opaque splats are kept.
+- Both pass through to `nook-gsplat` as the same flags. The stand-in trainer (`evals/fake_gsplat.py`) accepts and ignores them.
+
+- `nook-scan train CAPTURE --dry-run` prints the resolved settings as JSON (`{"n_train", "settings": {...}, "eta_s"}`) and exits without training. `eta_s` uses `gpu.py`'s measured speed (seconds per 1,000 steps per million splats on this GPU class, set from 0a).
+- The trainer's last-line JSON gains `"settings"` (what actually ran) and `"delivered_splats"`.
+- `meta.roomplan` captures (§4.12): `roomplan.json` and `roomplan.usdz` are copied into the room dir as `<name>.roomplan.json` / `.usdz`, with `world_from_roomplan` applied and the room transform **not** applied (the planner applies it, like the splat).
+
+**Acceptance**
+- **Q1 (v4).** Replaces the v2 Q1. `bash evals/scan_quality.sh` trains the real capture with the scaled defaults and `--holdout-every 10`. The Spark-judged held-out mean must be **≥ 22.3 dB**, the delivered room at most 1,500,000 splats, and the run within 1.25 × its own `eta_s`.
+- **Q2.** `nook-scan train --dry-run` on scan-20261027-112322 prints the same settings on the Mac and on kakapo.
+
 ---
 
 ## 5. Processing server API (`nook-scan serve`)
@@ -435,7 +631,7 @@ uv run --project scan nook-scan serve [--host 127.0.0.1] [--port 8095] [--data-d
 
 - `--data-dir` (default `~/.nook-scan`): uploads, job state (`jobs.json`), logs.
 - `--room-dir`: where trained rooms go (`<room-dir>/<name>.ply`, plus `room.json` updated as in §4.6). It's the folder the web app serves as `/room/`.
-- `--steps`, `--quality` and `--max-splats` are passed to every training run (evals use tiny step counts).
+- `--steps`, `--quality` and `--max-splats` are passed to every training run (evals use tiny step counts). v4: `--quality` applies to uploads only; a retrain always starts from the scaled `high` settings, so it matches `/defaults`, and its own `settings` win over `--steps` and `--max-splats`.
 
 All endpoints are under `/api/scan`, and everything is JSON except the upload body. Errors return `{"error": "<one actionable sentence>"}` with a 4xx/5xx status.
 
@@ -468,12 +664,59 @@ The job object:
 When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/planner/?room=<name>"` (§2.7), `"ply_url": "/room/<name>.ply"` and `"spz_url": "/room/<name>.spz"`. These are site paths on the same origin the app talked to.
 
 - **One job at a time** (one GPU). The queue is FIFO.
-- **Restarts:** job state persists in `jobs.json`. On restart, a job that was running becomes `failed` with the message "server restarted during training: upload again", and queued jobs stay queued.
+- **Restarts:** job state persists in `jobs.json`. On restart, a job that was running becomes `failed` with the message "server restarted during training: retrain from the planner" (v4, §5.1), and queued jobs stay queued.
 - `progress` is between 0 and 1 and only goes up for a running job. The server updates it from the trainer's `step X/Y` lines at least every 5 s.
 
 **Acceptance**
 - **A1.** `bash evals/server_api.sh` passes.
 - **A2.** `evals/mock_scan_server.py` and the real server answer the same requests with the same shapes. The iOS integration test passes against both.
+
+### 5.1 Captures and retraining (v4)
+
+**Keeping captures:**
+- An upload is **kept** as `<data-dir>/captures/<capture>.zip` from the moment it's accepted, whatever its job's outcome (`done`, `failed`, `cancelled`, or interrupted by a restart). Nothing deletes it but `DELETE /api/scan/captures/<name>`.
+- A job running at restart becomes `failed` with "server restarted during training: retrain from the planner".
+- Re-uploading a capture: the upload dedupe (§5) applies only to jobs of `kind: "upload"`, as before, but the zip is **always** saved as the kept capture (replacing any kept one), even when the answer is the existing job. So "upload again to retrain" works for rooms whose capture wasn't kept.
+
+**Routes:**
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /api/scan/captures` | | `200 {"captures": [{"name", "size_bytes", "created", "rooms": ["<room>", ...], "roomplan": bool}]}`, newest first. `rooms` are the rooms trained from it. |
+| `DELETE /api/scan/captures/<name>` | | `200 {"ok": true}`; `409` while a job for it is queued or training. Its rooms stay. |
+| `GET /api/scan/captures/<name>/defaults` | | `200 {"n_train", "settings": {...}, "eta_s"}`: the scaled settings (§4.9.1) for this capture, for `holdout_every: 0` |
+| `POST /api/scan/captures/<name>/retrain` | JSON `{"settings"?: {...}, "title"?: "<text>"}`, every `settings` key from §4.9.1 optional | `202 {job}`. `400` for an unknown key or a value out of range (the message names it), `404` for an unknown capture |
+
+**Jobs** gain `"kind": "upload" | "retrain"`, `"parent": "<room>" | null` (the room a retrain starts from) and `"settings"` (resolved when the job starts: what actually ran). `GET /api/scan/jobs` lists both kinds.
+
+**Naming a retrain:**
+- The parent is the newest room trained from that capture **that still exists** in the room dir (a room deleted in the planner can't be a parent). Its base is its name with any `-r\d+` suffix removed. When no room was ever trained from it (its upload failed or was cancelled), `parent` is null and the base is the upload job's room name.
+- The new room is `<base>-r<N>`, where N is 1 + the highest N among existing rooms and queued jobs with that base (so `scan-x` → `scan-x-r1`, then `scan-x-r2`; retraining `scan-x-r1` gives `scan-x-r3` if `-r2` exists).
+- The base is truncated so the name stays within the 64-character slug limit.
+- `title` (optional) becomes the new room's `title`, never its name, so it can't collide.
+
+**The new room:**
+- `<new>.room.json` starts as a copy of the parent's `transform` and `look` (it's the same capture, so the same world frame), with `parent` set, `saved` copied (it is aligned), and its own viewpoints.
+- Its layouts start empty. The planner offers to copy the parent's layouts when the room is first opened.
+- It doesn't become `current` (`room.json` stays put) unless it's opened.
+- Its thumbnail is made by the planner, as for any room.
+
+**Planner (retrain sheet):** **Retrain** on a room whose `capture` is kept opens a sheet with the defaults and time estimate (`/defaults`) and one button; **Advanced** shows every §4.9.1 setting with a plain hint (e.g. "Training splats: more detail, more GPU memory and time"). Hook:
+
+```ts
+retrainDefaults(room: string): Promise<{n_train, settings, eta_s}>        // the room's capture's /defaults
+retrainRoom(room: string, settings?: object, title?: string): Promise<Job> // POST .../retrain; the job shows with the rooms
+```
+
+- P26. `retrainRoom()` on a room with a kept capture adds a queued `<base>-rN` job to the rooms list; on a room with `capture: null` it rejects with the "upload again" message.
+
+**Proxy:** `planner/serve.py --scan-api` proxies every method under `/api/scan`, including `DELETE` and the `X-Nook` header (§2.9).
+
+**GPU lock:** the service's worker holds `/run/nook/gpu.lock` (`flock`, the NixOS module's `RuntimeDirectory`) while training. `evals/remote.sh` takes the same lock, so an eval and a real job never share the card. `--gpu-lock PATH` sets it (default: none, as in evals on the Mac).
+
+**Acceptance**
+- **A3.** `bash evals/server_api.sh` covers: a finished job keeps its capture; a restart keeps it; retrain naming (`-r1`, `-r2`, a 64-character base); parent copy; the dedupe applying only to uploads; `DELETE` refused while training; bad settings refused with the key named.
+- **A4.** `evals/mock_scan_server.py` answers the §5.1 routes with the same shapes (A2 parity).
 
 ### 4.10 Capture v1.2: high-resolution stills (optional)
 
@@ -494,3 +737,22 @@ When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/
   - The last stdout line is JSON: `{"frames", "shift_cm_median", "shift_cm_max", "rot_deg_median", "seconds"}`.
 - It runs on kakapo's RTX 2060 (6 GB): chunking or downscaling as needed.
 - `nook-scan train --refine-poses` runs it on the prepared dataset before training.
+
+### 4.12 Capture v1.3: RoomPlan (optional, v4)
+
+A measured shell of the room from Apple's RoomPlan, next to the splat, not in place of it. Only on phones with LiDAR; other phones never write it. Captures without it stay valid.
+
+**Files** (at the capture's top level):
+- `roomplan.json` ([roomplan.schema.json](roomplan.schema.json)): `{"version": 1, "walls": [...], "floors": [...], "doors": [...], "windows": [...], "openings": [...], "objects": [...]}`. Each surface is `{"id", "dimensions": [w, h, d] (m), "transform": 4×4 row-major, "confidence": "low" | "medium" | "high"}`; doors, windows and openings add `"parent"` (a wall id); objects add `"category"` (RoomPlan's category name). The transform maps the element's local frame (centered, width along local X, height along local Y) to the frame named below.
+- `roomplan.usdz`: RoomPlan's own export, for viewing only. Nothing reads it.
+
+**Frame:**
+- `meta.roomplan`: `{"version": "<RoomPlan / iOS version>", "sessions": "shared" | "separate"}`.
+- `shared`: RoomPlan ran on the app's own ARKit session, so every transform is already in the `transforms.json` world.
+- `separate`: RoomPlan ran its own session. `roomplan.json` then carries `"world_from_roomplan"` (4×4, row-major), solved by the app by matching RoomPlan's floor and walls to the capture's ARKit floor and vertical wall planes (gravity-aligned, so only yaw and a shift are solved). Readers apply it; `roomplan.json` is never assumed to be in the capture frame without it.
+- `world_from_roomplan` is required when `sessions` is `separate`, and absent when `shared`.
+
+**Validity** (added to §4.5): when `meta.roomplan` is present, `roomplan.json` exists and matches the schema; every matrix is finite with an orthonormal rotation; at least one wall and one floor.
+
+**Acceptance**
+- I4. The replay test writes a v1.3 capture from the RoomPlan fixture (`fixtures/roomplan/`) that passes `validate_capture.py`. Phones without LiDAR show no RoomPlan option.
