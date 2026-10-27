@@ -2,36 +2,53 @@
 """nook planner server (stdlib only).
 
 Serves the repo root as static files and a tiny JSON API for the room config, the rooms (every scan in the room
-dir, each with its own config, thumbnail and layouts), layouts and "Render this view" (a paid fal image edit of a
-planner screenshot). See contract/CONTRACT.md §2.1, §2.6 and §2.7.
+dir, each with its own config, thumbnail and layouts), layouts, "Render this view" (a paid fal image edit of a
+planner screenshot) and the furniture library (adds through `nook-add`, edits, trash and restore). Every mutation
+needs `X-Nook: 1` and a same-origin (or absent) Origin, and paid calls stay under a daily spend cap.
+See contract/CONTRACT.md §2.1, §2.6, §2.7, §2.8 and §2.9.
 
     python3 planner/serve.py [--port 8765] [--room-dir room] [--room-file <room-dir>/room.json] [--layouts-dir layouts]
-                             [--renders-dir renders] [--costs-file library/costs.csv]
+                             [--renders-dir renders] [--costs-file library/costs.csv] [--library-dir library]
+                             [--nook-add "uv run --project pipeline nook-add"] [--daily-spend-usd 2] [--scan-api URL]
 
 Relative paths are resolved against the repo root. FAL_KEY comes from the environment, else from
-<repo>/.env (unless NOOK_NO_DOTENV=1). With NOOK_FAL_MOCK set, /api/render makes no network calls.
+<repo>/.env (unless NOOK_NO_DOTENV=1). With NOOK_FAL_MOCK set, /api/render makes no network calls (and nook-add
+replays recorded responses). NOOK_FETCH_ALLOW=<host>:<port> (evals only) lets the URL fetcher reach that one address.
 """
 import argparse
+import contextlib
+import fcntl
 import http.client
 import base64
 import binascii
 import csv
 import io
+import ipaddress
 import json
 import os
+import queue
 import re
+import secrets
+import shlex
+import socket
+import ssl
+import stat
+import subprocess
 import sys
 import shutil
 import tempfile
 import threading
+import time
+import unicodedata
 import urllib.error
 import urllib.request
+import zipfile
 from datetime import datetime, timezone
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -202,6 +219,502 @@ def list_scans(room_dir: Path) -> dict[str, Path]:
     return scans
 
 
+# --- library API (contract §2.8) and money (§2.9) ------------------------------------------------------------
+MAX_MODEL = 200 * 1024 * 1024
+MAX_IMAGE = 20 * 1024 * 1024
+MAX_DRAIN = 256 * 1024 * 1024  # an early error reads (and drops) a body up to this, so the client sees the answer
+ENGINE_PRICE = {"sam3d": lambda res: 0.02, "trellis2": lambda res: {512: 0.25, 1024: 0.30, 1536: 0.35}[res],
+                "glb": lambda res: 0.0}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp"}
+ZIP_ALLOWED = {".obj", ".mtl", ".png", ".jpg", ".jpeg"}
+ZIP_MAX_ENTRIES = 1000
+ZIP_MAX_UNPACKED = 500 * 1024 * 1024
+LIBRARY_ASSET = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}/(model\.glb|splat\.ply|thumb\.jpg|source\.[A-Za-z0-9]{1,8})$")
+NOOK_ADD_TIMEOUT = 3600
+LOCK_WAIT = 60  # s a library edit waits for a running nook-add before answering 503
+FORGED = "cross-site request refused"
+DEFAULT_NOOK_ADD = "uv run --project pipeline nook-add"
+
+
+def mock_cost() -> bool:
+    """NOOK_FAL_MOCK_COST=1 (evals only): mock calls count at their real price, so the cap can be tested for $0."""
+    return os.environ.get("NOOK_FAL_MOCK_COST", "") not in ("", "0")
+
+
+def counts_against_cap() -> bool:
+    """Live calls count; mock calls count for nothing unless NOOK_FAL_MOCK_COST=1."""
+    return not fal_mock() or mock_cost()
+
+
+def slugify(text: str) -> str:
+    """Same as nook-add's default id (pipeline/src/nook_pipeline/cli.py)."""
+    ascii_ = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", "-", ascii_).strip("-")[:64].rstrip("-")
+
+
+def num_text(v: float) -> str:
+    return str(int(v)) if float(v).is_integer() else repr(float(v))
+
+
+def check_dims(dims) -> dict:
+    if not isinstance(dims, dict) or not all(
+            isinstance(dims.get(k), (int, float)) and not isinstance(dims.get(k), bool) and dims[k] > 0 for k in "wdh"):
+        raise ValueError('dims_cm is required: {"w": ..., "d": ..., "h": ...} in cm, all greater than 0')
+    return {k: dims[k] for k in "wdh"}
+
+
+def check_meta(meta, kind: str) -> dict:
+    """The validated meta of an add (§2.8), with id and engine filled in. ValueError: one actionable sentence."""
+    if not isinstance(meta, dict):
+        raise ValueError("the meta must be a JSON object with at least name and dims_cm")
+    name = meta.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name is required, e.g. \"Reading chair\"")
+    out = {"name": name.strip(), "dims_cm": check_dims(meta.get("dims_cm"))}
+    item_id = meta.get("id")
+    if item_id is None or item_id == "":
+        item_id = slugify(name)
+        if not SLUG.match(item_id):
+            raise ValueError(f"can't make an id from the name {name!r}: add an id like \"reading-chair\"")
+    elif not isinstance(item_id, str) or not SLUG.match(item_id):
+        raise ValueError(f"id must be a slug (lowercase letters, digits and dashes, up to 64), got {item_id!r}")
+    out["id"] = item_id
+    for key in ("category", "prompt"):
+        v = meta.get(key)
+        if v is not None and not isinstance(v, str):
+            raise ValueError(f"{key} must be text")
+        out[key] = v.strip() if isinstance(v, str) and v.strip() else None
+    mount = meta.get("mount")
+    if mount not in (None, "floor", "wall"):
+        raise ValueError(f"mount must be floor or wall, got {mount!r}")
+    out["mount"] = mount
+    yaw = meta.get("yaw", 0)
+    if yaw in (None, ""):
+        yaw = 0
+    if isinstance(yaw, bool) or yaw not in (0, 90, 180, 270):
+        raise ValueError(f"yaw must be 0, 90, 180 or 270 (degrees), got {yaw!r}")
+    out["yaw"] = int(yaw)
+    if kind == "model":
+        out["engine"] = "glb"  # forced for models
+    else:
+        engine = meta.get("engine") or "sam3d"
+        if engine not in ("sam3d", "trellis2"):
+            raise ValueError(f"engine must be sam3d or trellis2 for an image, got {engine!r}")
+        out["engine"] = engine
+    res = meta.get("resolution")
+    if res in (None, ""):
+        res = 512
+    if isinstance(res, bool) or res not in (512, 1024, 1536):
+        raise ValueError(f"resolution must be 512, 1024 or 1536, got {res!r}")
+    out["resolution"] = int(res)
+    out["estimate"] = ENGINE_PRICE[out["engine"]](out["resolution"])
+    return out
+
+
+def zip_problem(path: Path) -> str | None:
+    """The first broken §2.8 zip rule, or None. Same rules as the pipeline (pipeline/src/nook_pipeline/objzip.py)."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            infos = z.infolist()
+    except (zipfile.BadZipFile, OSError) as e:
+        return f"that isn't a readable zip ({e})"
+    if len(infos) > ZIP_MAX_ENTRIES:
+        return f"the zip has {len(infos)} entries, at most {ZIP_MAX_ENTRIES} are allowed"
+    total, objs = 0, 0
+    for info in infos:
+        name = info.filename
+        if name.startswith(("/", "\\")) or (len(name) > 1 and name[1] == ":") or "\\" in name:
+            return f"the zip holds an absolute path ({name}): zip the folder's contents instead"
+        if ".." in PurePosixPath(name).parts:
+            return f"the zip holds a path that climbs out of it ({name}): re-zip the folder"
+        if stat.S_ISLNK(info.external_attr >> 16):
+            return f"the zip holds a link ({name}): zip the real files instead"
+        if info.is_dir() or name.startswith("__MACOSX/") or PurePosixPath(name).name == ".DS_Store":
+            continue
+        ext = PurePosixPath(name).suffix.lower()
+        if ext not in ZIP_ALLOWED:
+            return f"the zip holds {name}: only .obj, .mtl, .png, .jpg and .jpeg files are allowed"
+        objs += ext == ".obj"
+        total += info.file_size
+    if total > ZIP_MAX_UNPACKED:
+        return f"the zip unpacks to {total / 1e6:.0f} MB, at most 500 MB is allowed"
+    if objs != 1:
+        return f"the zip must hold exactly one .obj with its .mtl and textures (found {objs})"
+    return None
+
+
+def image_kind(head: bytes) -> str | None:
+    """jpeg, png, webp or heic from the first bytes, else None."""
+    if head[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if head[4:8] == b"ftyp" and head[8:12] in (b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"heis", b"heim"):
+        return "heic"
+    return None
+
+
+# --- URL fetches (§2.9): the server downloads the image itself, to a pinned, checked address ------------------
+FETCH_TIMEOUT = 20
+FETCH_MAX = 20 * 1024 * 1024
+FETCH_REDIRECTS = 3
+PRIVATE = "that address is on a private network"
+WEB_PAGE = "that's a web page: paste the image's own link (right-click the image, Copy Image Address)"
+BLOCKED_NETS = [ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10",
+    "224.0.0.0/4", "240.0.0.0/4", "::1/128", "::/128", "fd7a:115c:a1e0::/48", "fc00::/7", "fe80::/10", "ff00::/8")]
+NAT64 = ipaddress.ip_network("64:ff9b::/96")
+IMAGE_SUFFIX = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+                "image/heic": ".heic", "image/heif": ".heif"}
+
+
+class FetchError(Exception):
+    pass
+
+
+def address_blocked(addr: str) -> bool:
+    """True for loopback, private, link-local, CGNAT/tailnet, ULA, multicast and reserved addresses, in any v4-in-v6 form."""
+    try:
+        ip = ipaddress.ip_address(addr.split("%", 1)[0])
+    except ValueError:
+        return True
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif int(ip) < 2 ** 32:  # ::a.b.c.d (IPv4-compatible), and :: / ::1
+            ip = ipaddress.IPv4Address(int(ip))
+        elif ip in NAT64:
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        elif ip.sixtofour is not None:
+            ip = ip.sixtofour
+    return ip.is_multicast or any(ip in n for n in BLOCKED_NETS if n.version == ip.version)
+
+
+def fetch_allowed(host: str, port: int) -> bool:
+    """NOOK_FETCH_ALLOW=<host>:<port> (evals only) exempts exactly that host and port."""
+    allow = os.environ.get("NOOK_FETCH_ALLOW", "")
+    ahost, sep, aport = allow.rpartition(":")
+    return bool(sep) and aport.isdigit() and int(aport) == port and ahost.strip("[]").lower() == host.lower()
+
+
+class _Pinned:
+    """Connects to the address checked at resolve time, never re-resolving the host. abort() cuts the connection
+    from another thread (the 20 s watchdog), even after http.client has handed the socket to the response."""
+
+    def _open(self):
+        self.raw = socket.create_connection((self._ip, self.port), self.timeout)
+        return self.raw.dup()
+
+    def abort(self):
+        raw = getattr(self, "raw", None)
+        if raw is not None:
+            try:
+                raw.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def close(self):
+        super().close()
+        raw = getattr(self, "raw", None)
+        if raw is not None:
+            raw.close()
+
+
+class _PinnedHTTP(_Pinned, http.client.HTTPConnection):
+    def __init__(self, host, port, ip, timeout):
+        super().__init__(host, port, timeout=timeout)
+        self._ip = ip
+
+    def connect(self):
+        self.sock = self._open()
+
+
+class _PinnedHTTPS(_Pinned, http.client.HTTPSConnection):
+    def __init__(self, host, port, ip, timeout):
+        super().__init__(host, port, timeout=timeout, context=ssl.create_default_context())
+        self._ip = ip
+
+    def connect(self):
+        self.sock = self._context.wrap_socket(self._open(), server_hostname=self.host)
+
+
+def fetch_image(url: str, dest_dir: Path) -> Path:
+    """Download an image link to dest_dir (§2.9). Raises FetchError with one sentence for the user."""
+    deadline = time.monotonic() + FETCH_TIMEOUT
+    left = lambda: max(0.1, deadline - time.monotonic())
+    for _hop in range(FETCH_REDIRECTS + 1):
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+        if scheme not in ("http", "https"):
+            raise FetchError("only http and https links work: paste the image's web address")
+        host = parts.hostname
+        if not host:
+            raise FetchError("that link has no host name")
+        try:
+            port = parts.port or (443 if scheme == "https" else 80)
+        except ValueError:
+            raise FetchError("that link's port isn't a number") from None
+        try:
+            addrs = [ai[4][0] for ai in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
+        except (socket.gaierror, UnicodeError, OSError):
+            raise FetchError(f"couldn't find {host}: check the link") from None
+        if not addrs or (not fetch_allowed(host, port) and any(address_blocked(a) for a in addrs)):
+            raise FetchError(PRIVATE)
+        conn_cls = _PinnedHTTPS if scheme == "https" else _PinnedHTTP
+        conn = conn_cls(host, port, addrs[0], left())
+        watchdog = threading.Timer(left(), conn.abort)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+            conn.request("GET", target, headers={"User-Agent": "nook (image fetch)", "Accept": "image/*"})
+            resp = conn.getresponse()
+            if resp.status in (301, 302, 303, 307, 308):
+                location = resp.getheader("Location")
+                if not location:
+                    raise FetchError(f"the link redirects (HTTP {resp.status}) without saying where")
+                url = urljoin(url, location)
+                continue
+            if resp.status != 200:
+                raise FetchError(f"the link answered HTTP {resp.status}: check it opens the image in a browser")
+            ctype = (resp.getheader("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype in ("text/html", "application/xhtml+xml"):
+                raise FetchError(WEB_PAGE)
+            if not ctype.startswith("image/"):
+                raise FetchError(f"that link isn't an image (it's {ctype or 'untyped'}): paste the image's own link")
+            length = resp.getheader("Content-Length")
+            if length and length.isdigit() and int(length) > FETCH_MAX:
+                raise FetchError("that image is over 20 MB: use a smaller one")
+            dest = dest_dir / f"download{IMAGE_SUFFIX.get(ctype, '.img')}"
+            got = 0
+            with open(dest, "wb") as f:
+                while True:
+                    if time.monotonic() > deadline:
+                        raise FetchError("the image took more than 20 s to download: try another link")
+                    chunk = resp.read(1 << 16)
+                    if not chunk:
+                        break
+                    got += len(chunk)
+                    if got > FETCH_MAX:
+                        raise FetchError("that image is over 20 MB: use a smaller one")
+                    f.write(chunk)
+            if not got:
+                raise FetchError("the link returned an empty file")
+            return dest
+        except (OSError, http.client.HTTPException) as e:  # timeouts, the watchdog's abort, TLS, refused...
+            if isinstance(e, TimeoutError) or time.monotonic() > deadline:
+                raise FetchError("the image took more than 20 s to download: try another link") from None
+            if isinstance(e, ssl.SSLError):
+                raise FetchError(f"couldn't connect securely to {host} ({e.reason or e})") from None
+            raise FetchError(f"couldn't download from {host} ({type(e).__name__}): check the link") from None
+        finally:
+            watchdog.cancel()
+            conn.close()
+    raise FetchError(f"the link redirects more than {FETCH_REDIRECTS} times: paste the image's own link")
+
+
+class Busy(Exception):
+    pass
+
+
+class LibraryService:
+    """The library's one queue of nook-add jobs, its writes under <library>/.lock, and the daily spend cap."""
+
+    def __init__(self, lib_dir: Path, costs_file: Path, nook_add: list[str], cap_usd: float):
+        self.dir = lib_dir
+        self.costs_file = costs_file
+        self.nook_add = nook_add
+        self.cap = cap_usd
+        self.mutex = threading.Lock()        # jobs and reservations (in-process state)
+        self.write_lock = threading.Lock()   # this process's library writes, with the flock below for other processes
+        self.jobs: dict[str, dict] = {}
+        self.order: list[str] = []
+        self.private: dict[str, dict] = {}   # job id -> {cmd, cleanup}
+        self.reserved: dict[str, float] = {}
+        self.queue: queue.Queue = queue.Queue()
+        threading.Thread(target=self.worker, name="nook-library-jobs", daemon=True).start()
+
+    # --- lock and files -------------------------------------------------------------------------------------
+    @contextlib.contextmanager
+    def locked(self, wait: float | None = LOCK_WAIT):
+        """<library>/.lock (flock), the same lock nook-add holds for a whole run. Raises Busy after `wait` s
+        (None: wait as long as it takes, for writes that must not be lost, like a billed call's cost row)."""
+        deadline = time.monotonic() + (wait if wait is not None else 1e12)
+        if not self.write_lock.acquire(timeout=wait if wait is not None else -1):
+            raise Busy()
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            with open(self.dir / ".lock", "a+") as f:
+                while True:
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() > deadline:
+                            raise Busy() from None
+                        time.sleep(0.2)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+        finally:
+            self.write_lock.release()
+
+    def read(self) -> dict:
+        data = read_json_file(self.dir / "library.json")
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            return {"version": 1, "items": []}
+        return data
+
+    def write(self, data: dict) -> None:
+        """library.json, atomically, in nook-add's format. Call under locked()."""
+        text = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+        atomic_write_bytes(self.dir / "library.json", text.encode("utf-8"))
+
+    def item(self, item_id: str, data: dict | None = None) -> dict | None:
+        data = self.read() if data is None else data
+        return next((i for i in data["items"] if isinstance(i, dict) and i.get("id") == item_id), None)
+
+    def trash(self) -> list[dict]:
+        """[{id, name, deleted, dir}] of every trashed copy, newest first."""
+        out = []
+        root = self.dir / ".trash"
+        if root.is_dir():
+            for d in root.iterdir():
+                meta = read_json_file(d / "entry.json") if d.is_dir() else None
+                if isinstance(meta, dict) and isinstance(meta.get("entry"), dict):
+                    out.append({"id": meta["entry"].get("id"), "name": meta["entry"].get("name"),
+                                "deleted": meta.get("deleted"), "dir": d})
+        out.sort(key=lambda t: (str(t["deleted"]), t["dir"].name), reverse=True)
+        return out
+
+    # --- spend cap ------------------------------------------------------------------------------------------
+    def spent(self, day: str) -> float:
+        """Today's (UTC) total in costs.csv."""
+        total = 0.0
+        try:
+            with open(self.costs_file, newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    if (row.get("date") or "").startswith(day):
+                        try:
+                            total += float(row.get("cost_usd") or 0)
+                        except ValueError:
+                            pass
+        except OSError:
+            pass
+        return round(total, 6)
+
+    def spend(self) -> dict:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with self.mutex:
+            reserved = round(sum(self.reserved.values()), 6)
+        return {"day": day, "spent_usd": self.spent(day), "reserved_usd": reserved, "cap_usd": self.cap}
+
+    def reserve(self, key: str, amount: float) -> dict | None:
+        """Reserve `amount` against today's cap. None when it fits, else the 402 body. Atomic for this server."""
+        if amount <= 0:
+            return None
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with self.mutex:
+            spent = self.spent(day)
+            used = spent + sum(self.reserved.values())
+            if used + amount > self.cap + 1e-9:
+                return {"error": f"today's fal budget (${self.cap:.2f}) is used up: ${used:.2f} spent",
+                        "spent_usd": spent, "cap_usd": self.cap}
+            self.reserved[key] = amount
+        return None
+
+    def release(self, key: str) -> None:
+        with self.mutex:
+            self.reserved.pop(key, None)
+
+    # --- jobs -----------------------------------------------------------------------------------------------
+    def new_job(self, kind: str, item_id: str, engine: str, estimate: float, cmd: list[str], cleanup: Path | None,
+                reserve: float = 0.0, message: str = "waiting for the queue"):
+        """Queue a nook-add run. Returns (job, None), or (None, 402 body) when the cap refuses it."""
+        now = datetime.now(timezone.utc)
+        job_id = f"l-{now:%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
+        refused = self.reserve(job_id, reserve)
+        if refused:
+            return None, refused
+        job = {"id": job_id, "kind": kind, "item_id": item_id, "status": "queued", "engine": engine,
+               "cost_usd_estimate": estimate, "cost_usd": None, "mock": fal_mock(), "created": iso_utc(),
+               "started": None, "finished": None, "message": message, "item": None}
+        with self.mutex:
+            self.jobs[job_id] = job
+            self.order.append(job_id)
+            self.private[job_id] = {"cmd": cmd, "cleanup": cleanup}
+            snapshot = dict(job)
+        self.queue.put(job_id)
+        return snapshot, None
+
+    def list_jobs(self) -> list[dict]:
+        with self.mutex:
+            return [dict(self.jobs[j]) for j in reversed(self.order)]
+
+    def get_job(self, job_id: str) -> dict | None:
+        with self.mutex:
+            job = self.jobs.get(job_id)
+            return dict(job) if job else None
+
+    def update(self, job_id: str, **fields) -> None:
+        with self.mutex:
+            self.jobs[job_id].update(fields)
+
+    def worker(self) -> None:
+        while True:
+            job_id = self.queue.get()
+            try:
+                self.run(job_id)
+            except Exception as e:  # noqa: BLE001 - one bad job never stops the queue
+                self.update(job_id, status="failed", finished=iso_utc(), message=f"the server failed to run nook-add ({type(e).__name__}: {e})")
+            finally:
+                self.release(job_id)
+                with self.mutex:
+                    extra = self.private.pop(job_id, {})
+                if extra.get("cleanup"):
+                    shutil.rmtree(extra["cleanup"], ignore_errors=True)
+
+    def run(self, job_id: str) -> None:
+        with self.mutex:
+            cmd = self.private[job_id]["cmd"]
+            job = self.jobs[job_id]
+            kind, item_id = job["kind"], job["item_id"]
+        self.update(job_id, status="running", started=iso_utc(),
+                    message=f"refitting {item_id}" if kind == "rescale" else f"making {item_id} ({job['engine']})")
+        try:
+            proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=NOOK_ADD_TIMEOUT,
+                                  stdin=subprocess.DEVNULL)
+        except FileNotFoundError:
+            return self.update(job_id, status="failed", finished=iso_utc(),
+                               message=f"nook-add isn't installed here ({cmd[0]} not found): set --nook-add")
+        except subprocess.TimeoutExpired:
+            return self.update(job_id, status="failed", finished=iso_utc(),
+                               message=f"nook-add ran for more than {NOOK_ADD_TIMEOUT // 60} minutes and was stopped")
+        out_lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        if proc.returncode != 0:
+            err = [ln.strip() for ln in proc.stderr.splitlines() if ln.strip()]
+            mine = [ln for ln in err if ln.startswith("nook-add:")]
+            message = (mine or err or [f"nook-add exited with code {proc.returncode}"])[-1]
+            return self.update(job_id, status="failed", finished=iso_utc(), message=message)
+        try:
+            summary = json.loads(out_lines[-1])
+        except (IndexError, json.JSONDecodeError):
+            return self.update(job_id, status="failed", finished=iso_utc(),
+                               message="nook-add finished without its JSON summary line")
+        replaced = next((ln for ln in out_lines if "replaced existing item" in ln), None)
+        if kind == "rescale":
+            message = f"refit {item_id} ($0)"
+        elif replaced:
+            message = replaced.removeprefix("nook-add: ")
+        else:
+            message = f"added {item_id}"
+        self.update(job_id, status="done", finished=iso_utc(), message=message, item=self.item(item_id),
+                    cost_usd=summary.get("cost_usd", 0), mock=bool(summary.get("mock", fal_mock())))
+
+
 MIME = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -249,15 +762,21 @@ class Handler(SimpleHTTPRequestHandler):
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, **MIME, "": "application/octet-stream"}
 
     def __init__(self, *args, room_file: Path, layouts_dir: Path, renders_dir: Path, costs_file: Path,
-                 room_dir: Path | None = None, library_dir: Path | None = None, scan_api: str | None = None, **kwargs):
+                 room_dir: Path | None = None, library_dir: Path | None = None, scan_api: str | None = None,
+                 library: "LibraryService | None" = None, **kwargs):
         self.room_file = room_file
         self.room_dir = room_dir or (REPO / "room")  # where the rooms live (served as /room/)
         self.layouts_dir = layouts_dir
         self.renders_dir = renders_dir
         self.costs_file = costs_file
+        self.library_dir = library_dir or (REPO / "library")
+        if library is None:  # main() always passes one; this is for embedding the handler elsewhere
+            library = LibraryService(self.library_dir, costs_file, shlex.split(DEFAULT_NOOK_ADD), 2.0)
+        self.library = library
         # Writable data outside the code (on kakapo the code is in the read-only Nix store).
-        self.mounts = {"/room/": room_dir, "/library/": library_dir}
+        self.mounts = {"/room/": room_dir, "/library/": self.library_dir}
         self.scan_api = scan_api
+        self.body_done = False
         super().__init__(*args, directory=str(REPO), **kwargs)
 
     def translate_path(self, path):
@@ -268,6 +787,11 @@ class Handler(SimpleHTTPRequestHandler):
             if not name or "/" in name or "\\" in name or name.startswith("."):
                 return str(self.renders_dir / ".missing")
             return str(self.renders_dir / name)
+        if p.startswith("/library/"):
+            # Item assets and library.json only: never raw/, .trash/, .lock, costs.csv or a listing (§2.8).
+            rel = p[len("/library/"):]
+            if rel != "library.json" and not LIBRARY_ASSET.match(rel):
+                return str(self.library_dir / ".missing")
         for prefix, base in self.mounts.items():
             if base is not None and p.startswith(prefix):
                 parts = [x for x in p[len(prefix):].split("/") if x]
@@ -290,10 +814,12 @@ class Handler(SimpleHTTPRequestHandler):
         conn = http.client.HTTPConnection(target.hostname, target.port or 80, timeout=600)
         try:
             conn.putrequest(self.command, self.path, skip_accept_encoding=True)
-            for h in ("Content-Type", "Content-Length", "X-Nook-Name", "Accept"):
+            # X-Nook goes through (§5.1, the jobs server checks it too); Origin was checked here and stays here.
+            for h in ("Content-Type", "Content-Length", "X-Nook-Name", "X-Nook", "Accept"):
                 if self.headers.get(h) is not None:
                     conn.putheader(h, self.headers[h])
             conn.endheaders()
+            self.body_done = True
             left = int(length or 0)
             while left > 0:
                 chunk = self.rfile.read(min(left, 1 << 20))
@@ -319,12 +845,64 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
+        if urlsplit(self.path).path.startswith(("/library/", "/api/library")):
+            self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
+
+    def parse_request(self):
+        self.body_done = False  # one handler serves every request on a keep-alive connection
+        return super().parse_request()
+
+    def chunked(self) -> bool:
+        return "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
+
+    def discard_body(self) -> None:
+        """Read and drop an unread request body, so an early error reaches the client instead of a reset."""
+        if self.body_done or self.command in ("GET", "HEAD"):
+            return
+        self.body_done = True
+        try:
+            if self.chunked():
+                total = 0
+                while True:
+                    size = int(self.rfile.readline(1024).split(b";")[0].strip() or b"0", 16)
+                    if size == 0:
+                        while self.rfile.readline(1024) not in (b"\r\n", b"\n", b""):
+                            pass
+                        return
+                    total += size
+                    if total > MAX_DRAIN:
+                        break
+                    self.rfile.read(size + 2)
+                self.close_connection = True
+                return
+            left = int(self.headers.get("Content-Length") or 0)
+            if left > MAX_DRAIN:
+                self.close_connection = True
+                return
+            while left > 0:
+                chunk = self.rfile.read(min(left, 1 << 20))
+                if not chunk:
+                    break
+                left -= len(chunk)
+        except (ValueError, OSError):
+            self.close_connection = True
+
+    def forged(self) -> bool:
+        """§2.9: a mutation needs X-Nook: 1 and an Origin that's absent or this page's own. Answers 403 itself."""
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host") or ""
+        own = (f"http://{host}", f"https://{host}")
+        if self.headers.get("X-Nook") == "1" and (origin is None or (host and origin in own)):
+            return False
+        self.error_json(HTTPStatus.FORBIDDEN, FORGED)
+        return True
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s %s\n" % (self.log_date_time_string(), fmt % args))
 
     def send_json(self, status: int, data) -> None:
+        self.discard_body()
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -346,6 +924,7 @@ class Handler(SimpleHTTPRequestHandler):
         if length > MAX_BODY:
             raise ValueError("request body too large")
         raw = self.rfile.read(length)
+        self.body_done = True
         try:
             return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -380,6 +959,10 @@ class Handler(SimpleHTTPRequestHandler):
     do_HEAD = do_GET  # same routing; send_json and super().do_HEAD() skip the body
 
     def do_PUT(self):
+        if self.forged():
+            return
+        if self.is_scan():
+            return self.proxy_scan()
         api = self.api_path()
         if api is None:
             return self.error_json(HTTPStatus.METHOD_NOT_ALLOWED, "PUT is only supported under /api")
@@ -400,19 +983,53 @@ class Handler(SimpleHTTPRequestHandler):
             return self.error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
 
     def do_POST(self):
+        if self.forged():
+            return
         if self.is_scan():
             return self.proxy_scan()
         api = self.api_path()
-        if api == "/api/render":
-            try:
+        try:
+            if api == "/api/render":
                 return self.post_render()
-            except Exception as e:
-                return self.error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
-        return self.error_json(HTTPStatus.METHOD_NOT_ALLOWED, "use GET or PUT (POST only for /api/render)")
+            if api == "/api/library/items":
+                return self.post_library_upload()
+            if api == "/api/library/items/from-url":
+                return self.post_library_from_url()
+            m = re.fullmatch(r"/api/library/items/([^/]*)/restore", api or "")
+            if m:
+                return self.restore_library_item(m.group(1))
+        except Busy:
+            return self.library_busy()
+        except Exception as e:
+            return self.error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
+        return self.error_json(HTTPStatus.NOT_FOUND, f"no such endpoint: POST {api or urlsplit(self.path).path}")
 
-    def do_DELETE(self):
+    def do_PATCH(self):
+        if self.forged():
+            return
+        if self.is_scan():
+            return self.proxy_scan()
         api = self.api_path()
         try:
+            m = re.fullmatch(r"/api/library/items/([^/]*)", api or "")
+            if m:
+                return self.patch_library_item(m.group(1))
+        except Busy:
+            return self.library_busy()
+        except Exception as e:
+            return self.error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
+        return self.error_json(HTTPStatus.NOT_FOUND, f"no such endpoint: PATCH {api or urlsplit(self.path).path}")
+
+    def do_DELETE(self):
+        if self.forged():
+            return
+        if self.is_scan():
+            return self.proxy_scan()
+        api = self.api_path()
+        try:
+            m = re.fullmatch(r"/api/library/items/([^/]*)", api or "")
+            if m:
+                return self.delete_library_item(m.group(1))
             m = re.fullmatch(r"/api/rooms/([^/]*)", api or "")
             if m:
                 return self.delete_room(m.group(1))
@@ -421,9 +1038,11 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.delete_room_layout(m.group(1))
             if m:
                 return self.error_json(HTTPStatus.BAD_REQUEST, "only a room's layouts can be deleted: add ?room=<name>")
+        except Busy:
+            return self.library_busy()
         except Exception as e:
             return self.error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(e).__name__}: {e}")
-        return self.error_json(HTTPStatus.METHOD_NOT_ALLOWED, "use GET or PUT")
+        return self.error_json(HTTPStatus.NOT_FOUND, f"no such endpoint: DELETE {api or urlsplit(self.path).path}")
 
     # --- api -------------------------------------------------------------
     def handle_api_get(self, api: str):
@@ -436,6 +1055,17 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.list_renders()
             if api == "/api/rooms":
                 return self.list_rooms()
+            if api == "/api/library":
+                return self.get_library()
+            if api == "/api/library/jobs":
+                return self.send_json(HTTPStatus.OK, {"jobs": self.library.list_jobs()})
+            m = re.fullmatch(r"/api/library/jobs/([^/]*)", api)
+            if m:
+                job = self.library.get_job(m.group(1))
+                return self.send_json(HTTPStatus.OK, job) if job else self.error_json(
+                    HTTPStatus.NOT_FOUND, f"no library job {m.group(1)!r}: GET /api/library/jobs lists them")
+            if api == "/api/spend":
+                return self.send_json(HTTPStatus.OK, self.library.spend())
             m = re.fullmatch(r"/api/rooms/([^/]*)", api)
             if m:
                 return self.get_room_config(m.group(1))
@@ -561,7 +1191,25 @@ class Handler(SimpleHTTPRequestHandler):
             return self.error_json(HTTPStatus.NOT_FOUND, f"no room named {name!r} (room names are slugs: a-z, 0-9, -)")
         return self.error_json(HTTPStatus.NOT_FOUND, f"no room named {name!r}: GET /api/rooms lists the rooms in {self.room_dir}")
 
+    def room_captures(self) -> dict[str, str]:
+        """{room: kept capture} from the jobs API (§5.1 GET /api/scan/captures); {} without --scan-api or an answer."""
+        if not self.scan_api:
+            return {}
+        try:
+            with urllib.request.urlopen(self.scan_api.rstrip("/") + "/api/scan/captures", timeout=3) as res:
+                captures = json.loads(res.read().decode("utf-8")).get("captures") or []
+        except (OSError, ValueError, AttributeError):
+            return {}
+        out = {}
+        for c in captures:  # newest first: the newest capture wins a room listed twice
+            if isinstance(c, dict) and isinstance(c.get("name"), str):
+                for room in c.get("rooms") or []:
+                    if isinstance(room, str):
+                        out.setdefault(room, c["name"])
+        return out
+
     def list_rooms(self):
+        captures = self.room_captures()
         with rooms_lock:
             scans = list_scans(self.room_dir)
             current = self.current_room(scans)
@@ -570,12 +1218,17 @@ class Handler(SimpleHTTPRequestHandler):
                 config = self.room_config(name, scan, current)
                 st = scan.stat()
                 title = config.get("title")
+                parent = config.get("parent")
                 rooms.append({
                     "name": name, "title": title if isinstance(title, str) and title else None,
                     "splat": config["splat"], "created": iso_utc(st.st_mtime), "size_bytes": st.st_size,
                     "thumb_url": f"/room/{name}.jpg" if (self.room_dir / f"{name}.jpg").is_file() else None,
                     "aligned": bool(config.get("saved")), "layouts": len(self.room_layouts(name)),
-                    "current": name == current, "_mtime": st.st_mtime,
+                    "current": name == current,
+                    "roomplan_url": f"/room/{name}.roomplan.json" if (self.room_dir / f"{name}.roomplan.json").is_file() else None,
+                    "capture": captures.get(name),
+                    "parent": parent if isinstance(parent, str) and SLUG.match(parent) else None,
+                    "_mtime": st.st_mtime,
                 })
         rooms.sort(key=lambda r: (-r.pop("_mtime"), r["name"]))
         return self.send_json(HTTPStatus.OK, {"rooms": rooms, "current": current})
@@ -720,6 +1373,241 @@ class Handler(SimpleHTTPRequestHandler):
         path.unlink()
         return self.send_json(HTTPStatus.OK, {"ok": True, "name": name, "room": room})
 
+    # --- library (contract §2.8) ------------------------------------------------------------------
+    def library_busy(self):
+        return self.error_json(HTTPStatus.SERVICE_UNAVAILABLE,
+                               "the library is busy with another change (a nook-add run): try again in a minute")
+
+    def get_library(self):
+        data = self.library.read()
+        trash = [{k: t[k] for k in ("id", "name", "deleted")} for t in self.library.trash()]
+        return self.send_json(HTTPStatus.OK, dict(data, trash=trash))
+
+    def add_command(self, src: Path, meta: dict, label: str) -> list[str]:
+        cmd = [*self.library.nook_add, str(src), "--name", meta["name"], "--id", meta["id"],
+               "--dims", "x".join(num_text(meta["dims_cm"][k]) for k in "wdh"), "--engine", meta["engine"],
+               "--library", str(self.library_dir), "--source-input", label]
+        if meta["category"]:
+            cmd += ["--category", meta["category"]]
+        if meta["mount"]:
+            cmd += ["--mount", meta["mount"]]
+        if meta["yaw"]:
+            cmd += ["--yaw", str(meta["yaw"])]
+        if meta["engine"] == "sam3d" and meta["prompt"]:
+            cmd += ["--prompt", meta["prompt"]]
+        if meta["engine"] == "trellis2":
+            cmd += ["--resolution", str(meta["resolution"])]
+        return cmd
+
+    def queue_add(self, src: Path, tmp: Path, meta: dict, label: str, reserved_key: str | None = None):
+        """202 {job, cost_usd_estimate}, or 402 when the cap refuses it. The job owns (and removes) tmp."""
+        exists = self.library.item(meta["id"]) is not None
+        message = f"waiting for the queue; replaces the existing {meta['id']}" if exists else "waiting for the queue"
+        reserve = meta["estimate"] if counts_against_cap() else 0.0
+        if reserved_key:  # already reserved before the download: hand it over to the job
+            self.library.release(reserved_key)
+        job, refused = self.library.new_job("add", meta["id"], meta["engine"], meta["estimate"],
+                                            self.add_command(src, meta, label), tmp, reserve, message)
+        if refused:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return self.send_json(HTTPStatus.PAYMENT_REQUIRED, refused)
+        return self.send_json(HTTPStatus.ACCEPTED, {"job": job, "cost_usd_estimate": meta["estimate"]})
+
+    def post_library_upload(self):
+        kind = (self.headers.get("X-Nook-Kind") or "").strip().lower()
+        if kind not in ("model", "image"):
+            return self.error_json(HTTPStatus.BAD_REQUEST, "X-Nook-Kind must be model or image")
+        filename = PurePosixPath((self.headers.get("X-Nook-Filename") or "").replace("\\", "/")).name
+        if not filename:
+            return self.error_json(HTTPStatus.BAD_REQUEST, "X-Nook-Filename is required (the file's name, e.g. chair.glb)")
+        try:
+            meta = json.loads(base64.b64decode(self.headers.get("X-Nook-Meta") or "", validate=True).decode("utf-8"))
+        except (binascii.Error, ValueError, UnicodeDecodeError):
+            meta = None
+        if not isinstance(meta, dict):
+            return self.error_json(HTTPStatus.BAD_REQUEST, "X-Nook-Meta must be base64 of a JSON object with name and dims_cm")
+        ext = PurePosixPath(filename).suffix.lower()
+        if kind == "model":
+            if ext in (".usdz", ".usd", ".usda", ".usdc", ".reality"):
+                return self.error_json(HTTPStatus.BAD_REQUEST, f"{ext} isn't supported: convert to GLB first (e.g. Reality Converter or Blender)")
+            if ext == ".gltf":
+                return self.error_json(HTTPStatus.BAD_REQUEST, "a .gltf needs its side files: convert it to .glb first, or zip an .obj with its .mtl and textures")
+            if ext not in (".glb", ".zip"):
+                return self.error_json(HTTPStatus.BAD_REQUEST, "a model must be a .glb, or a .zip holding one .obj with its .mtl and textures")
+        elif ext not in IMAGE_EXTS:
+            return self.error_json(HTTPStatus.BAD_REQUEST, "a photo must be a JPEG, PNG, HEIC or WebP file")
+        try:
+            meta = check_meta(meta, kind)
+        except ValueError as e:
+            return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
+        length = self.headers.get("Content-Length")
+        if self.chunked() or length is None or not length.strip().isdigit():
+            self.close_connection = True
+            return self.error_json(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required: send the file as the request body")
+        length = int(length)
+        limit = MAX_MODEL if kind == "model" else MAX_IMAGE
+        if length > limit:
+            return self.error_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                                   f"that file is {length / 1e6:.0f} MB: {'models' if kind == 'model' else 'photos'} can be at most {limit // (1024 * 1024)} MB")
+        if length == 0:
+            return self.error_json(HTTPStatus.BAD_REQUEST, "the file is empty")
+        tmp = Path(tempfile.mkdtemp(prefix="nook-upload-"))  # private, never under a served path
+        try:
+            src = tmp / f"upload{ext}"
+            with open(src, "wb") as f:
+                left = length
+                while left > 0:
+                    chunk = self.rfile.read(min(left, 1 << 20))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    left -= len(chunk)
+            self.body_done = True
+            if left > 0:
+                raise ValueError("the upload stopped before the end: try again")
+            with open(src, "rb") as f:
+                head = f.read(16)
+            if kind == "image" and image_kind(head) is None:
+                raise ValueError("that file isn't a JPEG, PNG, HEIC or WebP image")
+            if ext == ".glb" and head[:4] != b"glTF":
+                raise ValueError("that file isn't a GLB (binary glTF): export it again as .glb")
+            if ext == ".zip":
+                problem = zip_problem(src)
+                if problem:
+                    raise ValueError(problem)
+        except ValueError as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        return self.queue_add(src, tmp, meta, filename)
+
+    def post_library_from_url(self):
+        try:
+            body = self.read_json_body()
+        except ValueError as e:
+            return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
+        url = body.get("image_url") if isinstance(body, dict) else None
+        if not isinstance(url, str) or not url.strip():
+            return self.error_json(HTTPStatus.BAD_REQUEST, 'the body must be JSON like {"image_url": "https://...", "name": ..., "dims_cm": {...}}')
+        url = url.strip()
+        try:
+            meta = check_meta({k: v for k, v in body.items() if k != "image_url"}, "image")
+        except ValueError as e:
+            return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
+        key = f"fetch-{secrets.token_hex(4)}"  # hold the estimate while downloading, so the cap is checked first
+        refused = self.library.reserve(key, meta["estimate"] if counts_against_cap() else 0.0)
+        if refused:
+            return self.send_json(HTTPStatus.PAYMENT_REQUIRED, refused)
+        tmp = Path(tempfile.mkdtemp(prefix="nook-fetch-"))
+        try:
+            src = fetch_image(url, tmp)
+            with open(src, "rb") as f:
+                if image_kind(f.read(16)) is None:
+                    raise FetchError("that link isn't a JPEG, PNG, HEIC or WebP image")
+        except FetchError as e:
+            self.library.release(key)
+            shutil.rmtree(tmp, ignore_errors=True)
+            return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
+        except BaseException:
+            self.library.release(key)
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        return self.queue_add(src, tmp, meta, url, reserved_key=key)
+
+    def patch_library_item(self, item_id: str):
+        try:
+            patch = self.read_json_body()
+        except ValueError as e:
+            return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
+        if not isinstance(patch, dict) or not patch:
+            return self.error_json(HTTPStatus.BAD_REQUEST, "the body must be a JSON object with any of name, category, mount, yaw, default_render, dims_cm")
+        unknown = sorted(set(patch) - {"name", "category", "mount", "yaw", "default_render", "dims_cm"})
+        if unknown:
+            return self.error_json(HTTPStatus.BAD_REQUEST, f"{', '.join(unknown)} can't be edited: use name, category, mount, yaw, default_render or dims_cm")
+        with self.library.locked():
+            data = self.library.read()
+            item = self.library.item(item_id, data) if SLUG.match(item_id) else None
+            if item is None:
+                return self.error_json(HTTPStatus.NOT_FOUND, f"no library item {item_id!r}: GET /api/library lists them")
+            try:
+                if "name" in patch and (not isinstance(patch["name"], str) or not patch["name"].strip()):
+                    raise ValueError("name must be non-empty text")
+                if "category" in patch and patch["category"] is not None and not isinstance(patch["category"], str):
+                    raise ValueError("category must be text or null")
+                if "mount" in patch and patch["mount"] not in ("floor", "wall"):
+                    raise ValueError("mount must be floor or wall")
+                if "default_render" in patch:
+                    if patch["default_render"] not in ("glb", "splat"):
+                        raise ValueError("default_render must be glb or splat")
+                    if not (item.get("assets") or {}).get(patch["default_render"]):
+                        raise ValueError(f"this item has no {patch['default_render']} asset, so it can't be its default render")
+                yaw = patch.get("yaw", 0) or 0
+                if isinstance(yaw, bool) or yaw not in (0, 90, 180, 270):
+                    raise ValueError("yaw must be 0, 90, 180 or 270 (degrees, relative to now)")
+                dims = check_dims(patch["dims_cm"]) if "dims_cm" in patch else None
+            except ValueError as e:
+                return self.error_json(HTTPStatus.BAD_REQUEST, str(e))
+            changed = False
+            for key in ("name", "category", "mount", "default_render"):
+                if key in patch:
+                    value = patch[key].strip() if isinstance(patch[key], str) else patch[key]
+                    changed |= item.get(key) != value
+                    item[key] = value
+            if changed:
+                self.library.write(data)
+        refit = int(yaw) != 0 or (dims is not None and {k: float(v) for k, v in dims.items()} !=
+                                  {k: float((item.get("dims_cm") or {}).get(k, 0)) for k in "wdh"})
+        if not refit:
+            return self.send_json(HTTPStatus.OK, item)
+        cmd = [*self.library.nook_add, "--rescale", item_id, "--library", str(self.library_dir)]
+        if dims is not None:
+            cmd += ["--dims", "x".join(num_text(dims[k]) for k in "wdh")]
+        if yaw:
+            cmd += ["--yaw", str(int(yaw))]
+        job, _ = self.library.new_job("rescale", item_id, "glb", 0.0, cmd, None)
+        return self.send_json(HTTPStatus.ACCEPTED, {"job": job})
+
+    def delete_library_item(self, item_id: str):
+        with self.library.locked():
+            data = self.library.read()
+            item = self.library.item(item_id, data) if SLUG.match(item_id) else None
+            if item is None:
+                return self.error_json(HTTPStatus.NOT_FOUND, f"no library item {item_id!r}: GET /api/library lists them")
+            base = f"{item_id}-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+            trash, n = self.library_dir / ".trash" / base, 1
+            while trash.exists():
+                n += 1
+                trash = self.library_dir / ".trash" / f"{base}-{n}"
+            trash.mkdir(parents=True)
+            folder = self.library_dir / item_id
+            if folder.is_dir():
+                shutil.move(str(folder), str(trash / item_id))
+            atomic_write_json(trash / "entry.json", {"deleted": iso_utc(), "entry": item})
+            data["items"] = [i for i in data["items"] if not (isinstance(i, dict) and i.get("id") == item_id)]
+            self.library.write(data)
+        return self.send_json(HTTPStatus.OK, {"ok": True, "trash": trash.relative_to(self.library_dir).as_posix()})
+
+    def restore_library_item(self, item_id: str):
+        if not SLUG.match(item_id):
+            return self.error_json(HTTPStatus.NOT_FOUND, f"no trashed item {item_id!r}")
+        with self.library.locked():
+            data = self.library.read()
+            if self.library.item(item_id, data) is not None or (self.library_dir / item_id).exists():
+                return self.error_json(HTTPStatus.CONFLICT, f"an item {item_id!r} exists again: remove it (or rename the new one) first")
+            copies = [t for t in self.library.trash() if t["id"] == item_id]
+            if not copies:
+                return self.error_json(HTTPStatus.NOT_FOUND, f"{item_id!r} isn't in the library's trash")
+            trash = copies[0]["dir"]
+            entry = read_json_file(trash / "entry.json")["entry"]
+            if (trash / item_id).is_dir():
+                shutil.move(str(trash / item_id), str(self.library_dir / item_id))
+            data["items"].append(entry)
+            self.library.write(data)
+            shutil.rmtree(trash, ignore_errors=True)
+        return self.send_json(HTTPStatus.OK, entry)
+
     # --- render this view ------------------------------------------------
     def list_renders(self):
         renders = []
@@ -780,11 +1668,23 @@ class Handler(SimpleHTTPRequestHandler):
         if not mock and not key:
             return self.error_json(HTTPStatus.SERVICE_UNAVAILABLE, NO_KEY)
 
+        price = spec["cost"](megapixels)
         now = datetime.now(timezone.utc)
         name = self.reserve_render_name(now)
-        cost = 0.0
+        refused = self.library.reserve(name, price if counts_against_cap() else 0.0)  # §2.9 spend cap
+        if refused:
+            with render_lock:
+                reserved_names.discard(name)
+            return self.send_json(HTTPStatus.PAYMENT_REQUIRED, refused)
+        try:
+            return self.render(body, data, model, prompt, view, layout, spec, size, price, mock, key, now, name)
+        finally:
+            self.library.release(name)
+
+    def render(self, body, data, model, prompt, view, layout, spec, size, price, mock, key, now, name):
+        cost = price if mock and mock_cost() else 0.0
         if mock:
-            result = data  # mock: the "render" is the input, $0, no network
+            result = data  # mock: the "render" is the input, $0 (or its real price with NOOK_FAL_MOCK_COST=1), no network
         else:
             data_uri = "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
             args = {spec["image_key"]: [data_uri] if spec["image_key"] == "image_urls" else data_uri,
@@ -794,8 +1694,9 @@ class Handler(SimpleHTTPRequestHandler):
             except FalError as e:
                 return self.error_json(HTTPStatus.BAD_GATEWAY, str(e))
             # fal has returned, so the call is billed: record it even if the download below fails.
-            cost = spec["cost"](megapixels)
-            append_cost(self.costs_file, now.strftime("%Y-%m-%dT%H:%M:%SZ"), name, f"render:{model}", cost, False, view or "")
+            cost = price
+            with self.library.locked(wait=None):
+                append_cost(self.costs_file, now.strftime("%Y-%m-%dT%H:%M:%SZ"), name, f"render:{model}", cost, False, view or "")
             images = out.get("images") if isinstance(out, dict) else None
             url = images[0].get("url") if isinstance(images, list) and images and isinstance(images[0], dict) else None
             if not url:
@@ -823,7 +1724,8 @@ class Handler(SimpleHTTPRequestHandler):
         atomic_write_bytes(self.renders_dir / f"{name}.jpg", result)
         atomic_write_json(self.renders_dir / f"{name}.json", meta)
         if mock:
-            append_cost(self.costs_file, now.strftime("%Y-%m-%dT%H:%M:%SZ"), name, f"render:{model}", 0.0, True, view or "")
+            with self.library.locked(wait=None):
+                append_cost(self.costs_file, now.strftime("%Y-%m-%dT%H:%M:%SZ"), name, f"render:{model}", cost, True, view or "")
         with render_lock:
             reserved_names.discard(name)  # the files now hold the name; after a failure it stays reserved
         return self.send_json(HTTPStatus.OK, meta)
@@ -845,13 +1747,22 @@ def main(argv=None):
     ap.add_argument("--layouts-dir", default="layouts")
     ap.add_argument("--renders-dir", default="renders")
     ap.add_argument("--costs-file", default="library/costs.csv")
+    ap.add_argument("--nook-add", default=DEFAULT_NOOK_ADD,
+                    help=f"the command that adds furniture, run with --library <library-dir> (default: {DEFAULT_NOOK_ADD})")
+    ap.add_argument("--daily-spend-usd", type=float, default=2.0,
+                    help="cap on paid fal calls (library adds and renders) per UTC day, in USD (default 2)")
     args = ap.parse_args(argv)
+    if args.daily_spend_usd < 0:
+        ap.error("--daily-spend-usd can't be negative")
 
     room_dir = resolve(args.room_dir) if args.room_dir else None
     room_file = resolve(args.room_file) if args.room_file else (room_dir or resolve("room")) / "room.json"
+    library_dir = resolve(args.library_dir or "library")
+    costs_file = resolve(args.costs_file)
+    library = LibraryService(library_dir, costs_file, shlex.split(args.nook_add), args.daily_spend_usd)
     handler = partial(Handler, room_file=room_file, layouts_dir=resolve(args.layouts_dir),
-                      renders_dir=resolve(args.renders_dir), costs_file=resolve(args.costs_file), room_dir=room_dir,
-                      library_dir=resolve(args.library_dir) if args.library_dir else None, scan_api=args.scan_api)
+                      renders_dir=resolve(args.renders_dir), costs_file=costs_file, room_dir=room_dir,
+                      library_dir=library_dir, scan_api=args.scan_api, library=library)
     ThreadingHTTPServer.allow_reuse_address = True
     httpd = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"nook planner: http://{args.host}:{args.port}/planner/  (serving {REPO})", flush=True)

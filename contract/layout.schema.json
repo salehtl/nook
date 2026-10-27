@@ -23,7 +23,8 @@
           "render": { "enum": ["glb", "splat"] },
           "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
           "rotation_y_deg": { "type": "number" },
-          "mounted": { "enum": ["floor", "wall"] }
+          "mounted": { "enum": ["floor", "wall"] },
+          "dims_cm": { "type": "object", "properties": { "w": { "type": "number" }, "d": { "type": "number" }, "h": { "type": "number" } } }
         }
       }
     },

@@ -4,6 +4,8 @@
 // plus Flip upside down) and Look (exposure, warmth, contact shadows, Relight; a sub-view on the phone). The "…" menu
 // holds Flip and Revert… (confirmed). The phone sheet opens at peek with just the Check room card.
 // Frames C4 (phone), C6 Room (desktop), B4 (the peek card). Pick modes: engine.startPickMode; the workspace draws them.
+// v4: Measured walls (the see-through RoomPlan shell, §2.7) when the room has one, and Retrain (§5.1: the sheet in
+// ui/retrain.js, which says "upload again" when kakapo doesn't have the capture).
 import * as THREE from 'three'
 import { quiet, round, wrapDeg } from '../../engine.js'
 import { pic, withIcon, numberControl, isOffline, OFFLINE_BODY } from './common.js'
@@ -22,7 +24,8 @@ function eulerOf(q) {
 const fmtM = (v) => (Number.isFinite(v) ? v.toFixed(2) : '–')
 const warmthWord = (w) => (Math.abs(w) < 0.005 ? 'Neutral' : `${w > 0 ? 'Warm' : 'Cool'} ${Math.abs(w).toFixed(2)}`)
 
-export function mount({ engine, data, shell, kit, icons }) {
+export function mount(ctx) {
+  const { engine, data, shell, kit, icons } = ctx
   const { h, button, toggle, slider } = kit
   let view = 'main'          // phone: 'main' | 'look' (the Look sub-view)
   let fineOpen = false
@@ -113,9 +116,14 @@ export function mount({ engine, data, shell, kit, icons }) {
   const saveBtn = button({ label: 'Save room', kind: 'primary', block: true, onClick: () => quiet(saveRoom()) })
   const card = h('section.p-card.rp-card', { 'aria-label': 'Check room' }, readouts, h('div.rp-tools', pickFloor, checkSize), failBox, saveBtn)
 
-  // --- rows: grid, Fine-tune, Look ------------------------------------------------------------------------------
+  // --- rows: grid, measured walls, Fine-tune, Look, Retrain ----------------------------------------------------------
   const grid = toggle({ label: '50 cm grid', hint: 'Floor lines, to see it\'s level', checked: engine.getGridVisible(), onChange: (on) => engine.setGridVisible(on) })
   grid.classList.add('rp-row')
+  const shellRow = toggle({ label: 'Measured walls', hint: 'See-through walls, doors and windows from RoomPlan. Tap a wall for its length.', checked: false, onChange: (on) => engine.setShell(on) })
+  shellRow.classList.add('rp-row')
+  const retrainHint = h('span.toggle-hint')
+  const retrainRow = h('button.rp-row.rp-disclose', { type: 'button', dataset: { nook: 'retrain' }, onclick: () => ctx.retrain?.open(engine.getRoomName()) },
+    h('span.toggle-text', h('span.toggle-label', 'Retrain this scan'), retrainHint), h('span.rp-chev', pic('chevron-right', { size: 18 })))
   const fineCount = h('span.rp-changed.tnum')
   const fineHint = h('span.toggle-hint.rp-fine-hint', 'Turn, tilt, shift, scale by numbers')
   const fineChevron = h('span.rp-chev')
@@ -194,10 +202,17 @@ export function mount({ engine, data, shell, kit, icons }) {
     if (view === 'look') {
       panel.body.replaceChildren(lookBody, lookSave)
     } else {
-      const parts = [card, grid, fineRow]
+      const parts = [card, grid]
+      if (engine.getShell().available) parts.push(shellRow)
+      parts.push(fineRow)
       if (fineOpen) parts.push(fineBody)
       parts.push(lookRow)
       if (!phone && lookOpen) parts.push(lookBody)
+      const can = ctx.retrain?.canRetrain(engine.getRoomName())
+      if (can) {
+        retrainHint.textContent = 'Train it again with settings scaled to this capture'
+        parts.push(retrainRow)
+      }
       panel.body.replaceChildren(...parts)
     }
     sync()
@@ -262,6 +277,7 @@ export function mount({ engine, data, shell, kit, icons }) {
     lookRow.setAttribute('aria-expanded', String(!shell.isPhone() && lookOpen))
     lookChevron.replaceChildren(pic(!shell.isPhone() && lookOpen ? 'chevron-down' : 'chevron-right', { size: 18 }))
     grid.input.checked = engine.getGridVisible()
+    shellRow.input.checked = engine.getShell().visible
     syncLook()
   }
 
@@ -279,7 +295,8 @@ export function mount({ engine, data, shell, kit, icons }) {
     sync()
     if (e.detail.phase === 'cancel' && pickFromPanel) { pickFromPanel = false; if (shell.isPhone() && !shell.getOpenPanel()) shell.openPanel('room', { detent: 'peek' }) }
   })
-  data.events.addEventListener('rooms', syncHead)
+  data.events.addEventListener('rooms', () => { syncHead(); if (panel.isOpen()) render() })
+  engine.events.addEventListener('shell', () => { if (panel.isOpen() && (engine.getShell().available !== !!shellRow.isConnected)) render(); else sync() })
   shell.events.addEventListener('mode', render)
   shell.events.addEventListener('panel', (e) => { if (e.detail.id === 'room') syncHead() })
   render()

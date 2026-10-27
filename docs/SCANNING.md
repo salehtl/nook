@@ -15,10 +15,11 @@ About 20 minutes. You need the iPhone (with LiDAR) with **Nook Scan** from TestF
 4. **Pass 3:** walk through the middle.
 5. The app tells you when each pass has covered enough of the room. A red "slow down" means frames are being skipped.
 6. **Done.**
+7. **Room shell** (phones with LiDAR): the app then measures the room's walls, floor, doors and windows with RoomPlan, in about a minute. From where you are, sweep the phone slowly across every wall, corner, door and window. **Skip** keeps the scan without it; turn it off in Settings › Measure the room shell.
 
 ## 3. Send to kakapo
 
-On the saved scan, tap **Send to kakapo**. The app uploads it (it keeps going in the background), kakapo trains it on its GPU (about 16 minutes), and the room appears in the planner by itself. **Open room** opens it (`https://nook.salehtl.com/planner/?room=<name>`). Every room you've scanned stays in **Rooms** (tap the room name at the top). Your phone needs the home Wi-Fi or Tailscale.
+On the saved scan, tap **Send to kakapo**. The app uploads it (it keeps going in the background), kakapo trains it on its GPU (the time depends on how many photos the scan has; the planner shows an estimate), and the room appears in the planner by itself. **Open room** opens it (`https://nook.salehtl.com/planner/?room=<name>`). Every room you've scanned stays in **Rooms** (tap the room name at the top). Your phone needs the home Wi-Fi or Tailscale.
 
 ## 4. Check the alignment
 

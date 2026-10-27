@@ -1,4 +1,4 @@
-"""Post-process a trained splat: crop floaters and transparent splats, estimate the floor."""
+"""Post-process a trained splat: crop floaters and transparent splats, prune to the delivery cap, estimate the floor."""
 
 import numpy as np
 from PIL import Image
@@ -78,6 +78,19 @@ def crop(path, seeds: np.ndarray, cams: np.ndarray, cap=None, frames: list[int] 
     if not keep.any():
         raise ScanError("every trained splat was outside the captured volume or transparent: the capture's poses are probably broken, scan again")
     return v[keep], stats
+
+
+def prune(v: np.ndarray, max_splats: int) -> np.ndarray:
+    """Keep the `max_splats` splats that contribute most, by opacity x volume (contract §4.9.1): the room the planner
+    and phones load. Faint specks go first; big opaque surfaces stay. The order of the kept splats is unchanged."""
+    if len(v) <= max_splats:
+        return v
+    with np.errstate(over="ignore"):
+        alpha = 1.0 / (1.0 + np.exp(-v["opacity"].astype(np.float64)))
+    log_volume = v["scale_0"].astype(np.float64) + v["scale_1"] + v["scale_2"]  # log scales: sum = log of the volume
+    score = np.log(np.maximum(alpha, 1e-12)) + log_volume                     # log(opacity x volume), no overflow
+    keep = np.argpartition(-score, max_splats - 1)[:max_splats]
+    return v[np.sort(keep)]
 
 
 def estimate_floor(seeds: np.ndarray, cams: np.ndarray) -> float | None:

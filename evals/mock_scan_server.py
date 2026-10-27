@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 import zipfile
+from pathlib import Path
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -29,6 +30,7 @@ SETTINGS = {  # §4.9.1: key -> (type, min, max)
 RN = re.compile(r"-r(\d+)$")
 queue: list[str] = []
 SECONDS = 6.0
+ROOM_DIR = None  # --room-dir: existing rooms count for -rN naming
 
 
 def now() -> str:
@@ -66,13 +68,16 @@ def check_settings(given: dict) -> str | None:
     return None
 
 
-def retrain_name(capture: str) -> tuple[str, str]:
+def retrain_name(capture: str) -> tuple[str | None, str]:
     """(parent, new name) for a retrain of this capture: §5.1 naming. Call with the lock held."""
     done = sorted((j for j in jobs.values() if j["capture"] == capture and j["status"] == "done"), key=lambda j: j["finished"])
-    parent = done[-1]["name"] if done else capture
-    base = RN.sub("", parent)
-    taken = [int(m.group(1)) for j in jobs.values() if j["status"] not in ("failed", "cancelled")
-             for m in [RN.search(j["name"])] if m and RN.sub("", j["name"]) == base]
+    upload = next((j for j in jobs.values() if j["kind"] == "upload" and j["capture"] == capture), None)
+    parent = done[-1]["name"] if done else None  # never trained: no parent, the base is the upload's room name
+    base = RN.sub("", parent or (upload["name"] if upload else capture))
+    names = [j["name"] for j in jobs.values() if j["status"] not in ("failed", "cancelled")]
+    if ROOM_DIR:  # rooms already on disk count too (§5.1)
+        names += [p.name.split(".")[0] for p in Path(ROOM_DIR).glob("*.spz")] + [p.name.split(".")[0] for p in Path(ROOM_DIR).glob("*.ply")]
+    taken = [int(m.group(1)) for n in names for m in [RN.search(n)] if m and RN.sub("", n) == base]
     suffix = f"-r{max(taken, default=0) + 1}"
     return parent, base[:64 - len(suffix)].rstrip("-") + suffix
 
@@ -250,13 +255,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global SECONDS
+    global SECONDS, ROOM_DIR
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8798)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--seconds", type=float, default=6.0)
+    ap.add_argument("--room-dir", help="the room dir the planner serves; rooms there count for retrain naming")
     a = ap.parse_args()
-    SECONDS = a.seconds
+    SECONDS, ROOM_DIR = a.seconds, a.room_dir
     threading.Thread(target=worker, daemon=True).start()
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print(f"mock nook-scan server on http://{a.host}:{a.port}", flush=True)

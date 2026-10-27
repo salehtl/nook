@@ -21,7 +21,7 @@
 //   confirm({ title, body, icon, danger, confirm: 'OK', cancel: 'Cancel' }) → Promise<boolean>
 //   confirm({ title, body, icon, actions: [{ label, value, kind: 'primary'|'secondary'|'danger'|'quiet', default, cancel }] }) → Promise<value>
 //     desktop: dialog (Enter = default action, Esc = cancel); phone: action sheet (cancel is the separate bottom button)
-//   menu(anchorEl, [{ label, icon, kbd, danger, disabled, onSelect } | '-'], { align: 'end'|'start' }) → { close() }
+//   menu(anchorEl, [{ label, icon, kbd, danger, disabled, nook (a data-nook test handle), onSelect } | '-'], { align: 'end'|'start' }) → { close() }
 //   Tooltips: any element with data-tip="Measure" (and data-kbd="M") shows the kit tooltip on desktop hover.
 // Keys: shell.addKeyFilter(fn) — fn(keydown) → true swallows it before engine input sees it. While a dialog, menu or
 // page is open, every key is swallowed (they handle their own).
@@ -438,7 +438,7 @@ export function createShell({ engine }) {
     const buttons = []
     const el = h('div.menu', { role: 'menu' }, items.map((it) => {
       if (it === '-' || it?.separator) return h('div.menu-sep', { role: 'separator' })
-      const b = h(`button.menu-item${it.danger ? '.is-danger' : ''}`, { type: 'button', role: 'menuitem', disabled: !!it.disabled,
+      const b = h(`button.menu-item${it.danger ? '.is-danger' : ''}`, { type: 'button', role: 'menuitem', disabled: !!it.disabled, dataset: it.nook ? { nook: it.nook } : null,
         onclick: () => { close(); it.onSelect?.() } }, it.icon ? icon(it.icon, { size: mode === 'phone' ? 20 : 15 }) : null, h('span.label', it.label), it.kbd ? kbd(it.kbd) : null)
       buttons.push(b)
       return b

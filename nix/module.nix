@@ -61,6 +61,20 @@ in
       default = null;
       description = "Cap on splats per room (VRAM); null keeps nook-scan's own default.";
     };
+    falKeyFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/run/secrets/nook-fal";
+      description = ''
+        An EnvironmentFile holding `FAL_KEY=...` for the web app's paid fal calls (library adds from photos and
+        Render). A path string, so the secret never lands in the Nix store. Null: those calls answer "FAL_KEY not set".
+      '';
+    };
+    dailySpendUsd = lib.mkOption {
+      type = lib.types.numbers.nonnegative;
+      default = 2;
+      description = "Cap on paid fal calls per UTC day, in USD (`nook-web --daily-spend-usd`, contract §2.9).";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -108,6 +122,9 @@ in
             "${dir}/room"
             "--quality"
             cfg.quality
+            # One GPU user at a time: evals/remote.sh takes the same lock (contract §5.1).
+            "--gpu-lock"
+            "/run/nook/gpu.lock"
           ]
           ++ lib.optionals (cfg.maxSplats != null) [
             "--max-splats"
@@ -117,6 +134,9 @@ in
         # Training runs as a child: stop it with the server.
         KillMode = "mixed";
         TimeoutStopSec = 30;
+        # /run/nook holds gpu.lock; group-writable so a user in the nook group (evals/remote.sh) can share it.
+        RuntimeDirectory = "nook";
+        RuntimeDirectoryMode = "0775";
       };
     };
 
@@ -128,7 +148,9 @@ in
         "nook-scan.service"
       ];
       environment.HOME = dir;
-      serviceConfig = hardening // {
+      serviceConfig = hardening // lib.optionalAttrs (cfg.falKeyFile != null) {
+        EnvironmentFile = cfg.falKeyFile;
+      } // {
         ExecStart = lib.escapeShellArgs [
           "${pkg}/bin/nook-web"
           "--host"
@@ -147,6 +169,8 @@ in
           "${dir}/library/costs.csv"
           "--scan-api"
           "http://127.0.0.1:${toString cfg.apiPort}"
+          "--daily-spend-usd"
+          (toString cfg.dailySpendUsd)
         ];
       };
     };

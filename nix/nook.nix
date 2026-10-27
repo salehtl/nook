@@ -1,11 +1,13 @@
 # nook's runtime: the web app (planner/serve.py) and nook-scan (trainer + jobs server), stdlib Python plus numpy,
 # pillow and jsonschema. Keeps the repo layout under share/nook so the code finds contract/ the way it does in git.
+# nook-web runs library jobs with the nook-add package (nix/nook-add.nix, contract §2.8).
 {
   lib,
   stdenvNoCC,
   python3,
   makeWrapper,
   nook-gsplat,
+  nook-add,
 }:
 let
   py = python3.withPackages (ps: [
@@ -16,7 +18,7 @@ let
 in
 stdenvNoCC.mkDerivation {
   pname = "nook";
-  version = "0.2.0";
+  version = "0.3.0";
 
   src = lib.fileset.toSource {
     root = ../.;
@@ -40,7 +42,7 @@ stdenvNoCC.mkDerivation {
       --set NOOK_VERSION 0.2.0 \
       --set-default NOOK_GSPLAT_BIN ${lib.getExe nook-gsplat}
     makeWrapper ${py}/bin/python3 $out/bin/nook-web \
-      --add-flags "$out/share/nook/planner/serve.py"
+      --add-flags "$out/share/nook/planner/serve.py --nook-add ${lib.getExe nook-add}"
     runHook postInstall
   '';
 

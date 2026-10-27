@@ -71,7 +71,7 @@ check('GET /api/room returns the room file', room0?.placeholder?.w === 3.5, fmt(
 const list0 = await (await fetch(`${BASE}/api/layouts`)).json()
 check('GET /api/layouts starts empty', Array.isArray(list0.layouts) && list0.layouts.length === 0, fmt(list0))
 check('GET /api/layouts/<missing> is 404', (await fetch(`${BASE}/api/layouts/nope`)).status === 404)
-const badPut = await fetch(`${BASE}/api/layouts/Bad%20Name`, { method: 'PUT', body: '{}', headers: { 'content-type': 'application/json' } })
+const badPut = await fetch(`${BASE}/api/layouts/Bad%20Name`, { method: 'PUT', body: '{}', headers: { 'content-type': 'application/json', 'X-Nook': '1' } })
 check('PUT /api/layouts/<non-slug> is 400', badPut.status === 400, `status ${badPut.status}`)
 const js = await fetch(`${BASE}/evals/planner_smoke.mjs`)
 check('static .mjs/.js served as JavaScript', /javascript/.test(js.headers.get('content-type') || ''), js.headers.get('content-type'))
@@ -116,7 +116,7 @@ check('getLibrary returns the fixture items', (await page.evaluate(() => window.
 await settle(page); await shot(page, '01-placeholder-empty')
 
 // P4: dims, floor, placement, rotation
-const chairUid = await page.evaluate(() => window.nook.addItem('sheen-chair', { position: [0.5, 0.3, -0.5], rotation_y_deg: 0 }))
+const chairUid = await page.evaluate(() => window.nook.addItem('sheen-chair', { position: [0.5, 0, -0.5], rotation_y_deg: 0 }))   // y is elevation since v4 (§2.10)
 s = await state(page)
 let it = s.items.find((i) => i.uid === chairUid)
 let sz = it && size(it.worldBounds)
@@ -170,7 +170,7 @@ if (meta && !meta.error) {
   check('P14 listRenders includes it', (await page.evaluate(() => window.nook.listRenders())).some((r) => r.name === meta.name))
 }
 check('P14 unknown render model rejects', await page.evaluate(() => window.nook.renderView({ model: 'nope' }).then(() => false, () => true)))
-const badRender = await fetch(`${BASE}/api/render`, { method: 'POST', body: JSON.stringify({ image: 'nope' }), headers: { 'content-type': 'application/json' } })
+const badRender = await fetch(`${BASE}/api/render`, { method: 'POST', body: JSON.stringify({ image: 'nope' }), headers: { 'content-type': 'application/json', 'X-Nook': '1' } })
 check('P14 POST /api/render with a bad image is 400', badRender.status === 400, `status ${badRender.status}`)
 
 // P6: layouts round-trip
@@ -220,7 +220,7 @@ await settle(page); await shot(page, '04-splat-room')
 
 // P8 (server side): a saved alignment is applied on reload
 const aligned = { version: 1, splat: 'fixtures/room/test.spz', transform: { position: [0.1, 0.5, -0.2], quaternion: [1, 0, 0, 0], scale: 1.5 }, look: { exposure: 1.5, warmth: -0.2 } }
-const put = await fetch(`${BASE}/api/room`, { method: 'PUT', body: JSON.stringify(aligned), headers: { 'content-type': 'application/json' } })
+const put = await fetch(`${BASE}/api/room`, { method: 'PUT', body: JSON.stringify(aligned), headers: { 'content-type': 'application/json', 'X-Nook': '1' } })
 check('PUT /api/room accepts a room config', put.ok, `status ${put.status}`)
 await page.reload()
 await page.waitForFunction(() => window.nook && window.nook.ready, null, { timeout: 30000 })
@@ -375,7 +375,7 @@ let r503 = null
 for (let i = 0; i < 50 && !r503; i++) {
   try {
     const tiny = 'data:image/jpeg;base64,' + fs.readFileSync(path.join(REPO, 'fixtures/fal/sam-3-3d-objects/input.jpg')).toString('base64')
-    r503 = await fetch(`http://127.0.0.1:${PORT + 1}/api/render`, { method: 'POST', body: JSON.stringify({ image: tiny }), headers: { 'content-type': 'application/json' } })
+    r503 = await fetch(`http://127.0.0.1:${PORT + 1}/api/render`, { method: 'POST', body: JSON.stringify({ image: tiny }), headers: { 'content-type': 'application/json', 'X-Nook': '1' } })
   } catch { await new Promise((r) => setTimeout(r, 200)) }
 }
 const body503 = r503 ? await r503.json().catch(() => ({})) : {}

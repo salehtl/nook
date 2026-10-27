@@ -255,7 +255,7 @@ saveRoom(): Promise<void>                    // Save room: PUT /api/rooms/<name>
   - `parent`: the room it was retrained from, or null
 - `<name>.room.json` gains `parent` (room.schema.json). A retrain writes it (§5).
 - The trainer copies a capture's `roomplan.json` / `roomplan.usdz` next to the scan as `<name>.roomplan.json` / `<name>.roomplan.usdz`. Deleting a room moves them to `.trash/` with the rest.
-- **The planner groups rooms by base name:** `<base>-r<N>` rooms are listed under `<base>` (newest first), with the base room itself as one of them. A group whose rooms all have `capture: null` shows "this capture isn't kept, upload again to retrain".
+- **The planner groups rooms by base name:** `<base>-r<N>` rooms are listed under `<base>` (newest first), with the base room itself as one of them. **Retrain** on a room whose `capture` is null explains "this capture isn't kept, upload again to retrain" (in the retrain sheet, not as a note on every room in the list).
 - **Measured shell (v4 scope):** with `roomplan_url`, the planner offers a see-through shell toggle (walls, floor, doors and windows drawn from `roomplan.json`, in the room's transform) and shows a wall's length when it's tapped. Auto-align and snapping are v4.1.
 
 **Hook additions (v4)**
@@ -279,7 +279,7 @@ Library writes go to the existing `--library-dir` (default the repo's `library/`
 | `POST /api/library/items` | **Raw body** (no multipart: `cgi` is gone from Python 3.13), `Content-Length` required. Headers: `X-Nook-Kind: model \| image`, `X-Nook-Filename: <name.ext>`, `X-Nook-Meta: <base64 of JSON meta>` | `202 {job, cost_usd_estimate}` |
 | `POST /api/library/items/from-url` | JSON `{image_url, ...meta}` | `202 {job, cost_usd_estimate}` |
 | `GET /api/library/jobs` | | `200 {"jobs": [job, ...]}`, newest first |
-| `GET /api/library/jobs/<id>` | | `200 {job}` or `404` |
+| `GET /api/library/jobs/<id>` | | `200` the job object itself (not wrapped), or `404` |
 | `PATCH /api/library/items/<id>` | JSON, any of `name`, `category`, `mount`, `yaw` (0/90/180/270, relative to now), `default_render` (`glb` \| `splat`, only if that asset exists), `dims_cm` | `200` the item, or `202 {job}` when `dims_cm` or `yaw` changed |
 | `DELETE /api/library/items/<id>` | | `200 {"ok": true}`: the item's entry and folder move to `library/.trash/<id>-<UTC stamp>/` |
 | `POST /api/library/items/<id>/restore` | | `200` the item (the newest trashed copy), `404` when none, `409` when an item with that id exists again |
@@ -306,9 +306,9 @@ When `done`, `item` is the library entry and `cost_usd` what was recorded. A fai
 
 **Editing:** `PATCH` changes `name`, `category` and `default_render` in place. A changed `dims_cm` or `yaw` runs `nook-add --rescale <id>` (§3.1) as a job: it refits the item's normalized assets, with no model call and $0.
 
-**Missing items:** a layout that places a deleted item still loads. The planner shows a "missing item" placeholder box at its dims (from the layout, or 50 cm cubed) and keeps it in the layout until removed. Restoring the item replaces the placeholder on reload.
+**Missing items:** a layout that places a deleted item still loads. Layout items carry the item's `dims_cm` (layout.schema.json, v4) so this works. The planner shows a "missing item" placeholder box at its dims (from the layout, or 50 cm cubed) and keeps it in the layout until removed. Restoring the item replaces the placeholder on reload.
 
-**One writer:** every write to the library (`nook-add`, PATCH, DELETE, restore) takes `<library>/.lock` (`flock`), so the server and a `nook-add` run by hand never interleave. `library.json` writes stay atomic.
+**One writer:** every write to the library (`nook-add`, PATCH, DELETE, restore) takes `<library>/.lock` (`flock`), so the server and a `nook-add` run by hand never interleave. PATCH, DELETE and restore wait up to 60 s for a running job, then answer `503 {"error": "library is busy: …"}`. Library jobs live in memory; a restart forgets them (the items they made stay). `library.json` writes stay atomic.
 
 **What `/library/` serves:** item assets only (`<id>/model.glb`, `splat.ply`, `thumb.jpg`, `source.<ext>`) and `library.json`. `raw/`, `.trash/`, `.lock` and `costs.csv` get `404`. Responses carry `X-Content-Type-Options: nosniff`.
 
@@ -338,7 +338,7 @@ These rules apply to every `POST`, `PUT`, `PATCH` and `DELETE` that `planner/ser
 **Spend cap:**
 - `serve.py --daily-spend-usd N` (default `2`). It's a server flag only; no route changes it.
 - It covers every paid call: library adds and `/api/render`.
-- Before a paid call, the server **reserves** the estimate against today's (UTC) total from `costs.csv`, atomically under the library lock. A request that would cross the cap gets `402 {"error": "today's fal budget ($2.00) is used up: $1.98 spent", "spent_usd", "cap_usd"}` and no call is made. A failed call releases its reservation; a successful one records the actual cost.
+- Before a paid call, the server **reserves** the estimate against today's (UTC) total from `costs.csv`, atomically within the server (one mutex; the library lock is held by `nook-add` for its whole run, so it can't be used here). A `nook-add` run by hand isn't reserved. A request that would cross the cap gets `402 {"error": "today's fal budget ($2.00) is used up: $1.98 spent", "spent_usd", "cap_usd"}` and no call is made. A failed call releases its reservation; a successful one records the actual cost.
 - `GET /api/spend` returns `{"day": "YYYY-MM-DD", "spent_usd", "reserved_usd", "cap_usd"}` so the page can show the remaining budget.
 - Mock calls cost $0 and count for nothing.
 
@@ -544,7 +544,7 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 - I2. The app launches in the simulator with no crash and shows the captures list. Replay mode can produce a capture that appears in the list and can be shared.
 - I3. Release basics:
   - bundle id `com.salehtl.nookscan`, team `8CFG28JHP3`, automatic signing
-  - version 0.2.0 (the build number is set at release)
+  - version 0.4.0 in v4 (the build number is set at release)
   - `NSCameraUsageDescription`, `ITSAppUsesNonExemptEncryption = NO`, `UIRequiredDeviceCapabilities` containing `arkit`
   - a 1024 px app icon
   - deployment target iOS 18.0
@@ -620,7 +620,7 @@ uv run --project scan nook-scan serve [--host 127.0.0.1] [--port 8095] [--data-d
 
 - `--data-dir` (default `~/.nook-scan`): uploads, job state (`jobs.json`), logs.
 - `--room-dir`: where trained rooms go (`<room-dir>/<name>.ply`, plus `room.json` updated as in §4.6). It's the folder the web app serves as `/room/`.
-- `--steps`, `--quality` and `--max-splats` are passed to every training run (evals use tiny step counts).
+- `--steps`, `--quality` and `--max-splats` are passed to every training run (evals use tiny step counts). v4: `--quality` applies to uploads only; a retrain always starts from the scaled `high` settings, so it matches `/defaults`, and its own `settings` win over `--steps` and `--max-splats`.
 
 All endpoints are under `/api/scan`, and everything is JSON except the upload body. Errors return `{"error": "<one actionable sentence>"}` with a 4xx/5xx status.
 
@@ -663,7 +663,7 @@ When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/
 ### 5.1 Captures and retraining (v4)
 
 **Keeping captures:**
-- When a job ends (`done`, `failed` or `cancelled`), its upload is **kept** as `<data-dir>/captures/<capture>.zip` instead of deleted. A restart doesn't delete it either.
+- An upload is **kept** as `<data-dir>/captures/<capture>.zip` from the moment it's accepted, whatever its job's outcome (`done`, `failed`, `cancelled`, or interrupted by a restart). Nothing deletes it but `DELETE /api/scan/captures/<name>`.
 - A job running at restart becomes `failed` with "server restarted during training: retrain from the planner".
 - Re-uploading a capture that's already kept: the upload dedupe (§5) applies only to jobs of `kind: "upload"`, as before. The kept zip is replaced by the new upload.
 
@@ -679,7 +679,7 @@ When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/
 **Jobs** gain `"kind": "upload" | "retrain"`, `"parent": "<room>" | null` (the room a retrain starts from) and `"settings"` (resolved when the job starts: what actually ran). `GET /api/scan/jobs` lists both kinds.
 
 **Naming a retrain:**
-- The parent is the newest room trained from that capture. Its base is its name with any `-r\d+` suffix removed.
+- The parent is the newest room trained from that capture. Its base is its name with any `-r\d+` suffix removed. When no room was ever trained from it (its upload failed or was cancelled), `parent` is null and the base is the upload job's room name.
 - The new room is `<base>-r<N>`, where N is 1 + the highest N among existing rooms and queued jobs with that base (so `scan-x` → `scan-x-r1`, then `scan-x-r2`; retraining `scan-x-r1` gives `scan-x-r3` if `-r2` exists).
 - The base is truncated so the name stays within the 64-character slug limit.
 - `title` (optional) becomes the new room's `title`, never its name, so it can't collide.
@@ -738,7 +738,7 @@ A measured shell of the room from Apple's RoomPlan, next to the splat, not in pl
 **Frame:**
 - `meta.roomplan`: `{"version": "<RoomPlan / iOS version>", "sessions": "shared" | "separate"}`.
 - `shared`: RoomPlan ran on the app's own ARKit session, so every transform is already in the `transforms.json` world.
-- `separate`: RoomPlan ran its own session. `roomplan.json` then carries `"world_from_roomplan"` (4×4, row-major), solved by the app from the floor plane and wall planes against the capture's LiDAR points. Readers apply it; `roomplan.json` is never assumed to be in the capture frame without it.
+- `separate`: RoomPlan ran its own session. `roomplan.json` then carries `"world_from_roomplan"` (4×4, row-major), solved by the app by matching RoomPlan's floor and walls to the capture's ARKit floor and vertical wall planes (gravity-aligned, so only yaw and a shift are solved). Readers apply it; `roomplan.json` is never assumed to be in the capture frame without it.
 - `world_from_roomplan` is required when `sessions` is `separate`, and absent when `shared`.
 
 **Validity** (added to §4.5): when `meta.roomplan` is present, `roomplan.json` exists and matches the schema; every matrix is finite with an orthonormal rotation; at least one wall and one floor.

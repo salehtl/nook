@@ -10,6 +10,7 @@ struct SettingsView: View {
     }
 
     @AppStorage(ServerSettings.key) private var serverText = ServerSettings.defaultURL
+    @AppStorage(RoomPlanSettings.key) private var roomPlanEnabled = true
     @Environment(\.dismiss) private var dismiss
     @State private var test = ConnectionTest.idle
 
@@ -44,6 +45,16 @@ struct SettingsView: View {
                 if serverText != ServerSettings.defaultURL {
                     Section {
                         Button("Use \(ServerSettings.defaultURL)") { serverText = ServerSettings.defaultURL }
+                    }
+                }
+                // RoomPlan needs LiDAR: phones without it never see the option (contract §4.12, I4).
+                if RoomPlanSettings.isSupported {
+                    Section {
+                        Toggle("Measure the room shell", isOn: $roomPlanEnabled)
+                    } header: {
+                        Text("Scanning")
+                    } footer: {
+                        Text("After the photo passes, RoomPlan measures the walls, floor, doors and windows in about a minute. The planner shows them as a see-through shell. Skip it any time; the scan is kept either way.")
                     }
                 }
                 Section {

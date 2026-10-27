@@ -13,7 +13,7 @@ settings:
   base:
     DEVELOPMENT_TEAM: 8CFG28JHP3
     CODE_SIGN_STYLE: Automatic
-    MARKETING_VERSION: 0.3.0
+    MARKETING_VERSION: 0.4.0
     CURRENT_PROJECT_VERSION: 1
     IPHONEOS_DEPLOYMENT_TARGET: "18.0"
     SWIFT_VERSION: "5.0"
@@ -72,6 +72,13 @@ targets:
       - path: NookScanTests
       - path: ../fixtures/capture-small
         type: folder
+        buildPhase: resources
+      # The RoomPlan fixtures (contract §4.12): the replay test writes a v1.3 capture from roomplan-separate.json.
+      - path: ../fixtures/roomplan
+        type: folder
+        buildPhase: resources
+      # The onboarding tests check the guides' text against the scanning guide.
+      - path: ../docs/SCANNING.md
         buildPhase: resources
     dependencies:
       - target: NookScan

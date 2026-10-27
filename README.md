@@ -3,12 +3,12 @@
 Private sandbox for planning a home reading room: a Gaussian-splat scan of the room, furniture generated from photos at real-world size, and a browser planner to place it, compare layouts, and sit in the reading chair (virtually).
 
 The parts:
-- **Nook Scan** (`ios/`): iPhone app that captures the room with ARKit and sends it to kakapo.
-- **nook-scan** (`scan/`, `gsplat/`, `poses/`): checks a capture, trains it into a splat with gsplat on kakapo's GPU, and runs the jobs server the app uploads to.
-- **Planner** (`planner/`): browser app that browses every scanned room (each with its own alignment and layouts) and works on the phone as well as the desktop.
-- **nook-add** (`pipeline/`): furniture from a photo, product page or GLB, at real-world size.
+- **Nook Scan** (`ios/`): iPhone app that captures the room with ARKit, measures its walls with RoomPlan (LiDAR phones), and sends it to kakapo. A How to scan guide is built in.
+- **nook-scan** (`scan/`, `gsplat/`, `poses/`): checks a capture, trains it into a splat with gsplat on kakapo's GPU (settings scaled to the capture), and runs the jobs server the app uploads to. Captures are kept, so any room can be retrained from the planner.
+- **Planner** (`planner/`): browser app that browses every scanned room (each with its own alignment and layouts) and works on the phone as well as the desktop. Pieces can be raised and hung on walls; the measured shell shows wall lengths; furniture is added, edited and removed from the Library panel; rooms are retrained from the Retrain sheet.
+- **nook-add** (`pipeline/`): furniture from a photo, image link, GLB or zipped OBJ, at real-world size. The planner runs it for you; the server caps fal spend per day (`--daily-spend-usd`, default $2).
 
-- Plan and history: [PLAN.md](PLAN.md) (v1), then [docs/plans/](docs/plans/) (nook-scan v1–v3, planner v2)
+- Plan and history: [PLAN.md](PLAN.md) (v1), then [docs/plans/](docs/plans/) (nook-scan v1–v3, planner v2, nook v4)
 - Spec shared by the planner and the pipeline: [contract/CONTRACT.md](contract/CONTRACT.md)
 - Scanning the room: [docs/SCANNING.md](docs/SCANNING.md)
 - Engine comparison: [evals/golden/RESULTS.md](evals/golden/RESULTS.md)
@@ -31,7 +31,7 @@ Add furniture (or just ask Claude: the `add-furniture` skill knows the steps):
 uv run --project pipeline nook-add photo.jpg --name "Reading chair" --dims 76x89x94 --prompt armchair
 ```
 
-`sam3d` ($0.02) is the default engine. `--engine trellis2` ($0.25) is for a second opinion, and `--engine glb model.glb` (free) is for retailer 3D models. `FAL_KEY` goes in `.env`.
+`sam3d` ($0.02) is the default engine. `--engine trellis2` ($0.25) is for a second opinion, and `--engine glb model.glb` (free) is for retailer 3D models (or a `.zip` of an `.obj` with its `.mtl` and textures). `--mount wall` marks paintings and shelves; `--rescale <id> --dims WxDxH` refits an item for free. `FAL_KEY` goes in `.env`.
 
 ## Hosted copy (Cloudflare Pages)
 
@@ -49,4 +49,4 @@ Adding furniture still happens locally (the pipeline is Python). Publish afterwa
 
 ## Evals
 
-`npm run eval:planner` · `eval:rooms` · `eval:rooms-ui` · `eval:pipeline` · `eval:server` · `eval:ios` · `eval:scan` and `eval:quality` (train on kakapo) · `node evals/library_in_planner.mjs [library.json]`. See [evals/README.md](evals/README.md) for what each checks.
+`npm run eval:planner` · `eval:planner-v4` · `eval:rooms` · `eval:rooms-ui` · `eval:library` · `eval:pipeline` · `eval:server` · `eval:ios` · `eval:scan` and `eval:quality` (train on kakapo) · `node evals/library_in_planner.mjs [library.json]`. See [evals/README.md](evals/README.md) for what each checks.

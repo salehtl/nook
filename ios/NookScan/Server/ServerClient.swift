@@ -125,8 +125,12 @@ struct ServerClient {
         r.httpMethod = "POST"
         r.setValue("application/zip", forHTTPHeaderField: "Content-Type")
         r.setValue("application/json", forHTTPHeaderField: "Accept")
+        r.setValue("1", forHTTPHeaderField: Self.mutationHeader)
         return r
     }
+
+    /// Every mutating request carries `X-Nook: 1` (contract §2.9); servers refuse one without it with 403.
+    static let mutationHeader = "X-Nook"
 
     /// A site path from the server (e.g. `result.room_url` "/planner/") as a full URL on the same origin.
     func siteURL(_ path: String) -> URL? {
@@ -150,6 +154,8 @@ struct ServerClient {
     func cancel(_ id: String) async throws(ServerError) -> ScanJob {
         var r = URLRequest(url: endpoint("jobs/\(id)/cancel"), timeoutInterval: 15)
         r.httpMethod = "POST"
+        r.setValue("application/json", forHTTPHeaderField: "Accept")
+        r.setValue("1", forHTTPHeaderField: Self.mutationHeader)
         return try await send(r)
     }
 

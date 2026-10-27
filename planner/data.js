@@ -24,9 +24,16 @@
 // Events (data.events; e.detail)
 //   'rooms' { rooms }   'scans' { scans }   'offline' { offline, asOf }
 //   'scan-ready' { job, room }   a scan finished while this page was open
+//   retrainDefaults(name)   GET /api/scan/captures/<capture>/defaults for a room's kept capture (§5.1) → { n_train, settings, eta_s }
+//   retrainRoom(name, settings?, title?)   POST …/retrain → the queued job (shown with the scans); rejects with the
+//                           "upload again" message when the room's capture isn't kept
+// Every POST/PUT/PATCH/DELETE carries X-Nook: 1 (§2.9).
 // Helpers: friendlyDate(iso|Date), relDate(iso|Date) ("Today, 09:36"), clock(iso|Date) ("09:36"), scanDate(name),
-//   roomTitle(room), statusWord(job), fmtBytes(n), fmtSplats(n), fmtMinutes(seconds), fmtEta(seconds)
+//   roomTitle(room), statusWord(job), fmtBytes(n), fmtSplats(n), fmtMinutes(seconds), fmtEta(seconds),
+//   baseName(name) (a retrain's <base> without its -rN), version(name) (N, 0 for the base), groupRooms(rooms)
 // The list follows the engine: a saved room, a new thumbnail or a saved layout refresh it.
+//
+// createLibrary({ engine }) → lib: the library manager's store (§2.8), see below.
 const ROOMS_KEY = 'nook.rooms.cache'
 const DISMISSED_KEY = 'nook.scans.dismissed'
 const FAST = 5000, SLOW = 60000, OFFLINE = 30000
@@ -34,6 +41,32 @@ const store = {
   get: (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null') } catch { return null } },
   set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch { /* private mode */ } },
 }
+// §2.9: mutations carry X-Nook: 1.
+const withNook = (opts = {}) => (/^(POST|PUT|PATCH|DELETE)$/i.test(opts.method || 'GET') ? { ...opts, headers: { ...(opts.headers || {}), 'X-Nook': '1' } } : opts)
+async function fetchJson(url, opts) {
+  let res
+  try { res = await fetch(url, withNook(opts)) } catch (e) { const err = new Error(`could not reach ${url} (${e.message})`); err.offline = true; throw err }
+  let body = null
+  try { body = await res.json() } catch { /* not JSON */ }
+  if (!res.ok) { const err = new Error(body?.error || `${url} returned HTTP ${res.status}`); err.status = res.status; err.body = body; throw err }
+  return body
+}
+
+// Retrains (§5.1): <base>-r<N> rooms belong to <base>.
+const RN = /-r(\d+)$/
+export const baseName = (name) => String(name || '').replace(RN, '')
+export const version = (name) => { const m = RN.exec(name || ''); return m ? Number(m[1]) : 0 }
+// [{ base, rooms (newest first), newest, kept (some room's capture is kept) }], in the order of each group's newest room
+export function groupRooms(rooms) {
+  const groups = new Map()
+  for (const r of rooms) {
+    const b = baseName(r.name)
+    if (!groups.has(b)) groups.set(b, { base: b, rooms: [] })
+    groups.get(b).rooms.push(r)
+  }
+  return [...groups.values()].map((g) => ({ ...g, newest: g.rooms[0], kept: g.rooms.some((r) => r.capture) }))
+}
+export const NOT_KEPT = "This capture isn't kept, upload again to retrain"
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -85,14 +118,7 @@ export function createData({ engine = null } = {}) {
   const pendingReady = new Map() // job id → job that turned done; announced once its room is listed
   let timer = null, running = false, inflight = null, timerMs = 0
 
-  async function getJson(url, opts) {
-    let res
-    try { res = await fetch(url, opts) } catch (e) { const err = new Error(`could not reach ${url} (${e.message})`); err.offline = true; throw err }
-    let body = null
-    try { body = await res.json() } catch { /* not JSON */ }
-    if (!res.ok) { const err = new Error(body?.error || `${url} returned HTTP ${res.status}`); err.status = res.status; throw err }
-    return body
-  }
+  const getJson = fetchJson
 
   function merge() {
     const byName = new Map()
@@ -112,7 +138,11 @@ export function createData({ engine = null } = {}) {
     emit('scans', { scans: scans.slice() })
   }
 
-  function decorate(j) { return { ...j, title: friendlyDate(scanDate(j.name) || j.created) || j.name, word: statusWord(j) } }
+  function decorate(j) {
+    const when = friendlyDate(scanDate(j.name) || j.created) || j.name
+    const v = j.kind === 'retrain' ? version(j.name) : 0
+    return { ...j, title: v ? (j.title || `${when} · retrain ${v}`) : when, word: statusWord(j) }
+  }
 
   function setOffline(offline) {
     if (offline === state.offline) return
@@ -245,6 +275,42 @@ export function createData({ engine = null } = {}) {
   }
   const quietRefresh = () => { refresh().catch(() => {}) }
 
+  // --- retrain (§5.1) ------------------------------------------------------------------------------------------
+  // The room as the server lists it (the engine's last GET /api/rooms is fresher than ours right after a load).
+  async function roomEntry(name) {
+    let r = engine?.getRoomsList?.().find((x) => x.name === name) || rawRooms.find((x) => x.name === name)
+    if (!r || !('capture' in r)) { await refresh().catch(() => {}); r = rawRooms.find((x) => x.name === name) || r }
+    return r || null
+  }
+  async function keptCapture(name) {
+    const r = await roomEntry(name)
+    if (!r) throw report(`Can't retrain "${name}"`, new Error("it isn't a room on kakapo"))
+    if (!r.capture) throw report(`${NOT_KEPT}: open Nook Scan, find the scan under Recent and send it again`)
+    return r.capture
+  }
+  async function retrainDefaults(name) {
+    const cap = await keptCapture(name)
+    try { return await getJson(`/api/scan/captures/${encodeURIComponent(cap)}/defaults`) } catch (e) {
+      throw report(e.status === 404 ? `${NOT_KEPT}: kakapo no longer has it` : e.offline ? "Can't get the retrain settings: kakapo isn't answering" : "Can't get the retrain settings", e)
+    }
+  }
+  async function retrainRoom(name, settings, title) {
+    const cap = await keptCapture(name)
+    const body = {}
+    if (settings && typeof settings === 'object' && Object.keys(settings).length) body.settings = settings
+    if (typeof title === 'string' && title.trim()) body.title = title.trim().slice(0, 120)
+    let res
+    try {
+      res = await getJson(`/api/scan/captures/${encodeURIComponent(cap)}/retrain`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    } catch (e) {
+      throw report(e.status === 404 ? `${NOT_KEPT}: kakapo no longer has it` : e.status === 400 ? 'Not retrained' : e.offline ? "Not retrained: kakapo isn't answering" : 'Could not start the retrain', e)
+    }
+    const job = res?.job && typeof res.job === 'object' ? res.job : res
+    if (job?.id) { jobs = [job, ...jobs.filter((j) => j.id !== job.id)]; seen.set(job.id, job.status); merge() }
+    quietRefresh()
+    return job
+  }
+
   // Follow the engine: thumbnails, Save room (aligned) and saved layouts change what the list shows.
   if (engine?.events) {
     engine.events.addEventListener('thumb', (e) => {
@@ -274,5 +340,158 @@ export function createData({ engine = null } = {}) {
     trash,
     cancelScan,
     dismissScan,
+    retrainDefaults,
+    retrainRoom,
+  }
+}
+
+// --- the library manager's store (§2.8, §2.9) -------------------------------------------------------------------
+// createLibrary({ engine }) → lib
+//   start()                   ask GET /api/library once (is there a library API?), then the jobs and today's spend
+//   getState()                { api: true|false|null, jobs (newest first), trash [{id, name, deleted}], spend {day, spent_usd, reserved_usd, cap_usd} | null }
+//   jobs() → Promise<[job]>   GET /api/library/jobs (and polls every 1.5 s while one is queued or running)
+//   addFromFile(file, meta)   POST /api/library/items (raw body; X-Nook-Kind model|image from the file name) → job
+//   addFromUrl(url, meta)     POST /api/library/items/from-url → job
+//   edit(id, patch)           PATCH → the item, or a rescale job (dims_cm, yaw)
+//   remove(id) / restore(id)  DELETE → move to the library's trash / POST …/restore → the item
+//   spend() → Promise<spend>  GET /api/spend
+//   estimate(meta, kind)      the price an add will reserve ($0 for a model)
+// Events (lib.events): 'jobs' { jobs }   'job-done' { job }   'job-failed' { job }   'spend' { spend }   'trash' { trash }
+// Actions reject with a reported error; a library change reloads the engine's library.
+export const LIB_PRICE = { glb: 0, sam3d: 0.02, trellis2: { 512: 0.25, 1024: 0.3, 1536: 0.35 } }
+export const MODEL_EXT = /\.(glb|zip|gltf|usdz|obj|fbx)$/i
+export function estimateCost(meta = {}, kind = 'image') {
+  if (kind === 'model') return 0
+  const p = LIB_PRICE[meta.engine || 'sam3d']
+  return typeof p === 'object' ? (p[Number(meta.resolution) || 512] ?? p[512]) : p ?? 0
+}
+const b64json = (o) => { const bytes = new TextEncoder().encode(JSON.stringify(o)); let s = ''; for (const b of bytes) s += String.fromCharCode(b); return btoa(s) }
+
+export function createLibrary({ engine = null } = {}) {
+  const events = new EventTarget()
+  const emit = (name, detail) => events.dispatchEvent(new CustomEvent(name, { detail }))
+  const report = (msg, e) => (engine ? engine.reportError(msg, e) : new Error(`${msg}: ${e?.message || e}`))
+  const custom = typeof location !== 'undefined' && new URLSearchParams(location.search).has('library')
+  const state = { api: custom ? false : null, jobs: [], trash: [], spend: null }
+  const status = new Map() // job id → last status seen
+  let timer = null
+
+  const reload = () => engine?.reloadLibrary?.()
+  function setJobs(list) {
+    const next = Array.isArray(list) ? list : []
+    for (const j of next) {
+      const before = status.get(j.id)
+      if (before && before !== j.status) {
+        if (j.status === 'done') { quiet(reload()); emit('job-done', { job: j }); quiet(spend()) }
+        if (j.status === 'failed') { emit('job-failed', { job: j }); quiet(spend()) }
+      }
+      status.set(j.id, j.status)
+    }
+    state.jobs = next
+    emit('jobs', { jobs: next.slice() })
+    schedule()
+  }
+  function track(job) {
+    if (!job?.id) return job
+    if (!status.has(job.id)) status.set(job.id, job.status)
+    state.jobs = [job, ...state.jobs.filter((j) => j.id !== job.id)]
+    emit('jobs', { jobs: state.jobs.slice() })
+    schedule()
+    return job
+  }
+  const busy = () => state.jobs.some((j) => j.status === 'queued' || j.status === 'running')
+  function schedule() {
+    clearTimeout(timer)
+    if (busy()) timer = setTimeout(() => { quiet(jobs()) }, 1500)
+  }
+  const quiet = (p) => { Promise.resolve(p).catch(() => {}) }
+
+  async function jobs() {
+    let body
+    try { body = await fetchJson('/api/library/jobs') } catch (e) { schedule(); throw report('Could not list the library jobs', e) }
+    setJobs(body?.jobs)
+    return state.jobs.slice()
+  }
+  async function spend() {
+    let body
+    try { body = await fetchJson('/api/spend') } catch (e) { throw report("Could not read today's spend", e) }
+    state.spend = body
+    emit('spend', { spend: body })
+    return body
+  }
+  async function refreshTrash() {
+    try {
+      const body = await fetchJson('/api/library')
+      state.api = true
+      state.trash = Array.isArray(body?.trash) ? body.trash : []
+      emit('trash', { trash: state.trash.slice() })
+    } catch (e) {
+      if (e.status === 404 || e.status === 405 || e.status === 501) state.api = false
+      emit('trash', { trash: state.trash.slice() })
+    }
+  }
+  async function start() {
+    if (custom) return
+    await refreshTrash()
+    if (state.api) await Promise.allSettled([jobs(), spend()])
+  }
+
+  const jobOf = (body) => {
+    const job = body?.job && typeof body.job === 'object' ? { ...body.job } : body
+    if (job && body?.cost_usd_estimate != null && job.cost_usd_estimate == null) job.cost_usd_estimate = body.cost_usd_estimate
+    return job
+  }
+  const addError = (e) => (e.status === 402 ? "Not added: today's fal budget is used up" : e.status === 413 ? 'Not added: the file is too big'
+    : e.status === 400 ? 'Not added' : e.offline ? "Not added: kakapo isn't answering" : 'Could not add the piece')
+  async function addFromFile(file, meta = {}) {
+    if (!(file instanceof Blob)) throw report('addItemFromFile needs a File')
+    const name = file.name || 'upload'
+    const kind = MODEL_EXT.test(name) ? 'model' : 'image'
+    let body
+    try {
+      body = await fetchJson('/api/library/items', {
+        method: 'POST', body: file,
+        headers: { 'content-type': file.type || 'application/octet-stream', 'X-Nook-Kind': kind, 'X-Nook-Filename': name.replace(/[^\x20-\x7e]/g, '_'), 'X-Nook-Meta': b64json(meta) },
+      })
+    } catch (e) { quiet(spend()); throw report(addError(e), e) }
+    quiet(spend())
+    return track(jobOf(body))
+  }
+  async function addFromUrl(url, meta = {}) {
+    let body
+    try {
+      body = await fetchJson('/api/library/items/from-url', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...meta, image_url: url }) })
+    } catch (e) { quiet(spend()); throw report(addError(e), e) }
+    quiet(spend())
+    return track(jobOf(body))
+  }
+  async function edit(id, patch = {}) {
+    let body
+    try {
+      body = await fetchJson(`/api/library/items/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) })
+    } catch (e) { throw report(e.offline ? "Not changed: kakapo isn't answering" : `Could not change "${id}"`, e) }
+    if (body?.job) return track(jobOf(body))
+    await reload()
+    return body
+  }
+  async function remove(id) {
+    try { await fetchJson(`/api/library/items/${encodeURIComponent(id)}`, { method: 'DELETE' }) } catch (e) {
+      throw report(e.offline ? "Not removed: kakapo isn't answering" : `Could not remove "${id}" from the library`, e)
+    }
+    await Promise.allSettled([reload(), refreshTrash()])
+  }
+  async function restore(id) {
+    let item
+    try { item = await fetchJson(`/api/library/items/${encodeURIComponent(id)}/restore`, { method: 'POST' }) } catch (e) {
+      throw report(e.status === 409 ? `"${id}" is in the library again: remove that one first` : e.status === 404 ? `"${id}" isn't in the library's trash` : `Could not restore "${id}"`, e)
+    }
+    await Promise.allSettled([reload(), refreshTrash()])
+    return item
+  }
+
+  return {
+    events, start, jobs, spend, addFromFile, addFromUrl, edit, remove, restore, estimate: estimateCost,
+    getState: () => ({ ...state, jobs: state.jobs.slice(), trash: state.trash.slice() }),
+    refreshTrash,
   }
 }

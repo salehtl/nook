@@ -1,11 +1,14 @@
 // The Rooms list (Paper A1 phone / A4 desktop table): "Scans on kakapo", then rooms by month, newest first; the
 // open room marked "Open now"; one "…" slot per row. Empty (A3/A5), loading skeleton (A3), offline (A3/A5).
+// v4 (§2.7): retrained <base>-rN rooms are listed under their <base>, newest first, the base room among them. (Retrain on
+// a room whose capture isn't kept says "upload again" in the retrain sheet, ui/retrain.js.)
 import { icon } from '../icons.js'
 import { h, pill } from '../kit.js'
 import {
   cube, emptyMark, bigRing, scanKind, isBusy, pillText, steps, minsLeft, aboutLeft, sent, stageWord, typicalSeconds,
   aheadOf, byMonth, plural, roomNumbers, neverOpened, thumbSrc, dateLine, clock,
 } from './common.js'
+import { groupRooms, version } from '../../data.js'
 
 export function renderList(R, root) {
   const { engine, data, shell } = R.ctx
@@ -41,9 +44,16 @@ export function renderList(R, root) {
     else if (st.roomsApi === false) out.push(noRoomsApi())
     else out.push(emptyState(phone))
   } else {
-    for (const g of byMonth(rooms)) {
-      out.push(secHead(g.label, plural(g.rooms.length, 'room'), true))
-      for (const r of g.rooms) out.push(roomRow(R, r, { phone, offline, open: r.name === openName, dirty: r.name === openName && (dirty.room || dirty.layout) }))
+    const groups = groupRooms(rooms)
+    const byNewest = new Map(groups.map((g) => [g.newest, g]))
+    for (const m of byMonth(groups.map((g) => g.newest))) {
+      const n = m.rooms.reduce((a, r) => a + byNewest.get(r).rooms.length, 0)
+      out.push(secHead(m.label, plural(n, 'room'), true))
+      for (const newest of m.rooms) {
+        const g = byNewest.get(newest)
+        const many = g.rooms.length > 1
+        g.rooms.forEach((r, i) => out.push(roomRow(R, r, { phone, offline, open: r.name === openName, dirty: r.name === openName && (dirty.room || dirty.layout), version: many ? version(r.name) : null, nested: many && i > 0 })))
+      }
     }
   }
   if (!phone && rooms.length) out.push(keyLegend())
@@ -140,7 +150,7 @@ function scanRow(R, s, { phone, offline, scans, typical }) {
   return el
 }
 
-function roomRow(R, r, { phone, offline, open, dirty }) {
+function roomRow(R, r, { phone, offline, open, dirty, version: ver = null, nested = false }) {
   const n = roomNumbers(r, R.ctx.engine)
   const disabled = offline && !open
   const openBits = open ? h('span.rm-open', dirty ? R.ctx.shell.glyphs.unsavedGlyph(14) : null, h('span', dirty ? 'Open now · Unsaved' : 'Open now')) : null
@@ -149,20 +159,21 @@ function roomRow(R, r, { phone, offline, open, dirty }) {
   const line2 = h('div.rm-line', openBits, openBits ? h('span', ` ·\u00A0${second}`) : second)
   const aligned = r.aligned ? h('span.rm-aligned', icon('check', { size: phone ? 16 : 14 }), h('span', 'Aligned')) : h('span', 'Not aligned')
   const onOpen = () => R.switchTo(r.name)
-  const cls = `${open ? '.is-open' : ''}${disabled ? '.is-disabled' : ''}`
+  const cls = `${open ? '.is-open' : ''}${disabled ? '.is-disabled' : ''}${nested ? '.is-version' : ''}`
+  const tag = ver == null ? null : h('span.rm-ver', ver ? `Retrain ${ver}` : 'Original')
   if (phone) {
     const nums = [n.splats && `${n.splats} splats`, n.size, n.train].filter(Boolean).join(' · ')
     const layouts = r.layouts ? plural(r.layouts, 'layout') : 'No layouts'
     return rowEl(cls, { key: `room:${r.name}`, label: `${r.title}${open ? ', open now' : ''}`, onOpen, disabled },
       thumbEl(r, phone),
-      h('div.rm-main', h('div.rm-title', r.title), line2, nums ? h('div.rm-line', nums) : null,
+      h('div.rm-main', h('div.rm-title', tag, r.title), line2, nums ? h('div.rm-line', nums) : null,
         h('div.rm-line.rm-flags', h('span', `${layouts} ·`), aligned, r.quality === 'draft' ? h('span', '· Draft') : null)),
       moreBtn(`Actions for ${r.title}`, (b) => R.roomActions(r, b)))
   }
   const cell = (c, v) => h(`span.${c}${v ? '' : '.is-empty'}`, v || '—')
   return rowEl(cls, { key: `room:${r.name}`, label: `${r.title}${open ? ', open now' : ''}`, onOpen, disabled },
     thumbEl(r, phone), h('span.rm-gap'),
-    h('div.rm-main', h('div.rm-title', r.title), line2),
+    h('div.rm-main', h('div.rm-title', tag, r.title), line2),
     cell('rm-c-num.c-splats', n.splats), cell('rm-c-num.c-size', n.size), cell('rm-c-num.c-train', n.train),
     h(`span.c-q${r.quality === 'draft' ? '.is-muted' : ''}`, n.quality || '—'), h('span.rm-c-num.c-lay', String(r.layouts ?? 0)),
     h(`span.c-al${r.aligned ? '' : '.is-muted'}`, aligned),

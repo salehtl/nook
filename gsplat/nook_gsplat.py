@@ -2,10 +2,12 @@
 """nook-gsplat: train a 3D Gaussian splat from a nook capture with gsplat (MCMC densification, CUDA).
 
     nook-gsplat CAPTURE_DIR --out OUT.ply [--steps 20000] [--max-splats 1200000] [--max-image-size 1920]
-                [--sh-degree 1] [--holdout-every 0]
+                [--stills-max-size N] [--sh-degree 1] [--holdout-every 0] [--pose-opt]
 
 Reads a contract §4 capture folder directly: transforms.json (Nerfstudio style, OpenGL camera-to-world, per-frame
-intrinsics may override the top-level ones), images/, and points.ply seed points. Writes a standard 3DGS PLY
+intrinsics may override the top-level ones), images/, and points.ply seed points. Frames marked `"still": true` (the
+high-resolution stills nook-scan prepares, contract §4.10) are sized by --stills-max-size, the others by
+--max-image-size. Writes a standard 3DGS PLY
 (contract §1) in capture world coordinates, the frame Brush writes. Progress goes to stderr as `step X/Y ...` lines;
 the last stdout line is a JSON summary.
 
@@ -109,7 +111,7 @@ def read_points(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return xyz[ok], rgb[ok]
 
 
-def load_capture(root: Path, holdout_every: int, max_image_size: int):
+def load_capture(root: Path, holdout_every: int, max_image_size: int, stills_max_size: int | None = None):
     """Training frames as (uint8 HxWx3 CPU images, viewmats [N,4,4], Ks [N,3,3], camera centers [N,3])."""
     tf = root / "transforms.json"
     if not tf.is_file():
@@ -133,7 +135,8 @@ def load_capture(root: Path, holdout_every: int, max_image_size: int):
         c2w = np.array(f["transform_matrix"], dtype=np.float64)
         if c2w.shape != (4, 4) or not np.isfinite(c2w).all():
             raise Fail(f"frame {i}: transform_matrix is not a finite 4x4 matrix")
-        s = min(1.0, max_image_size / max(w, h))
+        limit = (stills_max_size or max_image_size) if f.get("still") else max_image_size
+        s = min(1.0, limit / max(w, h))
         nw, nh = max(1, round(w * s)), max(1, round(h * s))
         path = root / f["file_path"]
         try:
@@ -306,7 +309,7 @@ def train(args) -> dict:
     torch.backends.cudnn.benchmark = True
 
     t, n_frames, images, viewmats, Ks, centers, seeds = load_capture(Path(args.capture), args.holdout_every,
-                                                                     args.max_image_size)
+                                                                     args.max_image_size, args.stills_max_size)
     n = len(images)
     scene_scale = 1.1 * float(np.linalg.norm(centers - centers.mean(0), axis=1).max())
     scene_scale = max(scene_scale, 0.1)
@@ -421,6 +424,7 @@ def train(args) -> dict:
             "train_seconds": round(train_secs, 1), "steps_per_s": round(args.steps / train_secs, 2),
             "frames": {"train": n, "held_out": n_frames - n}, "sh_degree": args.sh_degree,
             "max_splats": args.max_splats, "max_image_size": args.max_image_size,
+            "stills_max_size": args.stills_max_size or args.max_image_size,
             "peak_vram_gib": {"allocated": round(torch.cuda.max_memory_allocated() / 2**30, 2),
                               "reserved": round(torch.cuda.max_memory_reserved() / 2**30, 2)},
             "trainer": f"gsplat {gsplat_version} (MCMC)", "pose_opt": pose_stats}
@@ -433,14 +437,16 @@ def main(argv=None) -> None:
     p.add_argument("--steps", type=int, default=20_000)
     p.add_argument("--max-splats", type=int, default=1_200_000)
     p.add_argument("--max-image-size", type=int, default=1920, help="downscale so the long side is at most this")
+    p.add_argument("--stills-max-size", type=int, help="the same for frames marked \"still\" (default: --max-image-size)")
     p.add_argument("--sh-degree", type=int, default=1, choices=range(4))
     p.add_argument("--holdout-every", type=int, default=0, help="skip frames with index %% N == 0 (0: train on all)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--pose-opt", action="store_true", help="refine the training cameras' poses along with the splats")
     p.add_argument("--pose-opt-lr", type=float, default=1e-5, help="learning rate of the pose corrections")
     args = p.parse_args(argv)
-    if args.steps < 1 or args.max_splats < 1000 or args.max_image_size < 16 or args.holdout_every < 0:
-        p.error("--steps >= 1, --max-splats >= 1000, --max-image-size >= 16, --holdout-every >= 0")
+    if (args.steps < 1 or args.max_splats < 1000 or args.max_image_size < 16 or args.holdout_every < 0
+            or (args.stills_max_size is not None and args.stills_max_size < 16)):
+        p.error("--steps >= 1, --max-splats >= 1000, --max-image-size and --stills-max-size >= 16, --holdout-every >= 0")
     try:
         summary = train(args)
     except Fail as e:

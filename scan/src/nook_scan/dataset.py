@@ -22,7 +22,8 @@ class Prepared:
     data_dir: Path
     n_train: int
     n_eval: int
-    long_side: int
+    long_side: int           # of the video frames
+    stills: int              # training frames that use a high-resolution still
     seeds: np.ndarray        # (N,3) world-space seed points (may be empty)
     seed_source: str         # "points.ply", "depth" or "none"
 
@@ -151,9 +152,13 @@ def _write_image(src: Path, dst: Path, size: tuple[int, int], scale: float, tabl
 
 
 def prepare(cap: Capture, work: Path, holdout_every: int, max_image_size: int,
-            seeds: tuple[np.ndarray, np.ndarray | None, str] | None = None, gains: dict | None = None) -> Prepared:
+            seeds: tuple[np.ndarray, np.ndarray | None, str] | None = None, gains: dict | None = None,
+            stills_max_size: int | None = None) -> Prepared:
     """Write the training dataset. `gains` (frame index -> RGB gain, from photometric.measure) divides each training
-    image's linear light by its gain; held-out frames are copied untouched."""
+    image's linear light by its gain; held-out frames are copied untouched. High-resolution stills (§4.10) are scaled
+    to `stills_max_size` (default: max_image_size) and marked `"still": true`, so nook-gsplat sizes them with its
+    --stills-max-size; video frames stay at max_image_size."""
+    stills_max_size = stills_max_size or max_image_size
     data = work / "data"
     (data / "images").mkdir(parents=True)
     long_side = max(max(cap.size(f)) for f in cap.frames)
@@ -169,12 +174,16 @@ def prepare(cap: Capture, work: Path, holdout_every: int, max_image_size: int,
         gain = gains.get(i) if gains and not out else None
         # Training frames use the high-res still when there is one; held-out frames stay video, as judged.
         src, size, intr = _source(cap, f, hires=not out)
-        stills += src.parent.name == "images_hi"
-        fscale = min(1.0, max_image_size / max(size))
+        still = src.parent.name == "images_hi"
+        stills += still
+        fscale = min(1.0, (stills_max_size if still else max_image_size) / max(size))
         jobs.append((src, data / "images" / name, size, fscale, photometric.lut(gain) if gain is not None else None))
-        (held if out else train).append(_frame_entry(cap, f, name, fscale, size, intr))
+        entry = _frame_entry(cap, f, name, fscale, size, intr)
+        if still:
+            entry["still"] = True
+        (held if out else train).append(entry)
     if stills:
-        say(f"using {stills} high-resolution stills in place of their video frames")
+        say(f"using {stills} high-resolution stills in place of their video frames, at up to {stills_max_size} px")
     if len(train) < 10:
         raise ScanError(f"--holdout-every {holdout_every} leaves only {len(train)} training frames: use a larger value (or 0)")
     with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as pool:  # PIL decodes/encodes outside the GIL
@@ -199,4 +208,4 @@ def prepare(cap: Capture, work: Path, holdout_every: int, max_image_size: int,
     (data / "transforms.json").write_text(json.dumps(doc(train)))
     if held:
         (data / "transforms_val.json").write_text(json.dumps(doc(held)))
-    return Prepared(data, len(train), len(held), round(long_side * scale), seeds, source)
+    return Prepared(data, len(train), len(held), round(long_side * scale), stills, seeds, source)

@@ -71,7 +71,7 @@ const run = (key, args) => {
   procs[key] = p
 }
 const rel = (p) => path.relative(REPO, p)
-run('scan', ['evals/mock_scan_server.py', '--port', String(SCAN_PORT), '--seconds', '1'])
+run('scan', ['evals/mock_scan_server.py', '--port', String(SCAN_PORT), '--seconds', '1', '--room-dir', rel(ROOM_DIR)])
 run('planner', ['planner/serve.py', '--port', String(UP), '--room-dir', rel(ROOM_DIR), '--room-file', rel(path.join(ROOM_DIR, 'room.json')),
   '--layouts-dir', rel(path.join(DATA, 'layouts')), '--renders-dir', rel(path.join(DATA, 'renders')), '--costs-file', rel(path.join(DATA, 'costs.csv')),
   '--scan-api', SCAN])
@@ -198,7 +198,8 @@ const rj = await ev(d, (n) => window.nook.retrainRoom(n, { steps: 40000 }, 'Shar
 check('P26 retrainRoom() queues <base>-r2', rj?.name === `${A}-r2` && rj?.kind === 'retrain', fmt(rj))
 const rb = await ev(d, (n) => window.nook.retrainRoom(n), B)
 check('P26 retrainRoom() on a room without a kept capture rejects with "upload again"', /upload/i.test(rb?.__error || ''), fmt(rb))
-await d.locator('[data-nook="retrain"]').first().click({ timeout: 5000 }).catch(() => {})
+await d.locator('[data-nook="retrain"]').first().click({ timeout: 20000 }).catch(() => {})
+await d.locator('[data-nook="retrain-advanced"]').first().waitFor({ timeout: 20000 }).catch(() => {})   // the sheet loads /defaults first
 await shot(d, 'desktop-retrain-sheet')
 check('the retrain sheet has Advanced settings', await d.locator('[data-nook="retrain-advanced"]').count() > 0)
 

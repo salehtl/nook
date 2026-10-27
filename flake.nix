@@ -38,7 +38,10 @@
           inherit nixpkgs;
           system = linux;
         };
-        nook = pkgs.callPackage ./nix/nook.nix { inherit nook-gsplat; };
+        # The furniture pipeline (contract §3) on nixpkgs' python3, with fal-client packaged in nix/fal-client.nix.
+        nook-add = pkgs.callPackage ./nix/nook-add.nix { };
+        fal-client = nook-add.fal-client;
+        nook = pkgs.callPackage ./nix/nook.nix { inherit nook-gsplat nook-add; };
         default = nook;
       };
 

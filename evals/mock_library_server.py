@@ -170,7 +170,7 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else None
         req = urllib.request.Request(A.upstream + self.path, data=body, method=self.command,
-                                     headers={k: v for k, v in self.headers.items() if k.lower() not in ("host", "connection")})
+                                     headers={k: v for k, v in self.headers.items() if k.lower() != "connection"})  # Host kept: upstream checks Origin against it
         try:
             resp = urllib.request.urlopen(req, timeout=600)
         except urllib.error.HTTPError as e:

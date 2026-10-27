@@ -81,7 +81,7 @@ final class ReplayCaptureTests: XCTestCase {
         // meta.json
         XCTAssertEqual(meta["version"] as? Int, 1)
         XCTAssertEqual(meta["app"] as? String, "nook-scan")
-        XCTAssertEqual(meta["app_version"] as? String, "0.3.0")
+        XCTAssertEqual(meta["app_version"] as? String, "0.4.0")
         XCTAssertEqual(meta["exposure_locked"] as? Bool, false, "replay has no camera to lock")
         XCTAssertEqual(meta["white_balance_locked"] as? Bool, false)
         XCTAssertNil(meta["lock_iso"])
@@ -104,6 +104,24 @@ final class ReplayCaptureTests: XCTestCase {
         let inside = ply.filter { all($0.position .>= refLo - 0.05) && all($0.position .<= refHi + 0.05) }.count
         XCTAssertGreaterThan(Double(inside) / Double(ply.count), 0.99, "seed points should lie inside the fixture's point bounds")
         XCTAssertTrue(ply.contains { $0.color != SIMD3(0, 0, 0) }, "seed points carry image colors")
+
+        // v1.3 (contract §4.12, I4): a separate RoomPlan session's shell from fixtures/roomplan/, written next to the
+        // capture as the RoomPlan pass would. validate_capture.py then checks it with the rest.
+        let shell = try ShellAlignmentTests.fixtureShell("roomplan-separate")
+        XCTAssertNotNil(shell.worldFromRoomplan)
+        try RoomPlanWriter.write(shell, sessions: .separate, into: out)
+        let meta13 = try json(out.appendingPathComponent("meta.json"))
+        let roomplan = try XCTUnwrap(meta13["roomplan"] as? [String: Any])
+        XCTAssertEqual(roomplan["sessions"] as? String, "separate")
+        XCTAssertTrue((roomplan["version"] as? String ?? "").hasPrefix("iOS "))
+        XCTAssertEqual(meta13["frame_count"] as? Int, frames.count, "the rest of meta.json is kept")
+        XCTAssertEqual(try XCTUnwrap(meta13["floor_y"] as? Double), -1.35, accuracy: 1e-6)
+        let written = try JSONDecoder().decode(RoomShell.self, from: Data(contentsOf: out.appendingPathComponent("roomplan.json")))
+        XCTAssertEqual(written, shell)
+        let raw = try json(out.appendingPathComponent("roomplan.json"))
+        XCTAssertEqual(raw["version"] as? Int, 1)
+        XCTAssertNotNil(raw["world_from_roomplan"] as? [[Double]])
+        XCTAssertEqual((raw["walls"] as? [Any])?.count, 4)
     }
 
     func testShareZipHasSingleTopLevelFolder() throws {
