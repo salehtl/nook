@@ -6,7 +6,8 @@ trains queued jobs (uploads and retrains) in FIFO order, each as a `python -m no
 own process group, and follows its `step X/Y` lines; with --gpu-lock it holds that file's flock while training.
 Cancel and shutdown stop the whole group (nook-scan and gsplat). Job state lives in jobs.json.
 
-Every POST and DELETE needs `X-Nook: 1` and an Origin that is absent or this server's own (§2.9).
+Every request needs a loopback Host (or one given with --allowed-host), and every POST and DELETE needs `X-Nook: 1`
+and an Origin that is absent or this server's own (§2.9).
 """
 
 import fcntl
@@ -21,7 +22,6 @@ import sys
 import tempfile
 import threading
 import time
-import zipfile
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import metadata
@@ -47,6 +47,16 @@ KILL_GRACE_S = 5.0
 P_PREP, P_TRAIN_END, P_FINISH = 0.03, 0.95, 0.97
 STEP = re.compile(r"\bstep (\d+)/(\d+)")
 TOTAL = re.compile(r"training with .*: (\d+) steps")
+LOOPBACK = ("127.0.0.1", "localhost", "[::1]")
+UNKNOWN_HOST = "unknown host name: add it with --allowed-host"
+
+
+def host_name(host: str) -> str:
+    """A Host header's name without its port, lowercased (`[::1]:8095` -> `[::1]`)."""
+    host = host.strip().lower()
+    if host.startswith("["):
+        return host.split("]")[0] + "]"
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
 
 
 def now() -> str:
@@ -77,6 +87,7 @@ class Server:
         if self.gpu_lock:
             self.gpu_lock.parent.mkdir(parents=True, exist_ok=True)
             self.gpu_lock.touch(exist_ok=True)
+        self.hosts = {*LOOPBACK, *(host_name(h) for h in (getattr(args, "allowed_host", None) or []))}  # §2.9 Host names
         self.lock = threading.Lock()
         self.wake = threading.Condition(self.lock)
         self.jobs: dict[str, dict] = {}
@@ -180,13 +191,13 @@ class Server:
 
     def create(self, zip_path: Path, capture_name: str, name: str) -> tuple[int, dict]:
         with self.lock:
-            existing = self.find_active(capture_name)
-            if existing:
-                zip_path.unlink(missing_ok=True)
-                return 200, dict(existing)
-            # Kept from now on (§5.1); a re-upload of a kept capture replaces its zip. A job already training from the
+            # Kept from now on (§5.1), even when the answer is the existing job: a re-upload always replaces the kept
+            # zip, so "upload again to retrain" works for a capture that was deleted. A job already training from the
             # old one keeps reading it: it's the same capture, and the old file stays open until the trainer is done.
             os.replace(zip_path, self.capture_path(capture_name))
+            existing = self.find_active(capture_name)
+            if existing:
+                return 200, dict(existing)
             return 202, dict(self._add(capture_name, name, "upload", None, None, None))
 
     # --- kept captures and retraining (§5.1) ---------------------------------------------------------------------
@@ -246,6 +257,9 @@ class Server:
             names += [p.name.split(".")[0] for p in self.room_dir.iterdir() if p.suffix in (".spz", ".ply", ".json")]
         return [n for n in map(number, names) if n is not None]
 
+    def room_exists(self, name: str) -> bool:
+        return any((self.room_dir / f"{name}{ext}").is_file() for ext in (".spz", ".ply"))
+
     def retrain(self, capture_name: str, body: dict) -> tuple[int, dict]:
         given = body.get("settings") or {}
         title = body.get("title")
@@ -262,10 +276,10 @@ class Server:
             return 400, {"error": f"deliver_max_splats ({resolved['deliver_max_splats']:,}) can't be more than train_max_splats "
                                   f"({resolved['train_max_splats']:,}): lower it or raise train_max_splats"}
         with self.lock:
-            # Parent: the newest room trained from this capture. Without one (its upload failed or was cancelled),
-            # the base is that upload's name.
-            done = sorted((j for j in self.jobs.values() if j["capture"] == capture_name and j["status"] == "done"),
-                          key=lambda j: j["finished"] or "")
+            # Parent: the newest room trained from this capture that's still in the room dir (one deleted in the
+            # planner can't be a parent). Without one, the base is the upload's name.
+            done = sorted((j for j in self.jobs.values() if j["capture"] == capture_name and j["status"] == "done"
+                           and self.room_exists(j["name"])), key=lambda j: j["finished"] or "")
             parent = done[-1]["name"] if done else None
             uploads = [j for j in self.jobs.values() if j["capture"] == capture_name and j["kind"] == "upload"]
             base = RN.sub("", parent or (uploads[-1]["name"] if uploads else _slug(capture_name)))
@@ -509,6 +523,19 @@ class Handler(BaseHTTPRequestHandler):
             return 413, "the capture is larger than 4 GB: scan with fewer frames"
         return None
 
+    def _known_host(self) -> bool:
+        """§2.9 Host names: a loopback name or one given with --allowed-host, against DNS rebinding."""
+        return host_name(self.headers.get("Host") or "") in self.app.hosts
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        if self._known_host():
+            return True
+        self._drain()
+        self.err(403, UNKNOWN_HOST)
+        return False
+
     def _forged(self) -> bool:
         """§2.9: a mutation needs `X-Nook: 1` and an Origin that's absent or this server's own (http(s):// + Host)."""
         origin, host = self.headers.get("Origin"), self.headers.get("Host", "")
@@ -516,6 +543,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_expect_100(self):
         path = urlsplit(self.path).path
+        if not self._known_host():
+            self.err(403, UNKNOWN_HOST, close=True)
+            return False
         if self.command in ("POST", "DELETE") and self._forged():
             self.err(403, "cross-site request refused", close=True)
             return False
@@ -627,13 +657,7 @@ class Handler(BaseHTTPRequestHandler):
                     left -= len(chunk)
             if left:
                 return self.err(400, f"the upload stopped after {n - left} of {n} bytes: send the capture again", close=True)
-            capture_name = _top_folder(zip_path)
-            if capture_name:
-                with self.app.lock:
-                    existing = self.app.find_active(capture_name)
-                    existing = dict(existing) if existing else None
-                if existing:  # idempotent re-upload: no need to validate it again
-                    return self.send(200, existing)
+            # A re-upload is validated too: it replaces the kept zip even when it dedupes to the existing job (§5.1).
             capture_name, problem = _validate(zip_path, inbox)
             if problem:
                 return self.err(400, problem)
@@ -650,17 +674,6 @@ def _slug(capture_name: str) -> str:
     """The default room name for a capture folder."""
     name = re.sub(r"[^a-z0-9-]+", "-", capture_name.lower()).strip("-")[:64].strip("-")
     return name if SLUG.fullmatch(name) else "scan"
-
-
-def _top_folder(zip_path: Path) -> str | None:
-    """The capture folder name from the zip's directory, cheaply (no extraction). None if it isn't a sane capture zip."""
-    try:
-        with zipfile.ZipFile(zip_path) as z:
-            names = [n for n in z.namelist() if n.strip("/") and not n.startswith(("__MACOSX", ".DS_Store"))]
-    except (zipfile.BadZipFile, OSError, EOFError):
-        return None
-    tops = {n.split("/")[0] for n in names}
-    return tops.pop() if len(tops) == 1 else None
 
 
 def _validate(zip_path: Path, inbox: Path) -> tuple[str, str | None]:

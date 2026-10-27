@@ -170,8 +170,11 @@ code=$(post rlong /api/scan/captures/scan-20261026-000004/retrain '{"settings": 
 check "a 64-character base is truncated so <base>-r1 stays a slug of at most 64" '[ "$code" = 202 ] && j "len(d[\"name\"]) <= 64 and d[\"name\"].endswith(\"-r1\") and __import__(\"re\").fullmatch(\"[a-z0-9][a-z0-9-]{0,63}\", d[\"name\"]) is not None" <"$OUT/rlong.json" | grep -q True' "$code $(head -c 300 "$OUT/rlong.json")"
 RL=$(j 'd["id"]' <"$OUT/rlong.json" 2>/dev/null); wait_status "$RL" 'done|failed|cancelled' 900 >/dev/null
 code=$(curl -s -o "$OUT/delcap.json" -w '%{http_code}' -X DELETE -H 'X-Nook: 1' "$BASE/api/scan/captures/scan-20261026-000004")
+check "W5 an unknown Host is 403 on the jobs server too" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "$BASE/api/scan/jobs")" = 403 ]'
 check "DELETE /api/scan/captures/<name> removes it; its rooms stay" '[ "$code" = 200 ] && ! curl -s "$BASE/api/scan/captures" | grep -q scan-20261026-000004' "$code $(cat "$OUT/delcap.json")"
 [ "$OWN" = 1 ] && check "its rooms stay after the capture is deleted" 'ls "$OUT/room/$LONG".* >/dev/null 2>&1'
+code=$(upload c4.zip reup)
+check "re-uploading a deleted capture keeps it again, even when the upload job is reused" '[[ "$code" =~ ^20[02]$ ]] && curl -s "$BASE/api/scan/captures" | grep -q scan-20261026-000004' "$code $(curl -s "$BASE/api/scan/captures" | head -c 300)"
 
 # --- restart: running job fails cleanly, finished job persists ------------------------------------
 if [ "$OWN" = 1 ]; then

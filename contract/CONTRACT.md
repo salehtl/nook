@@ -335,12 +335,18 @@ These rules apply to every `POST`, `PUT`, `PATCH` and `DELETE` that `planner/ser
 
 **Forged requests:** a mutating request needs the header `X-Nook: 1`, and an `Origin` header that's either absent or equal to the page's own origin (`http(s)://` + the request's `Host`). Anything else gets `403 {"error": "cross-site request refused"}`. The planner sends the header on every mutation, and so does the iOS app's upload (`nook-scan serve` checks it too, since the app talks to it through the planner's origin).
 
+**Host names (against DNS rebinding):** every request, reads included, must carry a `Host` that is a loopback name (`127.0.0.1`, `localhost`, `[::1]`, any port) or one given with `--allowed-host NAME` (repeatable; the NixOS module's `allowedHosts`, e.g. `nook.salehtl.com`). Anything else gets `403 {"error": "unknown host name: add it with --allowed-host"}` before any other handling. `nook-scan serve` applies the same rule (its own `--allowed-host`; the planner's proxy talks to it on loopback).
+
+**Paths:** static paths are normalized (percent-decoding, `.` and `..` segments) **before** any rule about what is served, so `/./library/costs.csv` or `/planner/../library/raw/…` get the same `404` as the plain path.
+
 **Spend cap:**
 - `serve.py --daily-spend-usd N` (default `2`). It's a server flag only; no route changes it.
 - It covers every paid call: library adds and `/api/render`.
 - Before a paid call, the server **reserves** the estimate against today's (UTC) total from `costs.csv`, atomically within the server (one mutex; the library lock is held by `nook-add` for its whole run, so it can't be used here). A `nook-add` run by hand isn't reserved. A request that would cross the cap gets `402 {"error": "today's fal budget ($2.00) is used up: $1.98 spent", "spent_usd", "cap_usd"}` and no call is made. A failed call releases its reservation; a successful one records the actual cost.
 - `GET /api/spend` returns `{"day": "YYYY-MM-DD", "spent_usd", "reserved_usd", "cap_usd"}` so the page can show the remaining budget.
 - Mock calls cost $0 and count for nothing.
+- `costs.csv` is `<library-dir>/costs.csv` by default (`--costs-file` overrides it; when `--library-dir` is also given and the two differ, the server refuses to start, since `nook-add` writes `<library-dir>/costs.csv`. Evals that pass only `--costs-file`, to keep render rows out of the repo, are fine). Cost rows are appended under their own small lock, `costs.csv.lock` (`flock`), taken by the server and by `nook-add`, never the library lock, so a render never waits for a running add.
+- A paid job killed at its timeout keeps its reservation for the rest of the day (fal may have charged), and its job says so.
 
 **URL fetches (the from-URL add):**
 - `serve.py` downloads the image **itself**, to a temp file, and passes that file to `nook-add`. `nook-add` never fetches URLs when called by the server.
@@ -665,7 +671,7 @@ When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/
 **Keeping captures:**
 - An upload is **kept** as `<data-dir>/captures/<capture>.zip` from the moment it's accepted, whatever its job's outcome (`done`, `failed`, `cancelled`, or interrupted by a restart). Nothing deletes it but `DELETE /api/scan/captures/<name>`.
 - A job running at restart becomes `failed` with "server restarted during training: retrain from the planner".
-- Re-uploading a capture that's already kept: the upload dedupe (§5) applies only to jobs of `kind: "upload"`, as before. The kept zip is replaced by the new upload.
+- Re-uploading a capture: the upload dedupe (§5) applies only to jobs of `kind: "upload"`, as before, but the zip is **always** saved as the kept capture (replacing any kept one), even when the answer is the existing job. So "upload again to retrain" works for rooms whose capture wasn't kept.
 
 **Routes:**
 
@@ -679,7 +685,7 @@ When `done`, `result` is the trainer's JSON summary (§4.6) plus `"room_url": "/
 **Jobs** gain `"kind": "upload" | "retrain"`, `"parent": "<room>" | null` (the room a retrain starts from) and `"settings"` (resolved when the job starts: what actually ran). `GET /api/scan/jobs` lists both kinds.
 
 **Naming a retrain:**
-- The parent is the newest room trained from that capture. Its base is its name with any `-r\d+` suffix removed. When no room was ever trained from it (its upload failed or was cancelled), `parent` is null and the base is the upload job's room name.
+- The parent is the newest room trained from that capture **that still exists** in the room dir (a room deleted in the planner can't be a parent). Its base is its name with any `-r\d+` suffix removed. When no room was ever trained from it (its upload failed or was cancelled), `parent` is null and the base is the upload job's room name.
 - The new room is `<base>-r<N>`, where N is 1 + the highest N among existing rooms and queued jobs with that base (so `scan-x` → `scan-x-r1`, then `scan-x-r2`; retraining `scan-x-r1` gives `scan-x-r3` if `-r2` exists).
 - The base is truncated so the name stays within the 64-character slug limit.
 - `title` (optional) becomes the new room's `title`, never its name, so it can't collide.

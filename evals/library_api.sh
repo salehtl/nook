@@ -193,8 +193,16 @@ check "W4 /library/costs.csv is 404" '[ "$(curl -s -o /dev/null -w "%{http_code}
 check "W4 /library/.trash/... is 404" '[ "$(curl -s -o /dev/null -w "%{http_code}" "$BASE/library/.trash/$T/model.glb")" = 404 ]'
 check "W4 /library/<id>/raw/... is 404" '[ "$(curl -s -o /dev/null -w "%{http_code}" "$BASE/library/web-chair/raw/out.json")" = 404 ]'
 check "W4 /library/.lock is 404" '[ "$(curl -s -o /dev/null -w "%{http_code}" "$BASE/library/.lock")" = 404 ]'
+for trick in "/./library/costs.csv" "/planner/../library/costs.csv" "/%2e/library/costs.csv" "/library/./costs.csv" "/./library/web-chair/raw/out.json" "/./library/"; do
+  check "W4 a dot-segment path ($trick) gets the same 404" '[ "$(curl -s --path-as-is -o /dev/null -w "%{http_code}" "$BASE$trick")" = 404 ]'
+done
 check "assets are served with nosniff" 'curl -s -D - -o /dev/null "$BASE/library/sheen-chair/model.glb" | grep -qi "x-content-type-options: nosniff"'
 check "library.json is still served" '[ "$(curl -s -o /dev/null -w "%{http_code}" "$BASE/library/library.json")" = 200 ]'
+
+# --- argv safety: a name starting with "-" still works ---------------------------------------------------------------------
+code=$(add dash model fixtures/models/arrow.glb '{"name": "-Shelf", "id": "dash-shelf", "dims_cm": {"w": 40, "d": 20, "h": 10}}')
+st=$(wait_job dashj "$(jid dash)")
+check "a name starting with - is passed safely to nook-add" '[ "$code" = 202 ] && [ "$st" = done ] && py "r(\"dashj\")[\"item\"][\"name\"] == \"-Shelf\""' "$code $st $(head -c 300 "$OUT/r/dashj.json")"
 
 # --- spend cap (W2) ---------------------------------------------------------------------------------------------------------------------
 stop_server
@@ -215,6 +223,7 @@ code=$(curl -s -o "$OUT/r/render.json" -w '%{http_code}' -X POST -H 'X-Nook: 1' 
 check "W2 /api/render counts against the same cap (402)" '[ "$code" = 402 ]' "$code $(head -c 200 "$OUT/r/render.json")"
 call sp1 GET /api/spend >/dev/null
 check "GET /api/spend shows today's \$0.02 and nothing reserved" 'py "abs(r(\"sp1\")[\"spent_usd\"] - ($spent0 + 0.02)) < 1e-9 and r(\"sp1\")[\"reserved_usd\"] == 0"' "$(cat "$OUT/r/sp1.json")"
+check "cost rows use their own lock file, next to costs.csv" '[ -e "$LIB/costs.csv.lock" ]'
 check "the cap can't be changed from the page" '[ "$(call capset PUT /api/spend "{\"cap_usd\": 100}")" != 200 ] && py "True" && call sp2 GET /api/spend >/dev/null && py "r(\"sp2\")[\"cap_usd\"] == 0.03"'
 
 echo

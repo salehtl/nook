@@ -80,6 +80,8 @@ def build_parser() -> Parser:
                                                               "retrains always start from the scaled high settings")
     s.add_argument("--max-splats", type=int, help="training cap passed to every training run, unless a retrain sets its own")
     s.add_argument("--gpu-lock", help="hold this file's flock while training, so other GPU users wait (default: none)")
+    s.add_argument("--allowed-host", action="append", default=[], metavar="NAME",
+                   help="also answer requests with this Host name (repeatable; loopback names always work)")
     return p
 
 

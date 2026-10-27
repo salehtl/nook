@@ -66,7 +66,25 @@ def fmt_cost(cost: float) -> str:
     return f"{cost:.2f}" if round(cost, 2) == round(cost, 6) else f"{cost:.4f}"
 
 
+@contextlib.contextmanager
+def costs_locked(lib_dir: Path):
+    """Hold <library>/costs.csv.lock (flock) for the block: planner/serve.py appends its render rows under the same
+    small lock (contract §2.9), never the library lock, so a render never waits for a whole nook-add run."""
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    with open(lib_dir / "costs.csv.lock", "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def append_cost(lib_dir: Path, date: str, item_id: str, engine: str, cost: float, mock: bool, source: str) -> None:
+    with costs_locked(lib_dir):
+        _append_cost(lib_dir, date, item_id, engine, cost, mock, source)
+
+
+def _append_cost(lib_dir: Path, date: str, item_id: str, engine: str, cost: float, mock: bool, source: str) -> None:
     path = lib_dir / "costs.csv"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     if not text.strip():

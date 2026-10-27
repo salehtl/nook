@@ -3,13 +3,15 @@
 
 Serves the repo root as static files and a tiny JSON API for the room config, the rooms (every scan in the room
 dir, each with its own config, thumbnail and layouts), layouts, "Render this view" (a paid fal image edit of a
-planner screenshot) and the furniture library (adds through `nook-add`, edits, trash and restore). Every mutation
-needs `X-Nook: 1` and a same-origin (or absent) Origin, and paid calls stay under a daily spend cap.
+planner screenshot) and the furniture library (adds through `nook-add`, edits, trash and restore). Every request
+needs a loopback Host (or one given with --allowed-host), every mutation needs `X-Nook: 1` and a same-origin (or
+absent) Origin, and paid calls stay under a daily spend cap.
 See contract/CONTRACT.md §2.1, §2.6, §2.7, §2.8 and §2.9.
 
     python3 planner/serve.py [--port 8765] [--room-dir room] [--room-file <room-dir>/room.json] [--layouts-dir layouts]
-                             [--renders-dir renders] [--costs-file library/costs.csv] [--library-dir library]
+                             [--renders-dir renders] [--library-dir library] [--costs-file <library-dir>/costs.csv]
                              [--nook-add "uv run --project pipeline nook-add"] [--daily-spend-usd 2] [--scan-api URL]
+                             [--allowed-host NAME ...]
 
 Relative paths are resolved against the repo root. FAL_KEY comes from the environment, else from
 <repo>/.env (unless NOOK_NO_DOTENV=1). With NOOK_FAL_MOCK set, /api/render makes no network calls (and nook-add
@@ -26,6 +28,7 @@ import io
 import ipaddress
 import json
 import os
+import posixpath
 import queue
 import re
 import secrets
@@ -121,9 +124,26 @@ def fmt_cost(cost: float) -> str:
     return f"{cost:.2f}" if round(cost, 2) == round(cost, 6) else f"{cost:.4f}"
 
 
-def append_cost(path: Path, date: str, name: str, engine: str, cost: float, mock: bool, view: str) -> None:
-    """One row in the shared costs.csv (same columns as the pipeline), written atomically."""
+@contextlib.contextmanager
+def costs_locked(path: Path):
+    """costs.csv.lock (flock) next to costs.csv: the small lock nook-add's cost rows take too (§2.9), never the
+    library lock, so a render never waits for a running nook-add."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(path.name + ".lock"), "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def append_cost(path: Path, date: str, name: str, engine: str, cost: float, mock: bool, view: str) -> None:
+    """One row in the shared costs.csv (same columns as the pipeline), written atomically under costs.csv.lock."""
+    with costs_locked(path):
+        _append_cost(path, date, name, engine, cost, mock, view)
+
+
+def _append_cost(path: Path, date: str, name: str, engine: str, cost: float, mock: bool, view: str) -> None:
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     if not text.strip():
         text = ",".join(COSTS_HEADER) + "\n"
@@ -233,7 +253,31 @@ LIBRARY_ASSET = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}/(model\.glb|splat\.ply|thu
 NOOK_ADD_TIMEOUT = 3600
 LOCK_WAIT = 60  # s a library edit waits for a running nook-add before answering 503
 FORGED = "cross-site request refused"
+LOOPBACK = ("127.0.0.1", "localhost", "[::1]")
+UNKNOWN_HOST = "unknown host name: add it with --allowed-host"
 DEFAULT_NOOK_ADD = "uv run --project pipeline nook-add"
+
+
+def host_name(host: str) -> str:
+    """A Host header's name without its port, lowercased (`[::1]:8765` -> `[::1]`)."""
+    host = host.strip().lower()
+    if host.startswith("["):
+        return host.split("]")[0] + "]"
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
+def clean_path(raw: str) -> str | None:
+    """A request path without its query, percent-decoded, with `.`, `..` and repeated slashes resolved (§2.9 Paths),
+    so every rule about what is served sees one spelling. Keeps a trailing slash. None for a path that can't name a
+    file (a NUL or a backslash)."""
+    p = unquote(raw.split("?", 1)[0].split("#", 1)[0])
+    if "\x00" in p or "\\" in p:
+        return None
+    clean = posixpath.normpath("/" + p.lstrip("/"))  # a leading "/" means ".." can't climb above the root
+    clean = "/" + clean.lstrip("/")  # normpath keeps a leading "//"
+    if p.endswith("/") and clean != "/":
+        clean += "/"
+    return clean
 
 
 def mock_cost() -> bool:
@@ -606,9 +650,15 @@ class LibraryService:
             pass
         return round(total, 6)
 
+    def _expire_held(self, day: str) -> None:
+        """Drop reservations held for an earlier day (a timed-out paid job's, see hold_for_today). Call under mutex."""
+        for key in [k for k in self.reserved if k.startswith("held:") and k.split(":")[1] != day]:
+            del self.reserved[key]
+
     def spend(self) -> dict:
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         with self.mutex:
+            self._expire_held(day)
             reserved = round(sum(self.reserved.values()), 6)
         return {"day": day, "spent_usd": self.spent(day), "reserved_usd": reserved, "cap_usd": self.cap}
 
@@ -618,6 +668,7 @@ class LibraryService:
             return None
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         with self.mutex:
+            self._expire_held(day)
             spent = self.spent(day)
             used = spent + sum(self.reserved.values())
             if used + amount > self.cap + 1e-9:
@@ -629,6 +680,16 @@ class LibraryService:
     def release(self, key: str) -> None:
         with self.mutex:
             self.reserved.pop(key, None)
+
+    def hold_for_today(self, key: str) -> float:
+        """Keep `key`'s reservation until the end of the UTC day instead of releasing it (a paid job killed at its
+        timeout may still have been charged, §2.9). Returns the amount held."""
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with self.mutex:
+            amount = self.reserved.pop(key, 0.0)
+            if amount > 0:
+                self.reserved[f"held:{day}:{key}"] = amount
+        return amount
 
     # --- jobs -----------------------------------------------------------------------------------------------
     def new_job(self, kind: str, item_id: str, engine: str, estimate: float, cmd: list[str], cleanup: Path | None,
@@ -691,8 +752,12 @@ class LibraryService:
             return self.update(job_id, status="failed", finished=iso_utc(),
                                message=f"nook-add isn't installed here ({cmd[0]} not found): set --nook-add")
         except subprocess.TimeoutExpired:
-            return self.update(job_id, status="failed", finished=iso_utc(),
-                               message=f"nook-add ran for more than {NOOK_ADD_TIMEOUT // 60} minutes and was stopped")
+            message = f"nook-add ran for more than {NOOK_ADD_TIMEOUT // 60} minutes and was stopped"
+            held = self.hold_for_today(job_id)
+            if held > 0:
+                message += (f"; fal may have charged for it, so its ${fmt_cost(held)} estimate stays reserved "
+                            "against today's (UTC) budget")
+            return self.update(job_id, status="failed", finished=iso_utc(), message=message)
         out_lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
         if proc.returncode != 0:
             err = [ln.strip() for ln in proc.stderr.splitlines() if ln.strip()]
@@ -763,8 +828,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def __init__(self, *args, room_file: Path, layouts_dir: Path, renders_dir: Path, costs_file: Path,
                  room_dir: Path | None = None, library_dir: Path | None = None, scan_api: str | None = None,
-                 library: "LibraryService | None" = None, **kwargs):
+                 library: "LibraryService | None" = None, allowed_hosts: tuple[str, ...] = (), **kwargs):
         self.room_file = room_file
+        self.hosts = {*LOOPBACK, *(host_name(h) for h in allowed_hosts)}  # §2.9 Host names
         self.room_dir = room_dir or (REPO / "room")  # where the rooms live (served as /room/)
         self.layouts_dir = layouts_dir
         self.renders_dir = renders_dir
@@ -780,8 +846,11 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(REPO), **kwargs)
 
     def translate_path(self, path):
-        # /renders/<file> is served from --renders-dir (which may live outside the repo root's renders/).
-        p = unquote(urlsplit(path).path)
+        # Every rule below sees the normalized path (§2.9 Paths), so /./library/costs.csv is the same 404 as
+        # /library/costs.csv. Nothing hidden (.env holds FAL_KEY, .git, .lock, .trash) is served under any spelling.
+        p = clean_path(path)
+        if p is None or any(x.startswith(".") for x in p.split("/")):
+            return str(REPO / ".missing")
         if p.startswith("/renders/"):
             name = p[len("/renders/"):]
             if not name or "/" in name or "\\" in name or name.startswith("."):
@@ -794,11 +863,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return str(self.library_dir / ".missing")
         for prefix, base in self.mounts.items():
             if base is not None and p.startswith(prefix):
-                parts = [x for x in p[len(prefix):].split("/") if x]
-                if any(x.startswith(".") or "\\" in x for x in parts):
-                    return str(base / ".missing")
-                return str(base.joinpath(*parts))
-        return super().translate_path(path)
+                return str(base.joinpath(*[x for x in p[len(prefix):].split("/") if x]))
+        return str(REPO.joinpath(*[x for x in p.split("/") if x]))
+
+    def list_directory(self, path):
+        """No directory listings anywhere (they'd show library/_inbox, raw/ and the like): a folder is a 404."""
+        self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+        return None
 
     # --- /api/scan/* -> nook-scan jobs server (contract §2.1 --scan-api, §5) ---------------------
     def is_scan(self) -> bool:
@@ -809,28 +880,41 @@ class Handler(SimpleHTTPRequestHandler):
         """Stream the request to the jobs server and its answer back (uploads are hundreds of MB)."""
         target = urlsplit(self.scan_api)
         length = self.headers.get("Content-Length")
+        if self.chunked():  # only Content-Length bodies are forwarded; never leave a chunked one unread on the connection
+            self.close_connection = True
+            return self.error_json(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required: send the body with its length")
         if self.command == "POST" and length is None and urlsplit(self.path).path.rstrip("/").endswith("/captures"):
             return self.error_json(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required: upload the zip as a file")
+        try:
+            left = int(length or 0)
+        except ValueError:
+            self.close_connection = True
+            return self.error_json(HTTPStatus.BAD_REQUEST, "Content-Length is not a number")
         conn = http.client.HTTPConnection(target.hostname, target.port or 80, timeout=600)
         try:
-            conn.putrequest(self.command, self.path, skip_accept_encoding=True)
+            # A loopback Host, whatever this request's: the jobs server only answers loopback names (§2.9 Host names).
+            conn.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
+            conn.putheader("Host", f"127.0.0.1:{target.port or 80}")
             # X-Nook goes through (§5.1, the jobs server checks it too); Origin was checked here and stays here.
             for h in ("Content-Type", "Content-Length", "X-Nook-Name", "X-Nook", "Accept"):
                 if self.headers.get(h) is not None:
                     conn.putheader(h, self.headers[h])
             conn.endheaders()
             self.body_done = True
-            left = int(length or 0)
             while left > 0:
                 chunk = self.rfile.read(min(left, 1 << 20))
                 if not chunk:
                     break
-                conn.send(chunk)
                 left -= len(chunk)
+                conn.send(chunk)
             resp = conn.getresponse()
         except OSError as e:
             conn.close()
+            if left > 0:  # the rest of the body is still on the connection: don't read it as the next request
+                self.close_connection = True
             return self.error_json(HTTPStatus.BAD_GATEWAY, f"the nook-scan jobs server at {self.scan_api} isn't answering ({e})")
+        if left > 0:
+            self.close_connection = True
         self.send_response(resp.status)
         for h in ("Content-Type", "Content-Length"):
             if resp.getheader(h) is not None:
@@ -845,13 +929,18 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
-        if urlsplit(self.path).path.startswith(("/library/", "/api/library")):
+        if (clean_path(self.path) or "").startswith(("/library/", "/api/library")):
             self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
 
     def parse_request(self):
         self.body_done = False  # one handler serves every request on a keep-alive connection
-        return super().parse_request()
+        if not super().parse_request():
+            return False
+        if host_name(self.headers.get("Host") or "") in self.hosts:
+            return True
+        self.error_json(HTTPStatus.FORBIDDEN, UNKNOWN_HOST)  # §2.9 Host names (DNS rebinding), before anything else
+        return False
 
     def chunked(self) -> bool:
         return "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
@@ -936,9 +1025,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     # --- static ----------------------------------------------------------
     def hidden(self) -> bool:
-        """Never serve dotfiles/dirs (.env holds FAL_KEY, .git, .venv)."""
-        parts = unquote(urlsplit(self.path).path).split("/")
-        return any(p.startswith(".") and p not in ("", ".", "..") for p in parts)
+        """Never serve dotfiles/dirs (.env holds FAL_KEY, .git, .venv), however the path is spelled."""
+        p = clean_path(self.path)
+        return p is None or any(x.startswith(".") for x in p.split("/"))
 
     def do_GET(self):
         if self.is_scan():
@@ -1196,7 +1285,9 @@ class Handler(SimpleHTTPRequestHandler):
         if not self.scan_api:
             return {}
         try:
-            with urllib.request.urlopen(self.scan_api.rstrip("/") + "/api/scan/captures", timeout=3) as res:
+            port = urlsplit(self.scan_api).port or 80
+            req = urllib.request.Request(self.scan_api.rstrip("/") + "/api/scan/captures", headers={"Host": f"127.0.0.1:{port}"})
+            with urllib.request.urlopen(req, timeout=3) as res:
                 captures = json.loads(res.read().decode("utf-8")).get("captures") or []
         except (OSError, ValueError, AttributeError):
             return {}
@@ -1384,19 +1475,20 @@ class Handler(SimpleHTTPRequestHandler):
         return self.send_json(HTTPStatus.OK, dict(data, trash=trash))
 
     def add_command(self, src: Path, meta: dict, label: str) -> list[str]:
-        cmd = [*self.library.nook_add, str(src), "--name", meta["name"], "--id", meta["id"],
-               "--dims", "x".join(num_text(meta["dims_cm"][k]) for k in "wdh"), "--engine", meta["engine"],
-               "--library", str(self.library_dir), "--source-input", label]
+        # Every value as --opt=<v> and the input as an absolute path, so a name like "-Shelf" is never read as a flag.
+        cmd = [*self.library.nook_add, str(src.resolve()), f"--name={meta['name']}", f"--id={meta['id']}",
+               "--dims=" + "x".join(num_text(meta["dims_cm"][k]) for k in "wdh"), f"--engine={meta['engine']}",
+               f"--library={self.library_dir.resolve()}", f"--source-input={label}"]
         if meta["category"]:
-            cmd += ["--category", meta["category"]]
+            cmd += [f"--category={meta['category']}"]
         if meta["mount"]:
-            cmd += ["--mount", meta["mount"]]
+            cmd += [f"--mount={meta['mount']}"]
         if meta["yaw"]:
-            cmd += ["--yaw", str(meta["yaw"])]
+            cmd += [f"--yaw={meta['yaw']}"]
         if meta["engine"] == "sam3d" and meta["prompt"]:
-            cmd += ["--prompt", meta["prompt"]]
+            cmd += [f"--prompt={meta['prompt']}"]
         if meta["engine"] == "trellis2":
-            cmd += ["--resolution", str(meta["resolution"])]
+            cmd += [f"--resolution={meta['resolution']}"]
         return cmd
 
     def queue_add(self, src: Path, tmp: Path, meta: dict, label: str, reserved_key: str | None = None):
@@ -1561,11 +1653,11 @@ class Handler(SimpleHTTPRequestHandler):
                                   {k: float((item.get("dims_cm") or {}).get(k, 0)) for k in "wdh"})
         if not refit:
             return self.send_json(HTTPStatus.OK, item)
-        cmd = [*self.library.nook_add, "--rescale", item_id, "--library", str(self.library_dir)]
+        cmd = [*self.library.nook_add, f"--rescale={item_id}", f"--library={self.library_dir.resolve()}"]
         if dims is not None:
-            cmd += ["--dims", "x".join(num_text(dims[k]) for k in "wdh")]
+            cmd += ["--dims=" + "x".join(num_text(dims[k]) for k in "wdh")]
         if yaw:
-            cmd += ["--yaw", str(int(yaw))]
+            cmd += [f"--yaw={int(yaw)}"]
         job, _ = self.library.new_job("rescale", item_id, "glb", 0.0, cmd, None)
         return self.send_json(HTTPStatus.ACCEPTED, {"job": job})
 
@@ -1695,8 +1787,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.error_json(HTTPStatus.BAD_GATEWAY, str(e))
             # fal has returned, so the call is billed: record it even if the download below fails.
             cost = price
-            with self.library.locked(wait=None):
-                append_cost(self.costs_file, now.strftime("%Y-%m-%dT%H:%M:%SZ"), name, f"render:{model}", cost, False, view or "")
+            append_cost(self.costs_file, now.strftime("%Y-%m-%dT%H:%M:%SZ"), name, f"render:{model}", cost, False, view or "")
             images = out.get("images") if isinstance(out, dict) else None
             url = images[0].get("url") if isinstance(images, list) and images and isinstance(images[0], dict) else None
             if not url:
@@ -1724,8 +1815,7 @@ class Handler(SimpleHTTPRequestHandler):
         atomic_write_bytes(self.renders_dir / f"{name}.jpg", result)
         atomic_write_json(self.renders_dir / f"{name}.json", meta)
         if mock:
-            with self.library.locked(wait=None):
-                append_cost(self.costs_file, now.strftime("%Y-%m-%dT%H:%M:%SZ"), name, f"render:{model}", cost, True, view or "")
+            append_cost(self.costs_file, now.strftime("%Y-%m-%dT%H:%M:%SZ"), name, f"render:{model}", cost, True, view or "")
         with render_lock:
             reserved_names.discard(name)  # the files now hold the name; after a failure it stays reserved
         return self.send_json(HTTPStatus.OK, meta)
@@ -1746,9 +1836,12 @@ def main(argv=None):
     ap.add_argument("--scan-api", default=None, help="proxy /api/scan/* to this nook-scan jobs server, e.g. http://127.0.0.1:8095")
     ap.add_argument("--layouts-dir", default="layouts")
     ap.add_argument("--renders-dir", default="renders")
-    ap.add_argument("--costs-file", default="library/costs.csv")
+    ap.add_argument("--costs-file", default=None,
+                    help="default: <library-dir>/costs.csv, where nook-add writes; with --library-dir it must be that file")
     ap.add_argument("--nook-add", default=DEFAULT_NOOK_ADD,
                     help=f"the command that adds furniture, run with --library <library-dir> (default: {DEFAULT_NOOK_ADD})")
+    ap.add_argument("--allowed-host", action="append", default=[], metavar="NAME",
+                    help="also answer requests with this Host name, e.g. nook.example.com (repeatable; loopback names always work)")
     ap.add_argument("--daily-spend-usd", type=float, default=2.0,
                     help="cap on paid fal calls (library adds and renders) per UTC day, in USD (default 2)")
     args = ap.parse_args(argv)
@@ -1758,11 +1851,17 @@ def main(argv=None):
     room_dir = resolve(args.room_dir) if args.room_dir else None
     room_file = resolve(args.room_file) if args.room_file else (room_dir or resolve("room")) / "room.json"
     library_dir = resolve(args.library_dir or "library")
-    costs_file = resolve(args.costs_file)
+    costs_file = resolve(args.costs_file) if args.costs_file else library_dir / "costs.csv"
+    # nook-add always writes <library-dir>/costs.csv, so the cap would miss its rows if this read another file.
+    # (Without --library-dir, a separate --costs-file is allowed: evals keep renders' rows out of the repo's library.)
+    if args.library_dir and costs_file.resolve() != (library_dir / "costs.csv").resolve():
+        sys.exit(f"nook planner: --costs-file {costs_file} isn't {library_dir / 'costs.csv'}, where nook-add writes "
+                 "its costs: drop --costs-file (it defaults to <library-dir>/costs.csv)")
     library = LibraryService(library_dir, costs_file, shlex.split(args.nook_add), args.daily_spend_usd)
     handler = partial(Handler, room_file=room_file, layouts_dir=resolve(args.layouts_dir),
                       renders_dir=resolve(args.renders_dir), costs_file=costs_file, room_dir=room_dir,
-                      library_dir=library_dir, scan_api=args.scan_api, library=library)
+                      library_dir=library_dir, scan_api=args.scan_api, library=library,
+                      allowed_hosts=tuple(args.allowed_host))
     ThreadingHTTPServer.allow_reuse_address = True
     httpd = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"nook planner: http://{args.host}:{args.port}/planner/  (serving {REPO})", flush=True)

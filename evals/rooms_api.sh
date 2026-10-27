@@ -211,6 +211,10 @@ cp "$OUT/roomjson.before-w1.json" "$ROOM/room.json"; rm -f "$LAYOUTS/hall-old/x.
 check "W1 POST /api/render without X-Nook is 403" '[ "$(forged w1f POST /api/render)" = 403 ]'
 check "W1 the page's own Origin is accepted" '[ "$(forged w1g PUT /api/rooms/hall-old -H "X-Nook: 1" -H "Origin: $BASE")" = 200 ]'
 check "W1 403 answers with a JSON error" 'py "\"error\" in r(\"w1a\")"'
+cp "$OUT/hall.before-w1.json" "$ROOM/hall-old.room.json"   # W1g just saved it on purpose
+check "W5 an unknown Host (DNS rebinding) is 403 even for a well-formed same-origin mutation" '[ "$(forged w5a PUT /api/rooms/hall-old -H "X-Nook: 1" -H "Host: evil.example:$PORT" -H "Origin: http://evil.example:$PORT")" = 403 ] && cmp -s "$OUT/hall.before-w1.json" "$ROOM/hall-old.room.json"'
+check "W5 an unknown Host is 403 for reads too" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: evil.example" "$BASE/api/rooms")" = 403 ]'
+check "W5 localhost by name is accepted" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: localhost:$PORT" "$BASE/api/rooms")" = 200 ]'
 cp "$OUT/hall.before-w1.json" "$ROOM/hall-old.room.json"
 
 # --- delete rooms --------------------------------------------------------------------------------------------------------------

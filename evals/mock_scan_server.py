@@ -135,6 +135,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def guarded(self) -> bool:
         """§2.9: a mutation needs X-Nook: 1 and an Origin that is absent or this server's own. Sends the 403 when not."""
+        if not self.known_host():
+            return False
         origin = self.headers.get("Origin")
         own = {f"http://{self.headers.get('Host')}", f"https://{self.headers.get('Host')}"}
         if self.headers.get("X-Nook") == "1" and (origin is None or origin in own):
@@ -142,7 +144,18 @@ class Handler(BaseHTTPRequestHandler):
         self.err(403, "cross-site request refused")
         return False
 
+    def known_host(self) -> bool:
+        """§2.9 Host names: loopback only in the mock. Sends the 403 when not."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0] if not (self.headers.get("Host") or "").startswith("[") \
+            else (self.headers.get("Host") or "").split("]")[0] + "]"
+        if host in ("127.0.0.1", "localhost", "[::1]"):
+            return True
+        self.err(403, "unknown host name: add it with --allowed-host")
+        return False
+
     def do_GET(self):
+        if not self.known_host():
+            return
         p = self.path.split("?")[0]
         if p == "/api/scan/health":
             with lock:
@@ -241,13 +254,13 @@ class Handler(BaseHTTPRequestHandler):
         if not SLUG.fullmatch(name):
             return self.err(400, f"X-Nook-Name must be a slug, got {name!r}")
         with lock:
+            n_frames = len(json.loads(z.read(f"{capture}/transforms.json")).get("frames", []))
+            captures[capture] = {"name": capture, "size_bytes": n, "created": now(), "n_frames": n_frames,
+                                 "roomplan": f"{capture}/roomplan.json" in names}  # always kept, even on a dedupe hit (§5.1)
             existing = next((j for j in jobs.values() if j["kind"] == "upload" and j["capture"] == capture
                              and j["status"] not in ("failed", "cancelled")), None)
             if existing:
                 return self.send(200, existing)
-            n_frames = len(json.loads(z.read(f"{capture}/transforms.json")).get("frames", []))
-            captures[capture] = {"name": capture, "size_bytes": n, "created": now(), "n_frames": n_frames,
-                                 "roomplan": f"{capture}/roomplan.json" in names}
             j = new_job(capture, name)
             jobs[j["id"]] = j
             queue.append(j["id"])

@@ -75,6 +75,16 @@ in
       default = 2;
       description = "Cap on paid fal calls per UTC day, in USD (`nook-web --daily-spend-usd`, contract §2.9).";
     };
+    allowedHosts = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "nook.salehtl.com" ];
+      description = ''
+        Host names the web app answers besides loopback ones (`nook-web --allowed-host`, contract §2.9): the names
+        the host's proxy serves it under. Any other Host gets a 403, against DNS rebinding. nook-scan only gets
+        loopback traffic (from the web app's proxy), so it needs none.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -151,27 +161,33 @@ in
       serviceConfig = hardening // lib.optionalAttrs (cfg.falKeyFile != null) {
         EnvironmentFile = cfg.falKeyFile;
       } // {
-        ExecStart = lib.escapeShellArgs [
-          "${pkg}/bin/nook-web"
-          "--host"
-          "127.0.0.1"
-          "--port"
-          (toString cfg.webPort)
-          "--room-dir"
-          "${dir}/room"
-          "--library-dir"
-          "${dir}/library"
-          "--layouts-dir"
-          "${dir}/layouts"
-          "--renders-dir"
-          "${dir}/renders"
-          "--costs-file"
-          "${dir}/library/costs.csv"
-          "--scan-api"
-          "http://127.0.0.1:${toString cfg.apiPort}"
-          "--daily-spend-usd"
-          (toString cfg.dailySpendUsd)
-        ];
+        ExecStart = lib.escapeShellArgs (
+          [
+            "${pkg}/bin/nook-web"
+            "--host"
+            "127.0.0.1"
+            "--port"
+            (toString cfg.webPort)
+            "--room-dir"
+            "${dir}/room"
+            "--library-dir"
+            "${dir}/library"
+            "--layouts-dir"
+            "${dir}/layouts"
+            "--renders-dir"
+            "${dir}/renders"
+            "--costs-file"
+            "${dir}/library/costs.csv"
+            "--scan-api"
+            "http://127.0.0.1:${toString cfg.apiPort}"
+            "--daily-spend-usd"
+            (toString cfg.dailySpendUsd)
+          ]
+          ++ lib.concatMap (h: [
+            "--allowed-host"
+            h
+          ]) cfg.allowedHosts
+        );
       };
     };
   };
