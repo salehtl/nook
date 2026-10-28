@@ -37,6 +37,80 @@
         }
       },
       "notes": "Starter piece: replay of the real 2026-10-25 capture. Dims approximate."
+    },
+    {
+      "id": "eames-lounge-chair",
+      "name": "Eames lounge chair",
+      "category": "lounge chair",
+      "dims_cm": {
+        "w": 83,
+        "d": 83,
+        "h": 85
+      },
+      "assets": {
+        "glb": "eames-lounge-chair/model.glb",
+        "splat": "eames-lounge-chair/splat.ply",
+        "thumb": "eames-lounge-chair/thumb.jpg"
+      },
+      "default_render": "splat",
+      "source": {
+        "engine": "sam3d",
+        "input": "library/_inbox/eames-lounge-chair.jpg",
+        "prompt": "chair",
+        "cost_usd": 0.02,
+        "mock": false,
+        "created": "2026-10-27T06:05:28Z"
+      },
+      "fit": {
+        "glb_error_pct": {
+          "w": 0.0,
+          "d": 0.0,
+          "h": 0.0
+        },
+        "splat_error_pct": {
+          "w": 16.841,
+          "d": 11.178,
+          "h": 0.0
+        }
+      },
+      "notes": null
+    },
+    {
+      "id": "lixhult-cabinet-combination",
+      "name": "Lixhult cabinet combination",
+      "category": "cabinet",
+      "dims_cm": {
+        "w": 120,
+        "d": 35,
+        "h": 57
+      },
+      "assets": {
+        "glb": "lixhult-cabinet-combination/model.glb",
+        "splat": "lixhult-cabinet-combination/splat.ply",
+        "thumb": "lixhult-cabinet-combination/thumb.jpg"
+      },
+      "default_render": "splat",
+      "source": {
+        "engine": "sam3d",
+        "input": "library/_inbox/lixhult-cabinet-combination-grey.jpg",
+        "prompt": "cabinet",
+        "cost_usd": 0.02,
+        "mock": false,
+        "created": "2026-10-27T10:48:56Z"
+      },
+      "fit": {
+        "glb_error_pct": {
+          "w": 0.0,
+          "d": 0.0,
+          "h": 0.0
+        },
+        "splat_error_pct": {
+          "w": 10.528,
+          "d": 2.064,
+          "h": 0.0
+        }
+      },
+      "notes": null
     }
   ]
 }
