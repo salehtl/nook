@@ -3,8 +3,8 @@
 Private sandbox for planning a home reading room: a Gaussian-splat scan of the room, furniture generated from photos at real-world size, and a browser planner to place it, compare layouts, and sit in the reading chair (virtually).
 
 The parts:
-- **Nook Scan** (`ios/`): iPhone app that captures the room with ARKit, measures its walls with RoomPlan (LiDAR phones), and sends it to kakapo. A How to scan guide is built in.
-- **nook-scan** (`scan/`, `gsplat/`, `poses/`): checks a capture, trains it into a splat with gsplat on kakapo's GPU (settings scaled to the capture), and runs the jobs server the app uploads to. Captures are kept, so any room can be retrained from the planner.
+- **Nook Scan** (`ios/`): iPhone app that captures the room with ARKit, measures its walls with RoomPlan (LiDAR phones), and sends it to kakapo. A How to scan guide is built in. `bash ios/scripts/release.sh` uploads a TestFlight build; it reads the App Store Connect issuer ID from `NOOK_ASC_ISSUER_ID` or the git-ignored `ios/.asc-issuer-id`. `bash ios/scripts/release.sh` uploads a TestFlight build (issuer ID in git-ignored `ios/.asc-issuer-id`).
+- **nook-scan** (`scan/`, `gsplat/`, `poses/`): checks a capture, trains it into a splat with gsplat on kakapo's GPU (settings scaled to the capture), and runs the jobs server the app uploads to. Captures are kept, so any room can be retrained from the planner. `nook-scan train --depth-weight` (LiDAR depth loss) and `--init <room.spz>` (fine-tune an existing room) are experimental and off by default. `nook-scan train --depth-weight` (LiDAR depth loss) and `--init` (fine-tune from an existing room) are experimental and off by default.
 - **Planner** (`planner/`): browser app that browses every scanned room (each with its own alignment and layouts) and works on the phone as well as the desktop. Pieces can be raised and hung on walls; the measured shell shows wall lengths; furniture is added, edited and removed from the Library panel; rooms are retrained from the Retrain sheet.
 - **nook-add** (`pipeline/`): furniture from a photo, image link, GLB or zipped OBJ, at real-world size. The planner runs it for you; the server caps fal spend per day (`--daily-spend-usd`, default $2).
 
@@ -32,6 +32,10 @@ uv run --project pipeline nook-add photo.jpg --name "Reading chair" --dims 76x89
 ```
 
 `sam3d` ($0.02) is the default engine. `--engine trellis2` ($0.25) is for a second opinion, and `--engine glb model.glb` (free) is for retailer 3D models (or a `.zip` of an `.obj` with its `.mtl` and textures). `--mount wall` marks paintings and shelves; `--rescale <id> --dims WxDxH` refits an item for free. `FAL_KEY` goes in `.env`.
+
+`nook-add` writes to the dev library (`library/`). The live site on kakapo serves `/var/lib/nook/library`, so an item added from the CLI there reaches nook.salehtl.com only after `.claude/skills/add-furniture/scripts/publish.sh <id>` (needs sudo; the skill asks first). Items added from the planner's Library panel land in the live library directly.
+
+The CLI writes to the dev library (`library/`). The live site serves `/var/lib/nook/library` on kakapo, so an item made with the CLI there needs `.claude/skills/add-furniture/scripts/publish.sh <id>` (sudo) to show up; items added from the planner's Library panel land there directly.
 
 ## Hosted copy (Cloudflare Pages)
 

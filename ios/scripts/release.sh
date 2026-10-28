@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Archive nook-scan and upload it to TestFlight with the App Store Connect API key in ~/.appstoreconnect/private_keys.
-# Usage: NOOK_ASC_ISSUER_ID=<issuer uuid> [NOOK_ASC_KEY_PATH=path/to/AuthKey_ID.p8] bash ios/scripts/release.sh [build-number]
+# Usage: [NOOK_ASC_ISSUER_ID=<issuer uuid>] [NOOK_ASC_KEY_PATH=path/to/AuthKey_ID.p8] bash ios/scripts/release.sh [build-number]
+#   The issuer ID can live in git-ignored ios/.asc-issuer-id instead of the environment.
 #   build-number defaults to the git commit count, so every upload gets a new one (TestFlight requires that).
 # Needs: an App Store Connect app record for com.salehtl.nookscan (create it once in the web UI).
 set -euo pipefail
