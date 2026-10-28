@@ -6,7 +6,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-: "${NOOK_ASC_ISSUER_ID:?set NOOK_ASC_ISSUER_ID (App Store Connect → Users and Access → Integrations → Issuer ID)}"
+[ -n "${NOOK_ASC_ISSUER_ID:-}" ] || [ ! -f ios/.asc-issuer-id ] || NOOK_ASC_ISSUER_ID=$(tr -d '[:space:]' < ios/.asc-issuer-id)
+: "${NOOK_ASC_ISSUER_ID:?set NOOK_ASC_ISSUER_ID or put it in ios/.asc-issuer-id (App Store Connect → Users and Access → Integrations → Issuer ID)}"
 if [ -n "${NOOK_ASC_KEY_PATH:-}" ]; then
   # An explicit key file, e.g. NOOK_ASC_KEY_PATH=~/Downloads/AuthKey_XXXXXXXXXX.p8 (the key ID comes from the name).
   KEY_PATH="$NOOK_ASC_KEY_PATH"

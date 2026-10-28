@@ -24,3 +24,6 @@ result-*
 target/
 library/.lock
 library/.trash/
+
+# App Store Connect issuer ID for ios/scripts/release.sh (an account identifier, kept out of git)
+ios/.asc-issuer-id
