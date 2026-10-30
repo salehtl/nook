@@ -9,6 +9,11 @@
 //   --png          with --save, also render-NNNN.png (lossless, for pixel diffs)
 //   --frames A,B   only these frames (file numbers with --val, list indices otherwise), instead of --every and --max
 //   --max-sh N     evaluate spherical harmonics only up to degree N (mesh.maxSh)
+//   --sweep F.json  render each frame once per variant in one page, each to DIR/<name>/ with --save. A variant:
+//                  { name, opts: { maxStdDev, blurAmount, sortRadial, minAlpha, clipXY, ... } (SparkRenderer fields),
+//                    blurAdjust: false (keep the widening of blurAmount but not its dimming of small splats),
+//                    rt: 'half'|'float' (blend in a float target, then one pass to 8 bits), blend: 'srgb'|'linear',
+//                    tonemap: true (ACES Filmic, as planner/engine.js) }
 // Prints JSON: { mean_psnr, min_psnr, frames: [{ index, psnr }], spark: { ... } }
 // Browser: $NOOK_BROWSER. NOOK_SOFTWARE_GL=1 forces SwiftShader and fails if it gets anything else (never the real
 // GPU); NOOK_NO_SANDBOX=1 passes --no-sandbox.
@@ -23,6 +28,7 @@ const arg = (k, d) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ?
 const flag = (k) => process.argv.includes(`--${k}`)
 const EVERY = Number(arg('every', 10)), MAX = Number(arg('max', 18)), SAVE = arg('save', null)
 const MAX_SH = arg('max-sh', null), ONLY = arg('frames', null)?.split(',').map(Number)
+const SWEEP = arg('sweep', null) ? JSON.parse(fs.readFileSync(arg('sweep', null), 'utf8')) : null
 const VAL = flag('val'), EXT = flag('ext-splats'), ACCUM_EXT = flag('accum-ext'), PNG = flag('png'), SOFTWARE = !!process.env.NOOK_SOFTWARE_GL
 if (!splat || !capture) { console.error('usage: node evals/psnr_judge.mjs <splat.ply> <capture-dir> [--every 10]'); process.exit(2) }
 const t = JSON.parse(fs.readFileSync(path.join(capture, VAL ? 'transforms_val.json' : 'transforms.json'), 'utf8'))
@@ -36,16 +42,32 @@ const PAGE = `<!doctype html><html><body style="margin:0;background:#000">
 <script type="module">
 import * as THREE from 'three'
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark'
-const { w, h, fl_y, splatUrl, ext, accumExt, png, maxSh } = window.CFG
+const { w, h, fl_y, splatUrl, ext, accumExt, png, maxSh, sweep } = window.CFG
 const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true })
 renderer.setPixelRatio(1); renderer.setSize(w, h); renderer.outputColorSpace = THREE.SRGBColorSpace
 document.body.appendChild(renderer.domElement)
 const scene = new THREE.Scene(); scene.background = new THREE.Color(0x000000)
 const spark = new SparkRenderer({ renderer, accumExtSplats: accumExt }); scene.add(spark)
+// Test hooks for --sweep. Spark sets encodeLinear from the target at every frame; a float target would blend in linear.
+const encodeLinear = spark.uniforms.encodeLinear; let rawLinear = false, srgbBlend = false
+Object.defineProperty(encodeLinear, 'value', { get: () => (srgbBlend ? false : rawLinear), set: (v) => { rawLinear = v } })
+spark.uniforms.nookBlurAdjust = { value: 1 }
+spark.material.vertexShader = spark.material.vertexShader
+  .replace('uniform float blurAmount;', 'uniform float blurAmount;\\nuniform float nookBlurAdjust;')
+  .replace('rgba.a *= blurAdjust;', 'rgba.a *= mix(1.0, blurAdjust, nookBlurAdjust);')
+const rts = { half: new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: true, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter }),
+  float: new THREE.WebGLRenderTarget(w, h, { type: THREE.FloatType, depthBuffer: true, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter }) }
+const postMat = (includes) => new THREE.ShaderMaterial({ uniforms: { tScene: { value: null } }, depthTest: false, depthWrite: false,
+  vertexShader: 'varying vec2 vUv;\\nvoid main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: ['uniform sampler2D tScene;', 'varying vec2 vUv;', 'void main() {', '  gl_FragColor = vec4(texture2D(tScene, vUv).rgb, 1.0);', ...includes, '}'].join('\\n') })
+const posts = { srgb: postMat([]), linear: postMat(['  #include <colorspace_fragment>']), tonemap: postMat(['  #include <tonemapping_fragment>', '  #include <colorspace_fragment>']) }
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), posts.srgb); quad.frustumCulled = false
+const postScene = new THREE.Scene(); postScene.add(quad); const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+const defaults = {}
 const mesh = new SplatMesh(ext ? { url: splatUrl, extSplats: true } : { url: splatUrl }); scene.add(mesh); await mesh.initialized
 if (maxSh !== null) mesh.maxSh = maxSh
-const gl = renderer.getContext(), info = gl.getExtension('WEBGL_debug_renderer_info')
-window.SPARK = { gl_renderer: info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : 'unknown', mesh: mesh.extSplats ? 'ExtSplats' : 'PackedSplats', accum: accumExt ? 'ext' : 'packed', splats: mesh.numSplats }
+const info = renderer.getContext().getExtension('WEBGL_debug_renderer_info')
+window.SPARK = { gl_renderer: info ? renderer.getContext().getParameter(info.UNMASKED_RENDERER_WEBGL) : 'unknown', mesh: mesh.extSplats ? 'ExtSplats' : 'PackedSplats', accum: accumExt ? 'ext' : 'packed', splats: mesh.numSplats }
 const cam = new THREE.PerspectiveCamera(2 * Math.atan(h / 2 / fl_y) * 180 / Math.PI, w / h, 0.02, 50)
 const c2 = document.createElement('canvas'); c2.width = w; c2.height = h
 const g = c2.getContext('2d', { willReadFrequently: true })
@@ -55,28 +77,54 @@ function setIntrinsics(fx, fy, cx, cy, n = 0.02, f = 50) {
   cam.projectionMatrix.set(2 * fx / w, 0, 1 - 2 * cx / w, 0,  0, 2 * fy / h, 2 * cy / h - 1, 0,  0, 0, -(f + n) / (f - n), -2 * f * n / (f - n),  0, 0, -1, 0)
   cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert()
 }
-window.judge = async (m, imgUrl, K) => {
-  new THREE.Matrix4().set(...m.flat()).decompose(cam.position, cam.quaternion, cam.scale); cam.updateMatrixWorld(true)
-  setIntrinsics(...K)
-  // A picture counts only once Spark has sorted for this very camera. A fixed number of renders is not enough: a slow
-  // sort (software GL takes many seconds) leaves the previous frame's order on screen, which looks like smear and blur.
-  renderer.render(scene, cam); await spark.update({ scene, camera: cam })
+const gl = renderer.getContext()
+function draw(v) {
+  renderer.toneMapping = v.tonemap ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping
+  srgbBlend = !!v.rt && v.blend !== 'linear'
+  if (!v.rt) { renderer.setRenderTarget(null); renderer.render(scene, cam); return }
+  renderer.setRenderTarget(rts[v.rt]); renderer.render(scene, cam); renderer.setRenderTarget(null)
+  quad.material = v.tonemap ? posts.tonemap : v.blend === 'linear' ? posts.linear : posts.srgb
+  quad.material.uniforms.tScene.value = rts[v.rt].texture
+  renderer.render(postScene, postCam)
+}
+// A picture counts only once Spark has sorted for this very camera. A fixed number of renders is not enough: a slow
+// sort (software GL takes many seconds) leaves the previous frame's order on screen, which looks like smear and blur.
+async function settle() {
+  renderer.setRenderTarget(null); renderer.render(scene, cam); await spark.update({ scene, camera: cam })
   const deadline = performance.now() + 600000
   while (spark.sorting || spark.sortDirty || spark.sortedCenter.distanceTo(cam.position) > 1e-4) {
     if (performance.now() > deadline) throw new Error('Spark did not finish sorting')
     await sleep(100)
     if (!spark.sorting) renderer.render(scene, cam)   // drives an update that was refused while another sort ran
   }
-  renderer.render(scene, cam)
-  g.drawImage(renderer.domElement, 0, 0); const a = g.getImageData(0, 0, w, h).data
+}
+function apply(v) {
+  for (const k of Object.keys(defaults)) spark[k] = defaults[k]
+  for (const [k, val] of Object.entries(v.opts || {})) { if (!(k in defaults)) defaults[k] = spark[k]; spark[k] = val }
+  spark.uniforms.nookBlurAdjust.value = v.blurAdjust === false ? 0 : 1
+}
+const warmed = new Set()
+window.judge = async (m, imgUrl, K, variants) => {
+  new THREE.Matrix4().set(...m.flat()).decompose(cam.position, cam.quaternion, cam.scale); cam.updateMatrixWorld(true)
+  setIntrinsics(...K)
   const img = new Image(); img.src = imgUrl; await img.decode()
   g.drawImage(img, 0, 0, w, h); const b = g.getImageData(0, 0, w, h).data
-  const both = document.createElement('canvas'); both.width = 2 * w; both.height = h
-  const bg = both.getContext('2d'); bg.drawImage(renderer.domElement, 0, 0); bg.drawImage(img, w, 0, w, h)
-  let se = 0
-  for (let i = 0; i < a.length; i += 4) for (let c = 0; c < 3; c++) { const d = a[i + c] - b[i + c]; se += d * d }
-  const mse = se / (w * h * 3)
-  return { psnr: mse === 0 ? 99 : 10 * Math.log10(255 * 255 / mse), render: renderer.domElement.toDataURL('image/jpeg', 0.85), side: both.toDataURL('image/jpeg', 0.92), png: png ? renderer.domElement.toDataURL('image/png') : null }
+  const out = []
+  let sortedRadial = null
+  for (const v of variants) {
+    apply(v)
+    if (spark.sortRadial !== sortedRadial) { sortedRadial = spark.sortRadial; await settle() }
+    if (!warmed.has(v.name)) { warmed.add(v.name); draw(v) }   // the first draw of a variant can compile shaders: not timed
+    const t0 = performance.now(); draw(v); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); const ms = performance.now() - t0
+    g.drawImage(renderer.domElement, 0, 0); const a = g.getImageData(0, 0, w, h).data
+    let se = 0
+    for (let i = 0; i < a.length; i += 4) for (let c = 0; c < 3; c++) { const d = a[i + c] - b[i + c]; se += d * d }
+    const mse = se / (w * h * 3)
+    const both = document.createElement('canvas'); both.width = 2 * w; both.height = h
+    const bg = both.getContext('2d'); bg.drawImage(renderer.domElement, 0, 0); bg.drawImage(img, w, 0, w, h)
+    out.push({ name: v.name, ms, psnr: mse === 0 ? 99 : 10 * Math.log10(255 * 255 / mse), render: renderer.domElement.toDataURL('image/jpeg', 0.85), side: both.toDataURL('image/jpeg', 0.92), png: png ? renderer.domElement.toDataURL('image/png') : null })
+  }
+  return out
 }
 window.READY = true
 </script></body></html>`
@@ -96,23 +144,31 @@ const server = http.createServer((req, res) => {
 await new Promise((r) => server.once('listening', r))
 const BASE = `http://127.0.0.1:${server.address().port}`
 await page.addInitScript((cfg) => { window.CFG = cfg }, { w: t.w, h: t.h, fl_y: t.fl_y, splatUrl: `/f${path.resolve(splat)}`, ext: EXT, accumExt: ACCUM_EXT, png: PNG, maxSh: MAX_SH === null ? null : Number(MAX_SH) })
+const VARIANTS = SWEEP || [{ name: 'default' }]
 await page.goto(`${BASE}/judge.html`)
 await page.waitForFunction(() => window.READY, null, { timeout: 180000 })
 const spark = await page.evaluate(() => window.SPARK)
 if (SOFTWARE && !/swiftshader/i.test(spark.gl_renderer)) { console.error(`NOOK_SOFTWARE_GL=1 but WebGL runs on: ${spark.gl_renderer}`); process.exit(1) }
 if (SAVE) fs.mkdirSync(SAVE, { recursive: true })
-const frames = []
+const results = Object.fromEntries(VARIANTS.map((v) => [v.name, []]))
 for (const f of pick) {
   const K = ['fl_x', 'fl_y', 'cx', 'cy'].map((k) => f[k] ?? t[k])
-  const r = await page.evaluate(([m, u, K]) => window.judge(m, u, K), [f.transform_matrix, `/f${path.resolve(capture, f.file_path)}`, K])
-  frames.push({ index: f.index, psnr: +r.psnr.toFixed(2) })
-  if (SAVE) {
-    const out = (name, url) => fs.writeFileSync(path.join(SAVE, `${name}-${String(f.index).padStart(4, '0')}.${url.startsWith('data:image/png') ? 'png' : 'jpg'}`), Buffer.from(url.split(',')[1], 'base64'))
+  const rs = await page.evaluate(([m, u, K, vs]) => window.judge(m, u, K, vs), [f.transform_matrix, `/f${path.resolve(capture, f.file_path)}`, K, VARIANTS])
+  for (const r of rs) {
+    results[r.name].push({ index: f.index, psnr: +r.psnr.toFixed(2), ms: Math.round(r.ms) })
+    if (!SAVE) continue
+    const dir = SWEEP ? path.join(SAVE, r.name) : SAVE
+    fs.mkdirSync(dir, { recursive: true })
+    const out = (name, url) => fs.writeFileSync(path.join(dir, `${name}-${String(f.index).padStart(4, '0')}.${url.startsWith('data:image/png') ? 'png' : 'jpg'}`), Buffer.from(url.split(',')[1], 'base64'))
     out('render', r.render); out('side', r.side)
     if (r.png) out('render', r.png)
   }
+  if (SWEEP) console.error(`frame ${f.index} done`)
 }
 await browser.close()
 server.close()
+const mean = (xs) => +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(2)
+const frames = results[VARIANTS[0].name].map(({ index, psnr }) => ({ index, psnr }))
 const ps = frames.map((f) => f.psnr)
-console.log(JSON.stringify({ mean_psnr: +(ps.reduce((a, b) => a + b, 0) / ps.length).toFixed(2), min_psnr: Math.min(...ps), frames, spark }))
+const sweep = SWEEP ? Object.fromEntries(VARIANTS.map((v) => [v.name, { mean_psnr: mean(results[v.name].map((r) => r.psnr)), frame_ms: mean(results[v.name].map((r) => r.ms)), frames: results[v.name] }])) : undefined
+console.log(JSON.stringify({ mean_psnr: +(ps.reduce((a, b) => a + b, 0) / ps.length).toFixed(2), min_psnr: Math.min(...ps), frames, spark, sweep }))

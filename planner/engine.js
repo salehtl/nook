@@ -182,7 +182,13 @@ scene.background = new THREE.Color(0x1b1d21)
 // lodRenderScale: 0.5 keeps splats down to half a pixel: at the default 1.0 a real room lost 8-10 % of its Laplacian
 // variance at 1280 × 800, at 0.5 under 0.5 %. The splat budget still caps what's drawn.
 // onDirty: an LoD selection or sort that lands after the wake tail still gets drawn (one frame, not a new tail).
-const spark = new SparkRenderer({ renderer, lodRaycast: 0, lodRenderScale: 0.5, onDirty: () => wake(50) })
+// sortRadial: false orders splats by camera depth, as gsplat does in training. Spark's default radial order cost 2.4 dB
+// against the photos on a real room (evals/psnr_judge.mjs). maxPixelRadius 2048: gsplat doesn't clamp either (+0.36 dB);
+// phones keep Spark's default, because large splats near the camera add fill cost that nobody has measured there.
+const spark = new SparkRenderer({
+  renderer, lodRaycast: 0, lodRenderScale: 0.5, onDirty: () => wake(50), sortRadial: false,
+  ...(/iPhone|iPad|iPod|Android/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ? {} : { maxPixelRadius: 2048 }),
+})
 scene.add(spark)
 
 // --- look: the whole frame (scan splats included) is rendered linear into a half-float target, then one

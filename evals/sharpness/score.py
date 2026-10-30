@@ -285,7 +285,7 @@ def spark_judge(a):
         judge = Path(os.environ.get("NOOK_PSNR_JUDGE", Path.home() / "nook-exp/src/evals/psnr_judge.mjs"))
     args = ["node", str(judge), str(Path(a.splat).resolve()), str(Path(a.data).resolve()), "--val", *shlex.split(a.spark_args)]
     env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"} | {"NOOK_SOFTWARE_GL": "1"}
-    limit = ["nice", "-n", "10", "taskset", "-c", "0-7"]
+    limit = ["nice", "-n", "10", "taskset", "-c", "8-15"]
     if shutil.which("node") and env.get("NOOK_BROWSER"):
         cmd = limit + args
     else:
