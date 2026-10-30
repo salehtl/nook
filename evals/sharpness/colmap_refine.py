@@ -2,7 +2,7 @@
 known poses, then bundle adjustment of the poses (intrinsics fixed), twice. The result is aligned back onto the ARKit
 frame (similarity, Umeyama on camera centers) and written as a new dataset (images symlinked).
 
-colmap_refine.py SRC_DS DST_DS WORK_DIR [--pairs-k 30] [--rounds 2]"""
+colmap_refine.py SRC_DS DST_DS WORK_DIR [--pairs-k 30] [--rounds 2] [--features 8192] [--max-image-size 0] [--ba-iters 200]"""
 import argparse, json, math, os, shutil, sqlite3, subprocess, sys, time
 from pathlib import Path
 import numpy as np
@@ -12,6 +12,8 @@ p.add_argument("src"); p.add_argument("dst"); p.add_argument("work")
 p.add_argument("--pairs-k", type=int, default=30)
 p.add_argument("--rounds", type=int, default=2)
 p.add_argument("--features", type=int, default=8192)
+p.add_argument("--max-image-size", type=int, default=0, help="SIFT works on images up to this long side (0: full size)")
+p.add_argument("--ba-iters", type=int, default=200)
 a = p.parse_args()
 src = Path(a.src) / "data"; work = Path(a.work); work.mkdir(parents=True, exist_ok=True)
 db = work / "db.db"
@@ -38,7 +40,8 @@ if not imgdir.exists():
 if not db.exists():
     run("feature_extractor", "--database_path", db, "--image_path", imgdir, "--ImageReader.camera_model", "PINHOLE",
         "--ImageReader.single_camera_per_image", 1, "--FeatureExtraction.use_gpu", 0,
-        "--SiftExtraction.max_num_features", a.features)
+        "--SiftExtraction.max_num_features", a.features,
+        *(("--FeatureExtraction.max_image_size", a.max_image_size) if a.max_image_size else ()))
 con = sqlite3.connect(db)
 rows = con.execute("select image_id, name, camera_id from images").fetchall()
 ids = {n: (i, c) for i, n, c in rows}
@@ -114,7 +117,7 @@ for r in range(a.rounds):
     print("\n".join(l for l in out.splitlines() if "points" in l.lower() or "error" in l.lower())[-600:])
     out = run("bundle_adjuster", "--input_path", tri, "--output_path", ba, "--BundleAdjustment.refine_focal_length", 0,
               "--BundleAdjustment.refine_principal_point", 0, "--BundleAdjustment.refine_extra_params", 0,
-              "--BundleAdjustment.refine_sensor_from_rig", 0, "--BundleAdjustmentCeres.max_num_iterations", 200)
+              "--BundleAdjustment.refine_sensor_from_rig", 0, "--BundleAdjustmentCeres.max_num_iterations", a.ba_iters)
     print("\n".join(l for l in out.splitlines() if "cost" in l.lower() or "error" in l.lower() or "residual" in l.lower())[-1200:])
     cur = ba
 new = read_poses(cur)
