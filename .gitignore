@@ -2,6 +2,10 @@
 .venv/
 __pycache__/
 .env
+.env.*
+!.env.example
+.direnv/
+*.p8
 node_modules/
 *.log
 evals/out/

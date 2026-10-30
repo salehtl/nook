@@ -144,6 +144,10 @@ in
         # Training runs as a child: stop it with the server.
         KillMode = "mixed";
         TimeoutStopSec = 30;
+        # The house's services come first; training peaks near 12.3 GB (docs/plans/nook-v4.md).
+        Nice = 10;
+        CPUWeight = 50;
+        MemoryMax = "16G";
         # /run/nook holds gpu.lock; group-writable so a user in the nook group (evals/remote.sh) can share it.
         RuntimeDirectory = "nook";
         RuntimeDirectoryMode = "0775";

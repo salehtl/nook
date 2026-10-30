@@ -2,6 +2,8 @@
 
 > **Update 2026-10-26:** Brush is retired. Training runs on kakapo only, with gsplat (CUDA): the same held-out quality on the real scan in half the time (16 vs 33 min on the RTX 2060). The Brush and Metal/Vulkan details below are historical. See contract §4.9.
 
+> **House rules win (2026-10-30):** the bare `nixos-rebuild test` and "switch and merge" steps below are historical. Host changes go through `scripts/guarded-test.sh` and a PR that Saleh merges, as `/etc/nixos/CLAUDE.md` says.
+
 Two goals, one change set:
 
 1. **Quality.** The first real scan (2026-10-26) trained in 8 minutes and scored 20.8 dB on held-out views. Most of the loss traces to iPhone auto-exposure and white balance drifting while scanning. The rest is coverage and conservative training defaults.

@@ -2,6 +2,8 @@
 
 **Status:** IN PROGRESS (started 2026-10-27, branch `v4`). Revision 2 (2026-10-27), after a blind critique; the critique's findings are folded in and listed at the end.
 
+> **House rules win (2026-10-30):** the plan below predates this note. Project sessions don't stop system services or use sudo. Runs take `/run/nook/gpu.lock` instead of stopping `nook-scan.service`. Host changes follow `/etc/nixos/CLAUDE.md`.
+
 ## Progress log
 - **2026-10-27, phase 0 (main loop):**
   - **0a** on kakapo (`evals/sizing_0a_remote.sh`, judged by `evals/sizing_0a_judge.sh`; scan-20261027-112322, 1,089 training frames, every 10th held out, held-out PSNR in Spark):
