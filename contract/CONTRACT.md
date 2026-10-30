@@ -56,6 +56,7 @@ python3 planner/serve.py [--port 8765] [--room-file room/room.json] [--layouts-d
 
 - `?library=<url>`: library to load (default `/library/library.json`). Asset paths resolve relative to it. A missing library is an empty library, not an error.
 - `?room=<name>`: the room to open (§2.7).
+- `?lod=0`: keep the plain room splats (no level of detail, §2.6).
 
 ### 2.3 Features (MVP)
 
@@ -135,6 +136,8 @@ Goal: semi-realistic for $0 in the planner, plus an optional paid photoreal pass
 3. **Contact shadows**: every placed item (GLB or splat) gets a soft blob shadow on the floor: a radial-gradient quad slightly larger than its footprint, just above y = 0, which follows the item's position and rotation. It can be toggled.
 4. Splat furniture already matches the scan's look. Nothing changes there beyond the contact shadow.
 
+**Level of detail:** after a splat room loads and its first bake ends, the planner builds Spark's on-device LoD tree in a worker (`createLodSplats()`), and Spark then draws a view selection within its platform budget. No server file is needed. The tree is skipped on a phone when the room has at most 1,500,000 splats, when `navigator.deviceMemory < 4`, and with `?lod=0`. A failed build keeps the plain splats and reports no error. Room picks and the floor fit always read the plain splats, so a pick doesn't depend on the camera or on LoD. `lodRenderScale` is 0.5. `getState().room` gains `lod?: 'off' | 'building' | 'on'`; `splatCount` stays the scan's full count.
+
 **Render this view (paid, about $0.04)**. The default model is `nano-banana`, picked by a live comparison (evals/golden/RESULTS.md).
 
 5. A **Render** button (top bar) captures the current view (the canvas only, no UI) as a JPEG and asks for confirmation, showing the model and its price. It then `POST`s to `/api/render` and shows the result side by side with the input. A **Renders** panel lists past renders, newest first.
@@ -183,6 +186,7 @@ listRenders(): Promise<RenderMeta[]>
 - P14. In mock mode, `renderView()` writes the jpg/input/json files, appends a mock cost row, and returns a URL that serves the image. The render shows up in `listRenders()` and in the Renders panel.
 - P15. Without a key (and not in mock mode), `/api/render` returns 503 with the FAL_KEY message, and the UI shows it as a toast.
 - P16. Performance: with the fixture splat room and 3 items, orbiting stays interactive. Baking happens only on load, on save, or when asked, never per frame.
+- P27. With LoD on, a pick matches the same pick with `?lod=0` within 1 cm. The image at 1280 × 800 stays within 5 % of the plain room's Laplacian variance.
 - P10. A missing or corrupt asset shows an error message and the rest of the app keeps working.
 
 ### 2.7 Rooms (planner v2)
