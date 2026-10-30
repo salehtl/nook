@@ -535,7 +535,8 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 - It then writes or updates `<room-dir>/room.json` (room.schema.json): `splat` is the path of the SPZ relative to the repo root (or to `<room-dir>`'s parent when outside the repo), and `transform` is `position [0, −floor_y, 0]`, `quaternion [0,0,0,1]`, `scale 1`. Other existing keys, such as `look` and `placeholder`, are kept. The same config is also written to `<room-dir>/<name>.room.json` (§2.7), so the room keeps its alignment after a later scan repoints `room.json`.
   - `floor_y` comes from `meta.floor_y`. Otherwise it's estimated from seed or depth points (a low percentile of the y values of near-horizontal dense regions).
 - `--holdout-every N` (default 0) excludes frames with `index % N == 0` from training, so that evals can score them.
-- The last stdout line is JSON: `{ "name", "ply", "room_json", "splats", "floor_y", "steps", "seconds", "trainer": "<name and version>" }`.
+- The last stdout line is JSON: `{ "name", "ply", "room_json", "splats", "floor_y", "steps", "seconds", "trainer": "<name and version>", "floor_warning": "<line>" | null, "frames": {"train", "held_out", "test_walk"} }`.
+- **Floor sanity:** `meta.floor_y` is the lowest large flat surface, which can be another level seen through an opening. When the median camera height above it is outside 0.9-1.9 m, `train` and `check` warn, name the seed points' estimate if it's plausible, and set `floor_warning`. `floor_y` itself is kept.
 - Failures exit non-zero with one actionable stderr line (no traceback), and write nothing into `<room-dir>`.
 
 ### 4.7 Acceptance: nook-scan
@@ -561,12 +562,15 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
   - `"exposure_locked": bool` and `"white_balance_locked": bool`: whether the app locked them for the whole capture. The app locks both once tracking has been `normal` for about 1 s. Keyframes are only kept after the locks are in place.
   - `"lock_iso"`, `"lock_exposure_duration"` (s), and `"lock_white_balance_gains": {"r","g","b"}`: the locked values, for reference.
 - Each frame may carry `"exposure_duration"` (s) and `"exposure_offset"` (EV) from `ARCamera`.
-- **Guided passes:** each frame may carry `"pass": 1 | 2 | 3`:
+- **Guided passes:** each frame may carry `"pass": 1 | 2 | 3 | 4`:
   1. loop at chest height
   2. lower loop, phone tilted down
   3. walk through the middle
+  4. reserved for a further pass the app may add
 
   The trainer ignores the pass number. It's only for diagnostics.
+- **Test walk:** a frame may carry `"test_walk": true`. These frames are never trained on, never feed seeds and are never viewpoints. They go to `transforms_val.json` for scoring, with any held-out frames, and they don't count in `n_train` (§4.9.1). They don't set the crop box or the floor. If `points.ply` exists, seeds are rebuilt from the depth maps of the training frames, because its points can't be split by frame.
+- **Seed cap:** the app stops `points.ply` at 400,000 points, which can happen before it has looked up. At 400,000 or more points, with depth maps present, seeds come from the training frames' depth maps instead: 2 cm voxels, larger if needed to fit the budget.
 
 ### 4.9 Trainer v2
 
@@ -585,7 +589,7 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 The v2 preset trains every capture for the same number of steps, so a 1,200-frame scan comes out undertrained. v3 scales them.
 
 **Scaled settings** (`--quality high`, the default):
-- `steps = clamp(k × n_train, 20,000, 120,000)`, where `n_train` is the number of training frames (after `--holdout-every`). `k = 80` steps per frame (v4 phase 0a: on a 1,089-frame capture at 2M splats, 40 → 80 steps per frame raised held-out PSNR from 21.44 to 22.03 dB).
+- `steps = clamp(k × n_train, 20,000, 120,000)`, where `n_train` is the number of training frames (after `--holdout-every`, without test-walk frames). `k = 80` steps per frame (v4 phase 0a: on a 1,089-frame capture at 2M splats, 40 → 80 steps per frame raised held-out PSNR from 21.44 to 22.03 dB).
 - `train_max_splats`: a constant per GPU class (`scan/src/nook_scan/gpu.py`), never computed from free VRAM, so `--dry-run` gives the same answer on any machine. For now: 2,000,000 on a 6–10 GB card (kakapo's RTX 2060), 3,000,000 above 10 GB.
 - High-resolution stills (§4.10) train at `stills_max_size` (default: the same as `max_image_size`, 1920; 0a decides whether 2880 pays off). Video frames stay at `max_image_size`.
 - `deliver_max_splats` (default 1,500,000): after cropping, splats beyond this are pruned, lowest `opacity × volume` first, before the room's SPZ and PLY are written. The planner and phones load the delivered room. `--keep-full-ply` also writes the unpruned crop as `<name>.full.ply`.

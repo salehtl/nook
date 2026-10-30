@@ -36,22 +36,24 @@ FLAGS = {"steps": "--steps", "train_max_splats": "--max-splats", "deliver_max_sp
          "pose_opt": "--pose-opt", "holdout_every": "--holdout-every"}
 
 
-def n_train(n_frames: int, holdout_every: int) -> int:
-    """Training frames left after --holdout-every (frames with index % N == 0 are held out)."""
-    return n_frames - (len(range(0, n_frames, holdout_every)) if holdout_every > 0 else 0)
+def n_train(n_frames: int, holdout_every: int, test_walk=()) -> int:
+    """Training frames left after --holdout-every (frames with index % N == 0 are held out) and without the test walk
+    (`test_walk`: its frame indices, contract §4.8)."""
+    held = len(range(0, n_frames, holdout_every)) if holdout_every > 0 else 0
+    return n_frames - held - sum(1 for i in test_walk if not (holdout_every > 0 and i % holdout_every == 0))
 
 
 def scaled_steps(n: int) -> int:
     return min(STEPS_MAX, max(STEPS_MIN, K_STEPS_PER_FRAME * n))
 
 
-def resolve(n_frames: int, quality: str = "high", given: dict | None = None) -> dict:
+def resolve(n_frames: int, quality: str = "high", given: dict | None = None, test_walk=()) -> dict:
     """The settings a run uses: the preset, scaled to the capture's training frames, overridden by `given` (explicit
     flags or a retrain's settings; None values count as not given). Doesn't range-check: see check()."""
     g = {k: v for k, v in (given or {}).items() if v is not None}
     pre = PRESETS[quality]
     holdout = g.get("holdout_every", 0)
-    s = {"steps": g.get("steps", pre["steps"] or scaled_steps(n_train(n_frames, holdout)))}
+    s = {"steps": g.get("steps", pre["steps"] or scaled_steps(n_train(n_frames, holdout, test_walk)))}
     s["train_max_splats"] = g.get("train_max_splats", gpu.train_max_splats() if quality == "high" else DRAFT_MAX_SPLATS)
     s["deliver_max_splats"] = g.get("deliver_max_splats", min(gpu.DELIVER_MAX_SPLATS, s["train_max_splats"]))
     s["max_image_size"] = g.get("max_image_size", pre["max_image_size"])
@@ -78,10 +80,10 @@ def check(given: dict) -> str | None:
     return None
 
 
-def summary(n_frames: int, quality: str = "high", given: dict | None = None) -> dict:
+def summary(n_frames: int, quality: str = "high", given: dict | None = None, test_walk=()) -> dict:
     """`--dry-run` and the server's /defaults: {"n_train", "settings", "eta_s"}."""
-    s = resolve(n_frames, quality, given)
-    return {"n_train": n_train(n_frames, s["holdout_every"]), "settings": s, "eta_s": gpu.eta_s(s["steps"], s["train_max_splats"])}
+    s = resolve(n_frames, quality, given, test_walk)
+    return {"n_train": n_train(n_frames, s["holdout_every"], test_walk), "settings": s, "eta_s": gpu.eta_s(s["steps"], s["train_max_splats"])}
 
 
 def as_flags(s: dict) -> list[str]:

@@ -120,8 +120,12 @@
                 "enum": [
                   1,
                   2,
-                  3
+                  3,
+                  4
                 ]
+              },
+              "test_walk": {
+                "type": "boolean"
               }
             }
           }

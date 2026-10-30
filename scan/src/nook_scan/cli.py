@@ -19,7 +19,7 @@ from . import REPO, ScanError, say
 from . import capture, dataset, gpu, photometric, poses, post, room, roomplan, trainer
 from .settings import PRESETS
 from . import settings as settings_mod
-from .ply import write_splats
+from .ply import read_points, write_splats
 from .spz import write_spz
 
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -105,16 +105,21 @@ def cmd_check(args) -> int:
         print(f"ok   {root.name}: {len(cap.frames)} frames {t['w']}x{t['h']}, lidar={m['lidar']}, depth={depth}, "
               f"seeds={'yes' if t.get('ply_file_path') else 'no'}, span {np.linalg.norm(np.ptp(pos, axis=0)):.2f} m, floor_y={m.get('floor_y')}, "
               f"exposure_locked={m.get('exposure_locked')}")
+        if m.get("floor_y") is not None:  # points.ply only: rebuilding seeds from depth is too slow for a check
+            seeds = read_points(root / t["ply_file_path"])[0] if t.get("ply_file_path") else None
+            warning = post.floor_warning(m["floor_y"], pos, seeds)
+            if warning:
+                print(f"warn {warning}")
     return 0
 
 
-def resolve(args, n_frames: int) -> dict:
+def resolve(args, n_frames: int, test_walk=()) -> dict:
     """The effective settings (§4.9.1 keys): the preset scaled to the capture, overridden by explicit flags. The CLI's
     limits are looser than the retrain ranges (settings.RANGES), so evals can train tiny runs."""
     s = settings_mod.resolve(n_frames, args.quality, {
         "steps": args.steps, "train_max_splats": args.max_splats, "deliver_max_splats": args.deliver_max_splats,
         "max_image_size": args.max_image_size, "stills_max_size": args.stills_max_size, "sh_degree": args.sh_degree,
-        "pose_opt": args.pose_opt or None, "holdout_every": args.holdout_every})
+        "pose_opt": args.pose_opt or None, "holdout_every": args.holdout_every}, test_walk)
     if s["holdout_every"] < 0 or s["holdout_every"] == 1:
         raise ScanError("--holdout-every must be 0 (off) or at least 2")
     if s["steps"] < 100:
@@ -140,8 +145,9 @@ def cmd_train(args) -> int:
     if args.init and not Path(args.init).expanduser().is_file():
         raise ScanError(f"--init {args.init}: no such splat file (pass a room's .spz or .ply)")
     if args.dry_run:  # the capture's frame count is all it needs: read it without unzipping
-        n_frames = capture.peek(args.capture)["frames"]
-        print(json.dumps(settings_mod.summary(n_frames, args.quality, resolve(args, n_frames))), flush=True)
+        info = capture.peek(args.capture)
+        n_frames, walk = info["frames"], info["test_walk"]
+        print(json.dumps(settings_mod.summary(n_frames, args.quality, resolve(args, n_frames, walk), walk)), flush=True)
         return 0
     room_dir = Path(args.room_dir).expanduser()
     if room_dir.exists() and not room_dir.is_dir():
@@ -156,13 +162,14 @@ def cmd_train(args) -> int:
         say("preparing: checking the capture")
         root = capture.open_capture(args.capture, work)
         cap = capture.load(root)
-        cfg = resolve(args, len(cap.frames))
+        walk = [i for i, f in enumerate(cap.frames) if capture.is_test_walk(f)]
+        cfg = resolve(args, len(cap.frames), walk)
         say(f"capture {root.name}: {len(cap.frames)} frames, valid ({args.quality} quality: {cfg['steps']} steps, "
             f"images up to {cfg['max_image_size']} px, up to {cfg['train_max_splats']:,} splats in training and "
             f"{cfg['deliver_max_splats']:,} delivered)")
-        seeds = dataset.seed_points(cap)
+        train_frames = dataset.training_frames(cap, cfg["holdout_every"])
+        seeds = dataset.seed_points(cap, train_frames)
         room_seeds = seeds[0]  # the room itself: floor estimate and crop bounds (far seeds are added below)
-        train_frames = [i for i in range(len(cap.frames)) if not dataset.is_held_out(i, cfg["holdout_every"])]
         if far_seeds > 0 and seeds[1] is not None:
             far, far_rgb = dataset.far_points(cap, train_frames, far_seeds)
             if len(far):
@@ -181,7 +188,7 @@ def cmd_train(args) -> int:
         say("preparing: writing the training images")
         prep = dataset.prepare(cap, work, cfg["holdout_every"], cfg["max_image_size"], seeds=seeds, gains=gains,
                                stills_max_size=cfg["stills_max_size"])
-        say(f"dataset: {prep.n_train} training frames, {prep.n_eval} held out, {len(prep.seeds)} seed points ({prep.seed_source})")
+        say(f"dataset: {prep.n_train} training frames, {prep.n_eval} held out ({len(walk)} on the test walk), {len(prep.seeds)} seed points ({prep.seed_source})")
         if not len(prep.seeds):
             say("warning: no seed points or depth in this capture, the trainer starts from random splats (expect a blurrier room)")
         pose_summary = None
@@ -189,7 +196,7 @@ def cmd_train(args) -> int:
             pose_summary = poses.refine(prep.data_dir)
             say(f"poses refined: median shift {pose_summary['shift_cm_median']} cm (max {pose_summary['shift_cm_max']}), "
                 f"rotation median {pose_summary['rot_deg_median']} deg, in {pose_summary['seconds']:.0f} s")
-        cams = cap.poses()[:, :3, 3]
+        cams = np.delete(cap.poses()[:, :3, 3], walk, axis=0)  # the test walk is only scored: it sets neither the crop nor the floor
         floor_y, floor_source = cap.meta.get("floor_y"), "ARKit floor plane in meta.json"
         if floor_y is None:
             floor_y, floor_source = post.estimate_floor(room_seeds, cams), f"estimated from {prep.seed_source} points"
@@ -197,6 +204,9 @@ def cmd_train(args) -> int:
             raise ScanError("can't tell where the floor is (no ARKit floor plane in meta.json and no seed points or LiDAR depth below the camera): "
                             "scan again with the floor in view")
         say(f"floor at y = {floor_y:.3f} m ({floor_source})")
+        floor_warning = post.floor_warning(floor_y, cams, room_seeds if cap.meta.get("floor_y") is not None else None)
+        if floor_warning:
+            say(f"warning: {floor_warning}")
 
         result = trainer.train(prep.data_dir, work / "out", cfg["steps"], prep.long_side, cfg["sh_degree"],
                                cfg["train_max_splats"], args.progress_every,
@@ -280,7 +290,7 @@ def cmd_train(args) -> int:
         "splats": int(len(splats)), "delivered_splats": int(len(splats)), "cropped_splats": int(len(full)),
         "floor_y": round(float(floor_y), 4), "steps": cfg["steps"], "seconds": round(time.time() - started, 1),
         "trainer": trainer.NAME, "psnr": result["psnr"], "floor_source": floor_source,
-        "frames": {"train": prep.n_train, "held_out": prep.n_eval}, "seeds": prep.seed_source,
+        "floor_warning": floor_warning, "frames": {"train": prep.n_train, "held_out": prep.n_eval, "test_walk": len(walk)}, "seeds": prep.seed_source,
         "quality": args.quality, "max_image_size": prep.long_side, "max_splats": cfg["train_max_splats"],
         "photometric": gains is not None, "sh_degree": cfg["sh_degree"], "viewpoints": len(views),
         "poses": pose_summary, "settings": cfg, "parent": args.parent,
