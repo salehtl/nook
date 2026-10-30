@@ -10,6 +10,9 @@ K_STEPS_PER_FRAME = 25             # §4.9.1: 978 frames -> about 25k steps. On 
                                    # 40k steps' score in half the time; 12k lost detail. The cap keeps a run near 30 min.
 STEPS_MIN, STEPS_MAX = 20_000, 30_000
 DRAFT_MAX_SPLATS = 1_200_000       # v1's cap, kept for --quality draft
+# Rough: added to `eta_s` for colmap_poses. One whole run on 8 threads: 1,074 frames took 23,000 s, of which bundle
+# adjustment 18,500 s (scan-20261030-154924, docs/plans/sharpness.md). The real time varies with the room.
+COLMAP_SECONDS_PER_FRAME = 22
 
 # Quality presets, for gsplat on kakapo's RTX 2060. `high` was tuned on the first real scan (scan-20261026-093654:
 # 517 frames, 1920x1440, auto exposure) and judged by Spark on held-out frames as evals/scan_quality.sh does: 20k
@@ -30,11 +33,12 @@ RANGES = {
     "sh_degree": (int, 0, 3),
     "pose_opt": (bool, None, None),
     "holdout_every": (int, 0, 50),
+    "colmap_poses": (bool, None, None),
 }
 KEYS = tuple(RANGES)
 FLAGS = {"steps": "--steps", "train_max_splats": "--max-splats", "deliver_max_splats": "--deliver-max-splats",
          "max_image_size": "--max-image-size", "stills_max_size": "--stills-max-size", "sh_degree": "--sh-degree",
-         "pose_opt": "--pose-opt", "holdout_every": "--holdout-every"}
+         "pose_opt": "--pose-opt", "holdout_every": "--holdout-every", "colmap_poses": "--colmap-poses"}
 
 
 def n_train(n_frames: int, holdout_every: int, test_walk=()) -> int:
@@ -62,6 +66,7 @@ def resolve(n_frames: int, quality: str = "high", given: dict | None = None, tes
     s["sh_degree"] = g.get("sh_degree", pre["sh_degree"])
     s["pose_opt"] = bool(g.get("pose_opt", quality == "high"))
     s["holdout_every"] = holdout
+    s["colmap_poses"] = bool(g.get("colmap_poses", False))
     return s
 
 
@@ -84,14 +89,19 @@ def check(given: dict) -> str | None:
 def summary(n_frames: int, quality: str = "high", given: dict | None = None, test_walk=()) -> dict:
     """`--dry-run` and the server's /defaults: {"n_train", "settings", "eta_s"}."""
     s = resolve(n_frames, quality, given, test_walk)
-    return {"n_train": n_train(n_frames, s["holdout_every"], test_walk), "settings": s, "eta_s": gpu.eta_s(s["steps"], s["train_max_splats"])}
+    eta = gpu.eta_s(s["steps"], s["train_max_splats"])
+    if s["colmap_poses"]:  # every frame, held out or not, goes through COLMAP
+        eta += COLMAP_SECONDS_PER_FRAME * n_frames
+    return {"n_train": n_train(n_frames, s["holdout_every"], test_walk), "settings": s, "eta_s": eta}
 
 
 def as_flags(s: dict) -> list[str]:
-    """Settings as `nook-scan train` flags (pose_opt is a switch)."""
+    """Settings as `nook-scan train` flags (the bool settings are switches)."""
     out = []
     for k, v in s.items():
-        if k == "pose_opt":
+        if k == "pose_opt" and not v:
+            out += ["--no-pose-opt"]  # on by default in the high preset, so off has to be said
+        elif RANGES[k][0] is bool:
             out += [FLAGS[k]] if v else []
         else:
             out += [FLAGS[k], str(v)]

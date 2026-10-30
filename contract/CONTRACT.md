@@ -609,10 +609,17 @@ The v2 preset trains every capture for the same number of steps, so a 1,200-fram
 | `max_image_size` | `--max-image-size` | 640–3840 |
 | `stills_max_size` | `--stills-max-size` | 640–4032 |
 | `sh_degree` | `--sh-degree` | 0–3 |
-| `pose_opt` | `--pose-opt` (a real flag now, not `NOOK_GSPLAT_ARGS`) | bool |
+| `pose_opt` | `--pose-opt`, `--no-pose-opt` | bool (default on in `high`) |
+| `colmap_poses` | `--colmap-poses` | bool (default false) |
 | `holdout_every` | `--holdout-every` | 0 or 2–50 |
 
 `--refine-poses` (`nook-poses`) stays as a CLI flag but isn't offered as a setting: it didn't help.
+
+**COLMAP poses (opt-in):** `--colmap-poses` (setting `colmap_poses`, mutually exclusive with `--refine-poses`) refines the poses of the prepared dataset with COLMAP before training: SIFT (8192 features at the prepared image size), matching on pose-derived pairs (30 per image, plus 4 neighbours in time), triangulation at the known poses and bundle adjustment with fixed intrinsics, 2 rounds of 200 iterations. It gave the best room in the tests, but it took 6.4 hours on a 1,074-frame room, so it is off by default. CPU only, on half the cores, at low priority. `NOOK_COLMAP_BIN` names the binary, else `colmap` on PATH; when it is missing, the run fails before any work.
+- Training and held-out frames are refined together. The result is aligned back onto the ARKit frame by a similarity on the camera centers (with a small share of the orientations), fitted without outliers, so a room's transform stays valid. `transforms.json` and `transforms_val.json` are replaced; the originals stay as `transforms.arkit.json` and `transforms_val.arkit.json`.
+- Outlier guard: a camera that moved more than 1 m or 15 degrees from ARKit, or that COLMAP did not place, keeps its ARKit pose and is reported. The run fails if fewer than half of the cameras pass, or if COLMAP places fewer than 3.
+- When the capture has depth, seeds and window seeds are rebuilt from the training frames' depth maps at the refined poses, and `points.ply` is rewritten. Without depth, `points.ply` stays. The floor estimate, crop and viewpoints use the refined poses and rebuilt seeds. Photometric gains stay measured at the ARKit poses.
+- The last-line JSON gains `"pose_refinement"`, null when off. `eta_s` adds a rough 22 s per frame for this setting, from one run. The real time varies with the room.
 
 **Experimental: depth loss and fine-tuning** (CLI only for now, not retrain settings, until a real test shows they help):
 - `--depth-weight W` (0–10, default 0 = off): adds `W ×` an L1 loss in log depth between the rendered expected depth and the frame's LiDAR depth (§4 `depth/`), on pixels with a return under 5 m and away from depth edges. Meant to keep floaters out of the room's free space. Frames without depth train as before.

@@ -199,6 +199,44 @@ def _write_image(src: Path, dst: Path, size: tuple[int, int], scale: float, tabl
             im.save(dst, quality=95)
 
 
+def _write_seeds(data: Path, xyz: np.ndarray, rgb: np.ndarray | None) -> np.ndarray:
+    """Write points.ply, at most MAX_SEEDS points. Returns the points written."""
+    if not len(xyz):
+        return np.zeros((0, 3), np.float32)
+    if len(xyz) > MAX_SEEDS:
+        pick = np.random.default_rng(0).choice(len(xyz), MAX_SEEDS, replace=False)
+        xyz, rgb = xyz[pick], rgb[pick]
+    write_points(data / "points.ply", xyz, rgb)
+    return xyz
+
+
+def apply_poses(cap: Capture, data: Path) -> None:
+    """Give the capture's frames (in memory) the poses of its prepared dataset, after refinement. Seeds, the crop and
+    the viewpoints then all use the poses the trainer uses. A prepared image is named after its frame's index."""
+    for name in ("transforms.json", "transforms_val.json"):
+        if (data / name).is_file():
+            for f in json.loads((data / name).read_text())["frames"]:
+                cap.frames[int(Path(f["file_path"]).stem)]["transform_matrix"] = f["transform_matrix"]
+
+
+def depth_seeds(cap: Capture, frames: list[int]) -> tuple[np.ndarray, np.ndarray]:
+    """Seeds from these frames' depth maps at the frames' current poses, whatever points.ply holds: points.ply was
+    collected at the ARKit poses, so it doesn't agree with refined ones. Empty without depth maps."""
+    return _seeds_from_depth(cap, frames, DEPTH_MAX_SEEDS)
+
+
+def replace_seeds(prep: Prepared, xyz: np.ndarray, rgb: np.ndarray, source: str) -> None:
+    """Replace a prepared dataset's points.ply (the transforms have pointed at it since prepare, when it had seeds)."""
+    prep.seeds = _write_seeds(prep.data_dir, xyz, rgb)
+    prep.seed_source = source
+    for name in ("transforms.json", "transforms_val.json"):
+        if (prep.data_dir / name).is_file():
+            doc = json.loads((prep.data_dir / name).read_text())
+            if doc.get("ply_file_path") != "points.ply":
+                doc["ply_file_path"] = "points.ply"
+                (prep.data_dir / name).write_text(json.dumps(doc))
+
+
 def prepare(cap: Capture, work: Path, holdout_every: int, max_image_size: int,
             seeds: tuple[np.ndarray, np.ndarray | None, str] | None = None, gains: dict | None = None,
             stills_max_size: int | None = None, held_out: set[int] | None = None) -> Prepared:
@@ -244,13 +282,7 @@ def prepare(cap: Capture, work: Path, holdout_every: int, max_image_size: int,
         list(pool.map(lambda j: _write_image(*j), jobs))
 
     xyz, rgb, source = seeds if seeds is not None else seed_points(cap, train_frames)
-    seeds = np.zeros((0, 3), np.float32)
-    if len(xyz):
-        seeds = xyz
-        if len(seeds) > MAX_SEEDS:
-            pick = np.random.default_rng(0).choice(len(seeds), MAX_SEEDS, replace=False)
-            seeds, rgb = seeds[pick], rgb[pick]
-        write_points(data / "points.ply", seeds, rgb)
+    seeds = _write_seeds(data, xyz, rgb)
 
     def doc(frames):
         d = {"camera_model": "OPENCV", "fl_x": frames[0]["fl_x"], "fl_y": frames[0]["fl_y"],

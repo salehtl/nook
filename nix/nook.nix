@@ -6,6 +6,7 @@
   stdenvNoCC,
   python3,
   makeWrapper,
+  colmap,
   nook-gsplat,
   nook-add,
 }:
@@ -40,7 +41,8 @@ stdenvNoCC.mkDerivation {
       --add-flags "-c 'from nook_scan.cli import main; main()'" \
       --set PYTHONPATH $out/share/nook/scan/src \
       --set NOOK_VERSION 0.2.0 \
-      --set-default NOOK_GSPLAT_BIN ${lib.getExe nook-gsplat}
+      --set-default NOOK_GSPLAT_BIN ${lib.getExe nook-gsplat} \
+      --set-default NOOK_COLMAP_BIN ${lib.getExe colmap}
     makeWrapper ${py}/bin/python3 $out/bin/nook-web \
       --add-flags "$out/share/nook/planner/serve.py --nook-add ${lib.getExe nook-add}"
     runHook postInstall

@@ -20,7 +20,8 @@ for f in T["frames"] + V["frames"]:
     cap.frames[int(Path(f["file_path"]).stem)]["transform_matrix"] = f["transform_matrix"]
 for f in T["frames"]:
     train.append(int(Path(f["file_path"]).stem))
-xyz, rgb, source = dataset._seeds_from_training(cap, train) if hasattr(dataset, "_seeds_from_training") else dataset.seed_points(cap, frames=train)
+cap.transforms.pop("ply_file_path", None)  # points.ply is at the old poses: always rebuild from depth at the refined ones
+xyz, rgb, source = dataset.seed_points(cap, frames=train)
 far, far_rgb = dataset.far_points(cap, train, 10.0)
 xyz, rgb = np.concatenate([xyz, far]), np.concatenate([rgb, far_rgb])
 ply.write_points(dst / "points.ply", xyz, rgb)
