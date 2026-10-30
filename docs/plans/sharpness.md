@@ -1,8 +1,9 @@
 # Sharper rooms: handoff (2026-10-30, branch `sharpness`)
 
 **Goal (Saleh):** a crisp splat of the majlis. "majlis better" = room `scan-20261027-214555` (1,079 frames, 331 stills at
-4032×3024, LiDAR, kept capture at `/var/lib/nook/jobs/captures/scan-20261027-214555.zip`). Free rein; end state is
-merged PRs and kakapo running the result. Nothing is merged or deployed yet.
+4032×3024, LiDAR; the working copy is unzipped in `~/nook-exp/cap`, so don't go to `/var/lib/nook` for it). End state is merged
+PRs and kakapo running the result, but **every merge and deploy needs Saleh's word in your own session**; this note
+is not that word. Nothing is merged or deployed yet.
 
 ## Who does what (agreed with Saleh, 2026-10-30)
 
@@ -13,7 +14,7 @@ Two sessions, split by files so they never edit the same thing. Neither touches 
 | Owns | `ios/` | everything else: `gsplat/`, `scan/`, `poses/`, `nix/`, `contract/`, `evals/`, `docs/`, `CLAUDE.md` |
 | Branch | `shutter-cap` (its own PR) | `sharpness` (this branch) |
 | Work | the adaptive shutter (below) and any later capture changes; simulator tests; the TestFlight build (`ios/scripts/release.sh`, with Saleh's OK); comparing the new scan with "majlis better" in the browser | the GPU experiments in `~/nook-exp` (sole user of the GPU and of `~/nook-exp`; the Mac session no longer queues runs); trainer and nook-scan changes; the nook PR; the kakapo pin bump and deploy |
-| Merges | its own PR into `main` | its own PR into `main`, then the kakapo PR (Saleh asked for both to be merged and deployed) |
+| Merges | its own PR into `main`, on Saleh's word in that session | its own PR into `main`, then the kakapo PR, each on Saleh's word in that session |
 
 - **Talking to each other:** the sessions can't message each other, so they write here. Either one may add a line
   under "Requests" below (the one exception to the file split), commit it on its own branch and push; the other reads
@@ -58,8 +59,14 @@ Two sessions, split by files so they never edit the same thing. Neither touches 
   (no pass 3), `sharp`/`sharp2` (blurry frames dropped, `filter.py`), `st2880` (stills at 2880 px), `colmap` (when
   `colmap_refine.py` finishes: COLMAP 4 known-pose triangulation + BA, aligned back to ARKit).
 - `queue.txt` → `queue.sh` → `run.sh NAME DS ARGS` (train with `src/gsplat/nook_gsplat.py`, then `judge.py`) →
-  `results.txt`, `runs/<name>/{metrics.json,shots/}`. Runs as `sudo systemd-run` units (`nook-exp-queue`,
-  `nook-exp-colmap`, PATH must be set) so they survive logout (Linger=no killed last night's jobs).
+  `results.txt`, `runs/<name>/{metrics.json,shots/}`. Start the queue in herdr or tmux, with no sudo: `rm queue.stop`,
+  then `bash exp/queue.sh`. `touch queue.stop` ends it once the queue is empty. Runs take `nice -n 10` from `run.sh`.
+- `colmap` comes from the project: `nix develop ~/src/nook#sharpness -c nice -n 10 taskset -c 0-7 <command>`.
+- An earlier queue used `sudo systemd-run` units to survive logout. That breaks the project rules; ask Saleh if a run
+  must survive logout. The loss on 2026-10-29 was blamed on `Linger=no`, but that boot also ended with no shutdown, so
+  the cause isn't known.
+- `~/nook-exp` sits outside `~/src` and holds a capture of the house: delete it when this work ends, after saving
+  `results.txt` and any run worth keeping (`rm -rf ~/nook-exp`).
 - Protocol: 25k steps, 1M splats, SH3 (~20 min). `judge.py` aligns each held-out pose first, then reports PSNR/SSIM
   and a sharpness ratio (render vs photo gradient energy) on all held-out frames and on the sharp ones.
 
@@ -68,6 +75,6 @@ Two sessions, split by files so they never edit the same thing. Neither touches 
 (5/10/15 ms), `colmap`, `st2880`, then the best combination at full size (2M splats, 80 steps/frame) as a retrain.
 
 ## Shipping path
-nook PR → merge → kakapo repo pin bump PR (`flake.nix` nook rev), `ci-local.sh <pr>` → merge (Saleh asked for it) →
+nook PR → merge → kakapo repo pin bump PR (`flake.nix` nook rev), `ci-local.sh <pr>` → merge (on Saleh's word in your session) →
 `deploy.sh <sha>` or the 04:00 autoUpgrade. New defaults go into the high preset (`settings.py`/`trainer.py`) and
 contract §4.9.1; `evals/fake_gsplat.py` must accept new flags.

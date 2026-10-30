@@ -48,7 +48,11 @@
       nixosModules.default = import ./nix/module.nix self;
 
       # kakapo's project rule: tools come from the project's devShell.
-      devShells.${linux}.default = shell pkgs;
+      devShells.${linux} = {
+        default = shell pkgs;
+        # evals/sharpness/colmap_refine.py
+        sharpness = pkgs.mkShell { packages = [ pkgs.colmap ]; };
+      };
       devShells.aarch64-darwin.default = shell nixpkgs.legacyPackages.aarch64-darwin;
     };
 }
