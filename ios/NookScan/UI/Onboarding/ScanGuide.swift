@@ -105,7 +105,8 @@ enum ScanGuide: Int, CaseIterable, Identifiable {
 
 /// The first-run guide: shown once, on the first launch, then only from How to scan.
 enum OnboardingState {
-    static let key = "onboardingSeen"
+    /// Versioned: a new way of scanning shows the guide again, once.
+    static let key = "onboardingSeen-0.5"
 
     static func needsFirstRun(_ defaults: UserDefaults = .standard) -> Bool {
         !defaults.bool(forKey: key)

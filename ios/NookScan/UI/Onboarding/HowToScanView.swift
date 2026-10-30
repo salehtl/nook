@@ -17,7 +17,7 @@ struct GuideCard: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .aspectRatio(1.35, contentMode: .fit)
+            .aspectRatio(1.7, contentMode: .fit)
             .padding(8)
             .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             Text("Step \((guides.firstIndex(of: guide) ?? guide.rawValue) + 1) of \(guides.count)")
@@ -72,15 +72,21 @@ struct HowToScanView: View {
     /// The room-shell guide only on phones with LiDAR (RoomPlan).
     private let guides = ScanGuide.visible()
     private var pages: Int { guides.count + 1 }
+    /// Room for the page dots, which float over the pages, so they never sit on the text.
+    private static let pageDotsHeight: CGFloat = 44
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 TabView(selection: $page) {
                     ForEach(Array(guides.enumerated()), id: \.element) { i, guide in
-                        ScrollView { GuideCard(guide: guide, guides: guides) }.tag(i)
+                        ScrollView { GuideCard(guide: guide, guides: guides) }
+                            .safeAreaPadding(.bottom, Self.pageDotsHeight)
+                            .tag(i)
                     }
-                    ScrollView { DoDontView() }.tag(guides.count)
+                    ScrollView { DoDontView() }
+                        .safeAreaPadding(.bottom, Self.pageDotsHeight)
+                        .tag(guides.count)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .always))
                 .indexViewStyle(.page(backgroundDisplayMode: .always))
