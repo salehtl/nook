@@ -22,23 +22,6 @@ struct CameraLock: Equatable {
     var isFullyLocked: Bool { exposureLocked && whiteBalanceLocked }
 }
 
-/// The exposure to lock: auto exposure's brightness, at a shutter no slower than `maxDuration`. Indoors auto exposure
-/// settles near 1/100 s, and a phone turning at 12°/s smears a 1/100 s frame by about 3 px (11 px at 40°/s); splat
-/// training averages sensor noise away across views but learns blur. So the shutter is shortened and ISO raised to
-/// keep the same exposure. When ISO would pass `maxISO`, ISO stops there and the shutter lengthens just enough.
-enum ShutterCap {
-    /// 1/250 s: 2.5× less motion blur than auto exposure's usual indoor 1/100 s, at 2.5× the ISO.
-    static let maxDuration = 1.0 / 250
-
-    static func exposure(duration: Double, iso: Double, maxDuration: Double = maxDuration,
-                         minISO: Double, maxISO: Double) -> (duration: Double, iso: Double) {
-        guard duration > maxDuration, duration > 0, iso > 0 else { return (duration, iso) }
-        let light = duration * iso
-        let newISO = min(maxISO, max(minISO, light / maxDuration))
-        return (min(duration, light / newISO), newISO)
-    }
-}
-
 /// When to lock exposure and white balance (contract §4.8): once tracking has been normal for about a second,
 /// so auto exposure has settled on the room. No keyframes are kept before the lock is in place, so every image
 /// in the capture shares one exposure and one white balance.

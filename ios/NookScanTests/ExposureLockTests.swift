@@ -140,26 +140,6 @@ struct ExposureLockTests {
     private func json(_ url: URL) throws -> [String: Any] {
         try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
     }
-
-    @Test func shutterCapKeepsBrightnessAtAFasterShutter() {
-        // the majlis scan: auto exposure settled at 1/100 s, ISO 141
-        let e = ShutterCap.exposure(duration: 0.01, iso: 141, minISO: 25, maxISO: 3000)
-        #expect(abs(e.duration - 1.0 / 250) < 1e-9)
-        #expect(abs(e.duration * e.iso - 0.01 * 141) < 1e-6, "same exposure, so the same brightness")
-    }
-
-    @Test func shutterCapLeavesFastShuttersAlone() {
-        let e = ShutterCap.exposure(duration: 1.0 / 500, iso: 64, minISO: 25, maxISO: 3000)
-        #expect(e.duration == 1.0 / 500 && e.iso == 64)
-    }
-
-    @Test func shutterCapStopsAtMaxISOAndLengthensTheShutterInstead() {
-        // a dim room: 1/30 s at ISO 800 would need ISO 6667 at 1/250 s
-        let e = ShutterCap.exposure(duration: 1.0 / 30, iso: 800, minISO: 25, maxISO: 2000)
-        #expect(e.iso == 2000)
-        #expect(abs(e.duration - 800.0 / 30 / 2000) < 1e-9)
-        #expect(e.duration > ShutterCap.maxDuration && e.duration < 1.0 / 30)
-    }
 }
 
 /// A synthetic frame: a small textured image, walking along +X, exposure as ARKit would report it.

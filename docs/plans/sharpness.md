@@ -4,6 +4,30 @@
 4032×3024, LiDAR, kept capture at `/var/lib/nook/jobs/captures/scan-20261027-214555.zip`). Free rein; end state is
 merged PRs and kakapo running the result. Nothing is merged or deployed yet.
 
+## Who does what (agreed with Saleh, 2026-10-30)
+
+Two sessions, split by files so they never edit the same thing. Neither touches the other's branch.
+
+| | **Mac session** ("Medulus Better output sharpness") | **kakapo session** |
+|---|---|---|
+| Owns | `ios/` | everything else: `gsplat/`, `scan/`, `poses/`, `nix/`, `contract/`, `evals/`, `docs/`, `CLAUDE.md` |
+| Branch | `shutter-cap` (its own PR) | `sharpness` (this branch) |
+| Work | the capped shutter (1/250 s, ISO raised to match) and any later capture changes; simulator tests; the TestFlight build (`ios/scripts/release.sh`, with Saleh's OK); comparing the new scan with "majlis better" in the browser | the GPU experiments in `~/nook-exp` (sole user of the GPU and of `~/nook-exp`; the Mac session no longer queues runs); trainer and nook-scan changes; the nook PR; the kakapo pin bump and deploy |
+| Merges | its own PR into `main` | its own PR into `main`, then the kakapo PR (Saleh asked for both to be merged and deployed) |
+
+- **Talking to each other:** the sessions can't message each other, so they write here. Either one may add a line
+  under "Requests" below (the one exception to the file split), commit it on its own branch and push; the other reads
+  it with `git fetch && git show origin/<branch>:docs/plans/sharpness.md`. Saleh relays anything urgent.
+- **Contract:** a capture change that the trainer must read (a new `meta.json` or frame key) is specified in
+  `contract/CONTRACT.md` by the kakapo session first; the Mac session then writes it. The capped shutter needs no
+  contract change: `exposure_duration` and `lock_exposure_duration` already record it.
+- **Testing the capture side:** Saleh rescans the majlis with the TestFlight build the same way as "majlis better" (same
+  passes) and sends it to kakapo. The kakapo session trains it with the winning settings and compares the two rooms.
+
+## Requests
+
+- *(none yet)*
+
 ## Diagnosis so far (measured, `evals/sharpness/blur_stats.py`)
 - Exposure locked at **10 ms**, ISO 141. Median phone turn 12°/s → ~3 px rotational blur at 1920 px (p90 11 px), plus
   ~2–5 px from walking 0.38 m/s at 1–2 m.
@@ -13,14 +37,11 @@ merged PRs and kakapo running the result. Nothing is merged or deployed yet.
 - Literature (Seiskari et al., ECCV 2024, iPhone + VIO, "Gaussian Splatting on the Move"): pose opt ≈ +1.15 dB,
   rolling shutter ≈ +1.0 dB, motion-blur modelling ≈ +0.6 dB (N=5 poses). iPhone readout guess 5–15 ms.
 
-## Code on this branch (untested on the GPU at handoff)
+## Code on `sharpness` (untested on the GPU at handoff)
 - `gsplat/nook_gsplat.py`: `--motion-blur K` (render up to K poses across each frame's exposure from neighbour
   velocities, average; `--motion-blur-px` per sample), `--rolling-shutter-ms R` (gsplat 3DGUT, `viewmats_rs`).
   Needs `timestamp`/`exposure_duration` per frame.
 - `scan/src/nook_scan/dataset.py`: prepared frames carry `timestamp` and `exposure_duration`.
-- iOS: `ShutterCap` locks at ≤ 1/250 s with ISO raised to keep brightness (tests in `ExposureLockTests`). Not built
-  or tested here; Saleh builds and tests iOS changes himself through TestFlight, so edit `ios/` freely and say what
-  to check on the phone (a new scan of the majlis with the capped shutter, then compare against this one).
 
 ## Harness on kakapo (`~/nook-exp`, copies in `evals/sharpness/`)
 - `cap/` unzipped capture, `blur.json` per-frame blur, `env.sh` (`$PY` = nook-gsplat's python, `$SPY` = nook-scan's).
