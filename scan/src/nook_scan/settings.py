@@ -6,8 +6,9 @@ Every setting maps 1:1 to a `nook-scan train` flag (FLAGS) and to a retrain sett
 
 from . import gpu
 
-K_STEPS_PER_FRAME = 80             # §4.9.1, from v4 phase 0a: 40 -> 80 steps per frame gave +0.59 dB held-out at 2M splats
-STEPS_MIN, STEPS_MAX = 20_000, 120_000
+K_STEPS_PER_FRAME = 25             # §4.9.1: 978 frames -> about 25k steps. On scan-20261030-154924 pose refinement matched
+                                   # 40k steps' score in half the time; 12k lost detail. The cap keeps a run near 30 min.
+STEPS_MIN, STEPS_MAX = 20_000, 30_000
 DRAFT_MAX_SPLATS = 1_200_000       # v1's cap, kept for --quality draft
 
 # Quality presets, for gsplat on kakapo's RTX 2060. `high` was tuned on the first real scan (scan-20261026-093654:
@@ -59,7 +60,7 @@ def resolve(n_frames: int, quality: str = "high", given: dict | None = None, tes
     s["max_image_size"] = g.get("max_image_size", pre["max_image_size"])
     s["stills_max_size"] = g.get("stills_max_size", s["max_image_size"])  # §4.10 stills: the same size unless asked
     s["sh_degree"] = g.get("sh_degree", pre["sh_degree"])
-    s["pose_opt"] = bool(g.get("pose_opt", False))
+    s["pose_opt"] = bool(g.get("pose_opt", quality == "high"))
     s["holdout_every"] = holdout
     return s
 

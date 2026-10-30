@@ -593,8 +593,8 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 The v2 preset trains every capture for the same number of steps, so a 1,200-frame scan comes out undertrained. v3 scales them.
 
 **Scaled settings** (`--quality high`, the default):
-- `steps = clamp(k × n_train, 20,000, 120,000)`, where `n_train` is the number of training frames (after `--holdout-every`, without test-walk frames). `k = 80` steps per frame (v4 phase 0a: on a 1,089-frame capture at 2M splats, 40 → 80 steps per frame raised held-out PSNR from 21.44 to 22.03 dB).
-- `train_max_splats`: a constant per GPU class (`scan/src/nook_scan/gpu.py`), never computed from free VRAM, so `--dry-run` gives the same answer on any machine. For now: 2,000,000 on a 6–10 GB card (kakapo's RTX 2060), 3,000,000 above 10 GB.
+- `steps = clamp(k × n_train, 20,000, 30,000)`, where `n_train` is the number of training frames (after `--holdout-every`, without test-walk frames). `k = 25` steps per frame, about 25k steps for a 1,000-frame room, about 25 min of training (docs/plans/sharpness.md). `pose_opt` is on, with a learning rate of 1e-3 per camera; training starts at a quarter of the resolution and grows to full size over the first half of the steps. Together with rebuilt seeds (§4.8), these replaced 80 steps per frame.
+- `train_max_splats`: a constant per GPU class (`scan/src/nook_scan/gpu.py`), never computed from free VRAM, so `--dry-run` gives the same answer on any machine. For now: 1,500,000 on a 6–10 GB card (kakapo's RTX 2060), 3,000,000 above 10 GB.
 - High-resolution stills (§4.10) train at `stills_max_size` (default: the same as `max_image_size`, 1920; 0a decides whether 2880 pays off). Video frames stay at `max_image_size`.
 - `deliver_max_splats` (default 1,500,000): after cropping, splats beyond this are pruned, lowest `opacity × volume` first, before the room's SPZ and PLY are written. The planner and phones load the delivered room. `--keep-full-ply` also writes the unpruned crop as `<name>.full.ply`.
 - `--quality draft` stays as v1 (10k steps, 1280 px). Explicit flags beat both presets.

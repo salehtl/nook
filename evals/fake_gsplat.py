@@ -40,6 +40,9 @@ def main() -> None:
     p.add_argument("--pose-opt", action="store_true")
     p.add_argument("--depth-weight", type=float, default=0.0)   # accepted, ignored
     p.add_argument("--init")
+    p.add_argument("--pose-opt-lr", type=float)   # accepted, ignored
+    p.add_argument("--res-ramp", type=float)
+    p.add_argument("--res-start", type=float)
     a = p.parse_args()
     if os.environ.get("FAKE_GSPLAT_FAIL"):
         print("nook-gsplat: simulated failure", file=sys.stderr)

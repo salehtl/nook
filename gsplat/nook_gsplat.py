@@ -531,7 +531,7 @@ def train(args) -> dict:
         img = images[i].to(dev, non_blocking=True)
         h, w = img.shape[:2]
         K = Ks[i:i + 1]
-        if args.res_ramp > 0 and step < args.res_ramp * args.steps:  # low resolution first (DashGaussian's idea)
+        if args.res_ramp > 0 and not args.init and step < args.res_ramp * args.steps:  # low resolution first (DashGaussian's idea)
             s = args.res_start + (1 - args.res_start) * step / (args.res_ramp * args.steps)
             nh, nw = max(16, round(h * s / 2) * 2), max(16, round(w * s / 2) * 2)
             img = F.interpolate(img.permute(2, 0, 1)[None].float(), (nh, nw), mode="area")[0].permute(1, 2, 0)
@@ -635,7 +635,7 @@ def main(argv=None) -> None:
     p.add_argument("--holdout-every", type=int, default=0, help="skip frames with index %% N == 0 (0: train on all)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--pose-opt", action="store_true", help="refine the training cameras' poses along with the splats")
-    p.add_argument("--pose-opt-lr", type=float, default=1e-5, help="learning rate of the pose corrections")
+    p.add_argument("--pose-opt-lr", type=float, default=1e-3, help="learning rate of the pose corrections")
     p.add_argument("--depth-weight", type=float, default=0.0,
                    help="weight of a log-depth loss against the frames' LiDAR depth (0: off; 0.1-0.3 keeps floaters "
                         "out of free space)")
@@ -647,8 +647,9 @@ def main(argv=None) -> None:
     p.add_argument("--rolling-shutter-ms", type=float, default=0.0,
                    help="the sensor's readout time, top row to bottom row (0: global shutter); renders with gsplat's "
                         "rolling-shutter camera (3DGUT)")
-    p.add_argument("--res-ramp", type=float, default=0.0, metavar="FRAC",
-                   help="grow the training resolution linearly over this fraction of the steps (0: full size throughout)")
+    p.add_argument("--res-ramp", type=float, default=0.5, metavar="FRAC",
+                   help="grow the training resolution linearly over this fraction of the steps (0: full size throughout; "
+                        "--init always trains at full size)")
     p.add_argument("--res-start", type=float, default=0.25, help="the starting scale of --res-ramp")
     p.add_argument("--init", metavar="SPLAT", help="fine-tune from this splat (.ply or .spz, the capture's world frame) "
                                                    "instead of training from seed points; a few thousand steps")
