@@ -6,8 +6,9 @@ import numpy as np
 import torch, torch.nn.functional as F
 from PIL import Image
 
+DEV = "cuda" if torch.cuda.is_available() else "cpu"  # the GPU is only for the queue: set CUDA_VISIBLE_DEVICES=""
 root = Path(sys.argv[1]); t = json.loads((root / "transforms.json").read_text()); fr = t["frames"]
-LAP = torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=torch.float32, device="cuda").view(1, 1, 3, 3)
+LAP = torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=torch.float32, device=DEV).view(1, 1, 3, 3)
 
 def load(p, size):
     with Image.open(p) as im:
@@ -18,7 +19,7 @@ def load(p, size):
         return np.asarray(im, np.float32) / 255.0
 
 def sharp(a):  # variance of Laplacian, and mean gradient magnitude (Tenengrad-ish), at 960x720
-    x = torch.from_numpy(a).cuda()[None, None]
+    x = torch.from_numpy(a).to(DEV)[None, None]
     lap = F.conv2d(x, LAP)
     gx, gy = x[..., :, 1:] - x[..., :, :-1], x[..., 1:, :] - x[..., :-1, :]
     return lap.var().item(), (gx.abs().mean() + gy.abs().mean()).item() / 2

@@ -36,7 +36,17 @@ Two sessions, split by files so they never edit the same thing. Neither touches 
 
 ## Requests
 
-- *(none yet)*
+- **kakapo → Mac (2026-10-30):** if the rebuilt app marks a test walk, write `"test_walk": true` per frame (and `"pass": 4` if it adds one). The trainer on `sharpness` will accept both and score test-walk frames without training on them. **The deployed server validates passes 1-3 only**, so a capture with `"pass": 4` is refused until this branch is merged and deployed.
+
+## Tuning for speed (started 2026-10-30, kakapo session): how to pick this up
+
+Goal: under 30 min upload to room, no visible loss, judged at the seated (1.15 m) and standing (1.6 m) views on the sofa, table, rug, curtains and walls.
+
+- **Test scan, for every comparison:** `scan-20261030-154924` (1,122 frames, 366 stills, 2 ms shutter, LiDAR), copied to `~/nook-exp/incoming` and unzipped to `~/nook-exp/cap`. Its server job was cancelled at step 5,700 to free the GPU; no room exists for it yet.
+- **Datasets:** `~/nook-exp/ds/s1/<name>/data`. `base` is `prep2.py`: 8 stretches of 12 frames scored, 3 guard frames each side left out of training (978 train, 96 scored). `sharp`, `still1`, `still2` come from `filter.py`; `colmap` from `colmap_refine.py` (log: `colmap/s1.log`).
+- **Queue:** `tmux attach -t nook-queue` runs `exp/queue.sh`, the only thing that drives the GPU. Append lines to `queue.txt`; `!` lines are plain shell. Runs are in `runs/s1-*`; results are in `results.txt` (older lines are the earlier scan and scoring).
+- **Survives logout, not reboot.** It runs in tmux, not `sudo systemd-run` (no sudo for project work; `Linger=no`). After a reboot restart the queue and re-add the line that was running.
+- **Fixed:** pose refinement now uses a per-camera Adam with decay (`PoseAdam`). Each camera is drawn only about `steps / n` times, so `lr` limits how far it can move: about 0.2 mm or 0.01 deg per unit of 1e-5 per look.
 
 ## Diagnosis so far (measured, `evals/sharpness/blur_stats.py`)
 - Exposure locked at **10 ms**, ISO 141. Median phone turn 12°/s → ~3 px rotational blur at 1920 px (p90 11 px), plus
