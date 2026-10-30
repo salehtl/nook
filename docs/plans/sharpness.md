@@ -48,6 +48,34 @@ Goal: under 30 min upload to room, no visible loss, judged at the seated (1.15 m
 - **Survives logout, not reboot.** It runs in tmux, not `sudo systemd-run` (no sudo for project work; `Linger=no`). After a reboot restart the queue and re-add the line that was running.
 - **Fixed:** pose refinement now uses a per-camera Adam with decay (`PoseAdam`). Each camera is drawn only about `steps / n` times, so `lr` limits how far it can move: about 0.2 mm or 0.01 deg per unit of 1e-5 per look.
 
+### Learnings so far (2026-10-30, on `scan-20261030-154924`, 20k steps, 1M splats unless noted)
+
+| Run | PSNR | SSIM | LPIPS | Sharpness (1 px blur) | Train min |
+|---|---|---|---|---|---|
+| `s1-b20` baseline | 20.89 | 0.692 | 0.583 | 0.325 | 20.4 |
+| `s1-seeds` rebuilt seeds | 22.40 | 0.694 | 0.579 | 0.381 | 17.7 |
+| `s1-pose1e5` | 21.32 | 0.693 | 0.578 | 0.340 | 21.2 |
+| `s1-pose1e4` | 21.08 | 0.692 | 0.576 | 0.344 | 21.5 |
+| `s1-pose5e4` | 21.16 | 0.692 | 0.563 | 0.365 | 21.1 |
+| `s1-rs10` rolling shutter 10 ms | 20.67 | 0.690 | 0.584 | 0.329 | 32.1 |
+| `s1-ramp` low resolution first | 20.77 | 0.690 | 0.577 | 0.327 | 16.2 |
+| `s1-depth2` depth loss 0.2 | 21.68 | 0.692 | 0.562 | 0.343 | 24.6 |
+| `s1-still2` stills, few video frames | 20.58 | 0.682 | 0.560 | 0.400 | 18.3 |
+| `s1-sharp` blurry frames dropped | 20.75 | 0.692 | 0.575 | 0.330 | 20.3 |
+| `s1-m15` 1.5M splats | 21.64 | 0.693 | 0.568 | 0.354 | 25.7 |
+| `s1-s12k` 12k steps | 20.77 | 0.692 | 0.600 | 0.292 | 11.0 |
+
+- **Read the images before the scores.** All runs look nearly the same. Seated views: the sofa is lumpy, the curtains streak, the rug's items smear. Held-out table close-ups are a smear. Run differences are small next to differences between stretches (LPIPS 0.32 to 0.75).
+- **Noise is not measured yet.** `s1-pose1e5` moved cameras almost nothing but gained 0.43 dB, so noise may be about 0.4 dB. `s1-b20r2` measures it. Train times are also unreliable: other jobs loaded the host.
+- **Real so far:** rebuilt seeds (+4 to +6 dB in stretches 6 and 7, little elsewhere). Rolling shutter is rejected (1.6x slower, no gain). Dropping blurry frames gives no clear gain at a 2 ms shutter.
+- **Pose lr sets reach.** A camera is drawn about 20 times, so lr 1e-4 moved poses only 0.03 deg. COLMAP cannot fit the target: features and matching took over 1 hour, and the first bundle adjustment 2 hours, on the CPU.
+- **Stills are not sharper by every measure:** at 960 px, video gradient energy (0.0240) beat stills (0.0215) on this scan, against the 1.39x in the brief. Scored frames are video only, which may bias the stills test.
+- **MCMC does not place blobs by error.** gsplat's `mcmc.py` and `ops.py` choose by opacity, so blurry areas don't directly get more blobs.
+- **Spark:** default Spark scored 3.1 dB below gsplat on `base-25k`; `extSplats` plus `accumExtSplats` gave only +0.05 dB. The old `psnr_judge.mjs` scored stale sorts under software GL (20.1 dB against 23.9 dB), so older Spark numbers from software GL are suspect.
+- **Next question:** `probe.sh` scores runs on frames they trained on. Sharp there means coverage or Spark is the limit, so stop tuning. Soft there means training or poses.
+- **Host limits:** kakapo fell to 1.2 GiB available during this work (no swap). Run browser tests one at a time under `flock ~/nook-exp/browser.lock`, in a scope with `MemoryMax=6G` and `CPUQuota=800%`.
+- **An app upload starts a job on the deployed server that holds the GPU lock for hours.** Only Saleh stopped the last one; an agent's cancel call was blocked.
+
 ## Diagnosis so far (measured, `evals/sharpness/blur_stats.py`)
 - Exposure locked at **10 ms**, ISO 141. Median phone turn 12°/s → ~3 px rotational blur at 1920 px (p90 11 px), plus
   ~2–5 px from walking 0.38 m/s at 1–2 m.
