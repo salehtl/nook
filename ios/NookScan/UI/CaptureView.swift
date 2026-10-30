@@ -3,13 +3,14 @@ import SwiftUI
 import UIKit
 
 /// The capture screen: live camera (or replay placeholder) with guidance: exposure lock indicator, frame
-/// counter, tracking banner, slow-down warning, and the three guided passes with a coverage ring for each.
+/// counter, tracking banner, slow-down warning, and the guided passes with a coverage ring for each.
 struct CaptureView: View {
     @ObservedObject var controller: CaptureController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(ProcessingStore.self) private var processing
     @State private var confirmDiscard = false
+    @State private var confirmFinish = false
 
     var body: some View {
         Group {
@@ -33,6 +34,12 @@ struct CaptureView: View {
                 controller.discard()
                 dismiss()
             }
+        }
+        .confirmationDialog("Finish the scan?", isPresented: $confirmFinish, titleVisibility: .visible) {
+            Button("Finish scan") { controller.finish() }
+            Button("Keep scanning", role: .cancel) {}
+        } message: {
+            Text("Still missing: \(controller.missingBeforeFinish.map(\.shortName).joined(separator: ", ")).")
         }
     }
 
@@ -83,6 +90,11 @@ struct CaptureView: View {
             Banner(text: "Scan interrupted. Tap Done to save what you have, then start a new scan for the rest.",
                    systemImage: "pause.circle.fill", color: .orange)
         } else if controller.phase == .recording {
+            if controller.nearlyFull {
+                Banner(text: "Scan nearly full: finish up", systemImage: "externaldrive.fill", color: .orange)
+            } else if controller.lowStorage {
+                Banner(text: "Low storage: this scan may not fit", systemImage: "externaldrive.fill", color: .orange)
+            }
             if let message = controller.tracking.message {
                 Banner(text: message, systemImage: "exclamationmark.triangle.fill", color: .orange)
             }
@@ -139,14 +151,14 @@ struct CaptureView: View {
                         Button {
                             controller.nextPass()
                         } label: {
-                            Text("Next pass").lineLimit(1).frame(maxWidth: .infinity)
+                            Text(controller.guide.pass.next == .testWalk ? "Test walk" : "Next pass").lineLimit(1).frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
                         .tint(controller.guide.current.isGood ? .green : nil)
                         .disabled(controller.frameCount == 0)
                     }
                     Button {
-                        controller.finish()
+                        if controller.missingBeforeFinish.isEmpty { controller.finish() } else { confirmFinish = true }
                     } label: {
                         Label("Done", systemImage: "checkmark").lineLimit(1).frame(maxWidth: .infinity)
                     }
@@ -224,7 +236,7 @@ struct CaptureView: View {
             return "Point the phone at the room and hold steady for a second while exposure and white balance lock."
         default:
             return controller.frameCount == 0
-                ? "\(controller.guide.pass.instruction) Move slowly: frames are kept every 8 cm or 6°."
+                ? "\(controller.guide.pass.instruction) Move slowly: frames are kept every 4 cm or 3°."
                 : controller.guide.prompt
         }
     }

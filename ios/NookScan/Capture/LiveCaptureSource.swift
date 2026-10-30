@@ -50,6 +50,8 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
         // Vertical planes only feed the RoomPlan alignment; they don't change what the camera records.
         config.planeDetection = [.horizontal, .vertical]
         if hasDepth { config.frameSemantics.insert(.sceneDepth) }
+        // HDR video tone-maps each frame on its own, so the same wall could change brightness between frames.
+        config.videoHDRAllowed = false
         // The format ARKit recommends for stills (e.g. 1920 × 1440 video with 12 MP stills). Without it a still may
         // be no larger than the video frame.
         if let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {

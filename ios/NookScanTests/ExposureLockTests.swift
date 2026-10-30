@@ -91,7 +91,7 @@ struct ExposureLockTests {
 
         var decisions: [FrameDecision] = []
         for i in 0..<40 {
-            if i == 30 { recorder.pass = .low }
+            if i == 30 { recorder.pass = .giant }
             let frame = FakeFrame(timestamp: Double(i) / 10, x: Float(i) / 10, tracking: i < 5 ? .limited("Starting up") : .normal)
             decisions.append(recorder.handle(frame))
             Thread.sleep(forTimeInterval: 0.003)   // let the writer keep up, so no frame is dropped as busy
@@ -185,6 +185,11 @@ struct ExposureLockTests {
         #expect(m.isTooFast, "about 7 px of blur at 1/100 s")
         m.exposure = 1.0 / 1000
         #expect(!m.isTooFast, "under 1 px at 1/1000 s")
+        for i in 60..<180 {  // now turning at 60°/s: hardly any blur at 1/1000 s, but rolling shutter skews the frame
+            t = simd_float4x4(simd_quatf(angle: Float(i) * .pi / 180, axis: [0, 1, 0]))
+            m.update(timestamp: Double(i) / 60, transform: t)
+        }
+        #expect(m.isTooFast, "too fast a turn, whatever the shutter")
     }
 }
 

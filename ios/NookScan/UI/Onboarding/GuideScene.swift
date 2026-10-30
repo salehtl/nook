@@ -13,7 +13,7 @@ struct GuideScene: View {
     var body: some View {
         Canvas { ctx, size in
             let t = (time / Self.period).truncatingRemainder(dividingBy: 1)
-            let showCloseUp = !compact && [.pass1, .pass2, .pass3].contains(guide)
+            let showCloseUp = !compact && [.pass1, .pass2, .pass3, .testWalk].contains(guide)
             let planRect: CGRect
             if showCloseUp {
                 planRect = CGRect(x: 0, y: 0, width: size.width * 0.62, height: size.height).insetBy(dx: 6, dy: 6)
@@ -25,7 +25,7 @@ struct GuideScene: View {
             switch guide {
             case .prepare: drawPrepare(&ctx, in: planRect, t: t)
             case .lockLight: drawLock(&ctx, in: planRect, t: t)
-            case .pass1, .pass2, .pass3: drawPass(&ctx, in: planRect, t: t)
+            case .pass1, .pass2, .pass3, .testWalk: drawPass(&ctx, in: planRect, t: t)
             case .roomShell: drawShell(&ctx, in: planRect, t: t)
             }
         }
@@ -81,6 +81,14 @@ struct GuideScene: View {
         atan2(Double(q.x - p.x), Double(p.y - q.y))
     }
 
+    private var coneColor: Color {
+        switch guide {
+        case .pass2: .orange
+        case .pass3: .mint
+        default: .yellow
+        }
+    }
+
     private func drawPass(_ ctx: inout GraphicsContext, in r: CGRect, t: Double) {
         let room = roomRect(in: r)
         drawRoom(&ctx, room)
@@ -90,15 +98,15 @@ struct GuideScene: View {
         var path = Path()
         let p: CGPoint, h: Double
         switch guide {
-        case .pass3:
+        case .testWalk:
             let a = CGPoint(x: room.minX + room.width * 0.15, y: room.midY + room.height * 0.12)
             let b = CGPoint(x: room.maxX - room.width * 0.15, y: room.midY - room.height * 0.12)
             path.move(to: a); path.addLine(to: b)
             let u = t < 0.5 ? t * 2 : 2 - t * 2
             p = CGPoint(x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u)
-            h = t * 4 * .pi   // turns to face each wall
+            h = t * 4 * .pi   // looks around as it crosses the room
         default:
-            let inset = room.width * (guide == .pass1 ? 0.12 : 0.2)
+            let inset = room.width * (guide == .pass1 ? 0.12 : guide == .pass2 ? 0.2 : 0.16)
             for i in 0...64 {
                 let q = loopPoint(room, inset: inset, u: Double(i) / 64)
                 if i == 0 { path.move(to: q) } else { path.addLine(to: q) }
@@ -107,7 +115,7 @@ struct GuideScene: View {
             h = heading(from: p, to: center)   // looking across the room
         }
         ctx.stroke(path, with: .color(.accentColor.opacity(0.35)), style: StrokeStyle(lineWidth: max(1.5, s * 0.25), dash: [s * 0.4, s * 0.3]))
-        drawPhone(&ctx, at: p, heading: h, scale: s, coneColor: guide == .pass2 ? .orange : .yellow)
+        drawPhone(&ctx, at: p, heading: h, scale: s, coneColor: coneColor)
     }
 
     private func drawPrepare(_ ctx: inout GraphicsContext, in r: CGRect, t: Double) {
@@ -205,8 +213,8 @@ struct GuideScene: View {
 
     // MARK: Close-up (side view)
 
-    /// A person by a wall holding the phone: chest height and level (passes 1 and 3), or lower and tilted down at the
-    /// floor and skirting (pass 2). Pass 3 also turns.
+    /// A person by a wall holding the phone: chest height and level (pass 1), above the head and tilted down (pass 2),
+    /// at the knees and tilted up (pass 3). The test walk moves from seated to standing height.
     private func drawCloseUp(_ ctx: inout GraphicsContext, in r: CGRect, t: Double) {
         ctx.fill(Path(roundedRect: r, cornerRadius: 8), with: .color(.secondary.opacity(0.1)))
         let floorY = r.maxY - r.height * 0.1
@@ -230,14 +238,26 @@ struct GuideScene: View {
         body.move(to: CGPoint(x: footX, y: floorY - tall * 0.45)); body.addLine(to: CGPoint(x: footX + tall * 0.08, y: floorY))
         ctx.stroke(body, with: .color(.primary), lineWidth: 2)
 
-        let low = guide == .pass2
         let bob = sin(t * 2 * .pi * 2) * Double(tall) * 0.01
-        let phoneY = floorY - tall * (low ? 0.5 : 0.7) + CGFloat(bob)
+        let height: CGFloat
+        switch guide {
+        case .pass2: height = 1.02
+        case .pass3: height = 0.3
+        case .testWalk: height = t < 0.5 ? 0.55 : 0.8
+        default: height = 0.7
+        }
+        let phoneY = floorY - tall * height + CGFloat(bob)
         let phoneX = footX + tall * 0.17
         var arm = Path(); arm.move(to: CGPoint(x: footX, y: floorY - tall * 0.72)); arm.addLine(to: CGPoint(x: phoneX, y: phoneY))
         ctx.stroke(arm, with: .color(.primary), lineWidth: 2)
-        // Tilt, radians below level: pass 2 about 35° down; pass 3 sways as it turns.
-        let tilt = low ? 0.6 : (guide == .pass3 ? 0.08 * sin(t * 4 * .pi) : 0)
+        // Tilt, radians below level: pass 2 about 35° down, pass 3 about 30° up; the test walk sways as it looks around.
+        let tilt: Double
+        switch guide {
+        case .pass2: tilt = 0.6
+        case .pass3: tilt = -0.5
+        case .testWalk: tilt = 0.08 * sin(t * 4 * .pi)
+        default: tilt = 0
+        }
         var phone = ctx
         phone.translateBy(x: phoneX, y: phoneY)
         phone.rotate(by: .radians(tilt))
@@ -249,10 +269,11 @@ struct GuideScene: View {
             let dx = cos(a), dy = sin(a)
             var reach = Double(wallX - phoneX) / dx
             if dy > 0 { reach = min(reach, Double(floorY - phoneY) / dy) }
+            if dy < 0 { reach = min(reach, Double(phoneY - r.minY - 2) / -dy) }
             var ray = Path()
             ray.move(to: CGPoint(x: phoneX, y: phoneY))
             ray.addLine(to: CGPoint(x: phoneX + CGFloat(dx * reach), y: phoneY + CGFloat(dy * reach)))
-            ctx.stroke(ray, with: .color((low ? Color.orange : Color.yellow).opacity(0.8)), style: StrokeStyle(lineWidth: 1.5, dash: [3, 3]))
+            ctx.stroke(ray, with: .color(coneColor.opacity(0.8)), style: StrokeStyle(lineWidth: 1.5, dash: [3, 3]))
         }
     }
 }

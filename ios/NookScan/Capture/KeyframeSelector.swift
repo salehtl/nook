@@ -63,6 +63,9 @@ struct MotionMonitor {
     /// Seconds the shutter is open, once locked.
     var exposure: Double?
     var maxBlurPixels: Float = 2
+    /// °/s, whatever the shutter: a fast shutter stops motion blur, but the sensor still reads out top to bottom, so
+    /// a fast turn skews the image (about 8 px across the frame at this speed and a 10 ms readout).
+    var maxTurnSpeed: Float = 35
     static let focalPixels: Float = 1400   // main camera, 1920 px wide
     static let typicalDepth: Float = 1.5   // m: walking past a surface this far away
     private var last: (t: Double, m: simd_float4x4)?
@@ -75,7 +78,7 @@ struct MotionMonitor {
     }
 
     var isTooFast: Bool {
-        if let blur = blurPixels { return blur > maxBlurPixels }
+        if let blur = blurPixels { return blur > maxBlurPixels || angularSpeed > maxTurnSpeed }
         return speed > maxSpeed || angularSpeed > maxAngularSpeed
     }
 

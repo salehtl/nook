@@ -65,7 +65,7 @@ struct DoDontView: View {
     }
 }
 
-/// How to scan: the five guides and the do/don't cards, paged. The first-run sheet and the How to scan button.
+/// How to scan: the guides and the do/don't cards, paged. The first-run sheet and the How to scan button.
 struct HowToScanView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var page = 0
