@@ -42,8 +42,12 @@ def _frame_entry(cap: Capture, f: dict, name: str, scale: float, size=None, intr
     fx, fy, cx, cy = intr or cap.intrinsics(f)
     nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
     sx, sy = nw / w, nh / h
-    return {"file_path": f"images/{name}", "transform_matrix": f["transform_matrix"],
-            "fl_x": fx * sx, "fl_y": fy * sy, "cx": cx * sx, "cy": cy * sy, "w": nw, "h": nh}
+    entry = {"file_path": f"images/{name}", "transform_matrix": f["transform_matrix"],
+             "fl_x": fx * sx, "fl_y": fy * sy, "cx": cx * sx, "cy": cy * sy, "w": nw, "h": nh}
+    for k in ("timestamp", "exposure_duration"):  # nook-gsplat --motion-blur: how the camera moved while exposing
+        if f.get(k) is not None:
+            entry[k] = f[k]
+    return entry
 
 
 def _seeds_from_depth(cap: Capture, max_points: int) -> tuple[np.ndarray, np.ndarray]:
