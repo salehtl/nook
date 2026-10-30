@@ -9,7 +9,9 @@ import simd
 /// still fails, the video keyframe is written instead. Only one still is ever in flight: a slot that comes up
 /// while one is pending just writes its video keyframe.
 final class CaptureRecorder {
-    static let stillEvery = 3
+    /// Stills train sharper than video frames (1.4× the gradient energy on real scans), and the phone kept up with
+    /// every 3rd keyframe. It falls back to the video frame whenever a still can't be taken.
+    static let stillEvery = 2
     /// How long `finish` waits for a still in flight before writing its video keyframe instead.
     static let stillTimeout = 2.0
 
@@ -26,7 +28,7 @@ final class CaptureRecorder {
     private var stopped = false
     private var firstTimestamp: Double?
     private var kept = 0
-    private var currentPass: ScanPass = .chest
+    private var currentPass: ScanPass = .standard
 
     /// `lockCamera` locks exposure and white balance and reports what it locked. nil for sources without a
     /// camera (replay): their frames are kept from the start. `captureStill` takes a high-resolution still
@@ -96,7 +98,8 @@ final class CaptureRecorder {
         selector.commit(transform: kf.transform)
         if firstTimestamp == nil { firstTimestamp = kf.timestamp }
         kept += 1
-        if captureStill != nil, kept.isMultiple(of: Self.stillEvery), pendingStill == nil, writer.canTakeStill {
+        // The test walk is only for scoring, against video-sized images: its stills would just use up the size budget.
+        if captureStill != nil, currentPass != .testWalk, kept.isMultiple(of: Self.stillEvery), pendingStill == nil, writer.canTakeStill {
             pendingStill = (kf, kept)
             return (.keep, true)
         }
@@ -120,7 +123,7 @@ final class CaptureRecorder {
     }
 
     /// Stops accepting frames, waits for the writer and writes the JSON files.
-    func finish(floorY: Float?) throws -> CaptureSummary {
+    func finish(floorY: Float?, ending: CaptureEnding? = nil) throws -> CaptureSummary {
         lock.lock(); stopped = true; lock.unlock()
         _ = stillGroup.wait(timeout: .now() + Self.stillTimeout)
         lock.lock()
@@ -130,8 +133,11 @@ final class CaptureRecorder {
         }
         let cameraLock = lockPolicy.record
         lock.unlock()
-        return try writer.finish(floorY: floorY, cameraLock: cameraLock)
+        return try writer.finish(floorY: floorY, cameraLock: cameraLock, ending: ending)
     }
+
+    /// Close to the server's upload limit: the scan should wrap up.
+    var isNearlyFull: Bool { writer.isNearlyFull }
 
     /// Stops accepting frames and waits for in-flight writes, so the folder can be deleted safely.
     func cancel() {

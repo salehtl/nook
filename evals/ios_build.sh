@@ -65,7 +65,7 @@ if [ -n "$APP" ]; then
   P="$APP/Info.plist"
   pl() { plutil -extract "$1" raw -o - "$P" 2>/dev/null; }
   check "bundle id com.salehtl.nookscan" '[ "$(pl CFBundleIdentifier)" = "com.salehtl.nookscan" ]' "$(pl CFBundleIdentifier)"
-  check "version 0.4.0" '[ "$(pl CFBundleShortVersionString)" = "0.4.0" ]' "$(pl CFBundleShortVersionString) ($(pl CFBundleVersion))"
+  check "version 0.5.0" '[ "$(pl CFBundleShortVersionString)" = "0.5.0" ]' "$(pl CFBundleShortVersionString) ($(pl CFBundleVersion))"
   check "NSCameraUsageDescription is set" '[ -n "$(pl NSCameraUsageDescription)" ]'
   check "ITSAppUsesNonExemptEncryption is false" '[ "$(pl ITSAppUsesNonExemptEncryption)" = "false" ]'
   check "UIRequiredDeviceCapabilities includes arkit" 'plutil -extract UIRequiredDeviceCapabilities json -o - "$P" 2>/dev/null | grep -q arkit'

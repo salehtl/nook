@@ -91,7 +91,7 @@ struct ExposureLockTests {
 
         var decisions: [FrameDecision] = []
         for i in 0..<40 {
-            if i == 30 { recorder.pass = .low }
+            if i == 30 { recorder.pass = .giant }
             let frame = FakeFrame(timestamp: Double(i) / 10, x: Float(i) / 10, tracking: i < 5 ? .limited("Starting up") : .normal)
             decisions.append(recorder.handle(frame))
             Thread.sleep(forTimeInterval: 0.003)   // let the writer keep up, so no frame is dropped as busy
@@ -139,6 +139,57 @@ struct ExposureLockTests {
 
     private func json(_ url: URL) throws -> [String: Any] {
         try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+    }
+
+    @Test func adaptiveShutterOrdinaryRoomStaysWithinTheISOBudget() {
+        // the majlis scan: auto exposure settled at 1/100 s, ISO 141 -> ISO 800 at about 1/567 s
+        let e = AdaptiveShutter.exposure(duration: 0.01, iso: 141, minISO: 25, maxISO: 3000)
+        #expect(e.iso == AdaptiveShutter.isoBudget)
+        #expect(e.duration < AdaptiveShutter.slowest && e.duration > AdaptiveShutter.fastest)
+        #expect(abs(e.duration * e.iso - 0.01 * 141) < 1e-6, "same exposure, so the same brightness")
+        #expect(!e.tooDark)
+    }
+
+    @Test func adaptiveShutterBrightRoomGoesTo1000th() {
+        let e = AdaptiveShutter.exposure(duration: 1.0 / 120, iso: 50, minISO: 25, maxISO: 3000)
+        #expect(abs(e.duration - AdaptiveShutter.fastest) < 1e-9)
+        #expect(abs(e.duration * e.iso - 50.0 / 120) < 1e-6)
+    }
+
+    @Test func adaptiveShutterDimRoomPassesTheBudgetToHold250th() {
+        let e = AdaptiveShutter.exposure(duration: 1.0 / 30, iso: 200, minISO: 25, maxISO: 3000)
+        #expect(abs(e.duration - AdaptiveShutter.slowest) < 1e-9)
+        #expect(e.iso > AdaptiveShutter.isoBudget && !e.tooDark)
+    }
+
+    @Test func adaptiveShutterTooDarkLengthensAndSaysSo() {
+        let e = AdaptiveShutter.exposure(duration: 1.0 / 30, iso: 1600, minISO: 25, maxISO: 2000)
+        #expect(e.iso == 2000 && e.tooDark)
+        #expect(e.duration > AdaptiveShutter.slowest && e.duration < 1.0 / 30)
+    }
+
+    @Test func adaptiveShutterNeverSlowsAutoExposureDown() {
+        let e = AdaptiveShutter.exposure(duration: 1.0 / 4000, iso: 25, minISO: 25, maxISO: 3000)
+        #expect(e.duration == 1.0 / 4000 && e.iso == 25)
+    }
+
+    @Test func slowDownWarningFollowsPredictedBlur() {
+        var m = MotionMonitor()
+        var t = simd_float4x4(1)
+        for i in 0..<60 {  // turning at 30°/s
+            t = simd_float4x4(simd_quatf(angle: Float(i) * 0.5 * .pi / 180, axis: [0, 1, 0]))
+            m.update(timestamp: Double(i) / 60, transform: t)
+        }
+        #expect(!m.isTooFast, "30°/s is under the 60°/s speed limit before the shutter is known")
+        m.exposure = 1.0 / 100
+        #expect(m.isTooFast, "about 7 px of blur at 1/100 s")
+        m.exposure = 1.0 / 1000
+        #expect(!m.isTooFast, "under 1 px at 1/1000 s")
+        for i in 60..<180 {  // now turning at 60°/s: hardly any blur at 1/1000 s, but rolling shutter skews the frame
+            t = simd_float4x4(simd_quatf(angle: Float(i) * .pi / 180, axis: [0, 1, 0]))
+            m.update(timestamp: Double(i) / 60, transform: t)
+        }
+        #expect(m.isTooFast, "too fast a turn, whatever the shutter")
     }
 }
 

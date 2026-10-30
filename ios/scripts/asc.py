@@ -86,6 +86,10 @@ def main():
             sys.exit("asc: no Apple Distribution certificate in App Store Connect matches one in this Mac's keychain")
         prof = next((p for p in s["profiles"] if p["attributes"]["profileState"] == "ACTIVE"), None)
         if not prof:
+            # An invalid profile (its certificate revoked or expired) can't sign anything, and its name blocks a new one.
+            for p in s["profiles"]:
+                check(c.delete(f"/profiles/{p['id']}"))
+                print(f"deleted {p['attributes']['profileState'].lower()} profile '{PROFILE_NAME}' ({p['id']})")
             body = {"data": {"type": "profiles", "attributes": {"name": PROFILE_NAME, "profileType": "IOS_APP_STORE"},
                              "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": s["bundle"]["id"]}},
                                                "certificates": {"data": [{"type": "certificates", "id": s["certs"][0]["id"]}]}}}}

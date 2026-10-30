@@ -81,7 +81,7 @@ final class ReplayCaptureTests: XCTestCase {
         // meta.json
         XCTAssertEqual(meta["version"] as? Int, 1)
         XCTAssertEqual(meta["app"] as? String, "nook-scan")
-        XCTAssertEqual(meta["app_version"] as? String, "0.4.0")
+        XCTAssertEqual(meta["app_version"] as? String, "0.5.0")
         XCTAssertEqual(meta["exposure_locked"] as? Bool, false, "replay has no camera to lock")
         XCTAssertEqual(meta["white_balance_locked"] as? Bool, false)
         XCTAssertNil(meta["lock_iso"])
