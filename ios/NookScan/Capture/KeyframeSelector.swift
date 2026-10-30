@@ -54,15 +54,30 @@ struct KeyframeSelector {
     }
 }
 
-/// Smoothed camera speed, for the "slow down" warning.
+/// Smoothed camera speed, for the "slow down" warning. Once the shutter is known (`exposure`, after the lock) the
+/// warning is about blur rather than speed: how far the image moves while the shutter is open, at the main camera's
+/// focal length in a 1920 px frame. At 1/1000 s you can move freely; at 1/100 s only slowly.
 struct MotionMonitor {
-    var maxSpeed: Float = 0.5          // m/s
-    var maxAngularSpeed: Float = 60    // °/s
+    var maxSpeed: Float = 0.5          // m/s, before the shutter is known
+    var maxAngularSpeed: Float = 60    // °/s, before the shutter is known
+    /// Seconds the shutter is open, once locked.
+    var exposure: Double?
+    var maxBlurPixels: Float = 2
+    static let focalPixels: Float = 1400   // main camera, 1920 px wide
+    static let typicalDepth: Float = 1.5   // m: walking past a surface this far away
     private var last: (t: Double, m: simd_float4x4)?
     private(set) var speed: Float = 0
     private(set) var angularSpeed: Float = 0
 
-    var isTooFast: Bool { speed > maxSpeed || angularSpeed > maxAngularSpeed }
+    /// Predicted motion blur in pixels at the current speed, or nil before the shutter is known.
+    var blurPixels: Float? {
+        exposure.map { Self.focalPixels * Float($0) * (angularSpeed * .pi / 180 + speed / Self.typicalDepth) }
+    }
+
+    var isTooFast: Bool {
+        if let blur = blurPixels { return blur > maxBlurPixels }
+        return speed > maxSpeed || angularSpeed > maxAngularSpeed
+    }
 
     mutating func update(timestamp t: Double, transform m: simd_float4x4) {
         defer { last = (t, m) }

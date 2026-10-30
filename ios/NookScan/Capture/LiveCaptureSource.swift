@@ -70,16 +70,16 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
 
     var canLockCamera: Bool { true }
 
-    /// Locks exposure and white balance of ARKit's camera at their current values, with the shutter capped at
-    /// `ShutterCap.maxDuration` (ISO raised to match). Autofocus stays on: per-frame intrinsics already follow it.
+    /// Locks exposure and white balance of ARKit's camera: auto exposure's brightness at the fastest shutter the light
+    /// allows (`AdaptiveShutter`), and the current white balance. Autofocus stays on: per-frame intrinsics follow it.
     func lockCamera() -> CameraLock {
         guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else { return .none }
         do { try device.lockForConfiguration() } catch { return .none }
         defer { device.unlockForConfiguration() }
         var lock = CameraLock()
         let f = device.activeFormat
-        let fast = ShutterCap.exposure(duration: device.exposureDuration.seconds, iso: Double(device.iso),
-                                       minISO: Double(f.minISO), maxISO: Double(f.maxISO))
+        let fast = AdaptiveShutter.exposure(duration: device.exposureDuration.seconds, iso: Double(device.iso),
+                                            minISO: Double(f.minISO), maxISO: Double(f.maxISO))
         if device.isExposureModeSupported(.custom), fast.duration < device.exposureDuration.seconds {
             let duration = CMTimeClampToRange(CMTime(seconds: fast.duration, preferredTimescale: 1_000_000_000),
                                               range: CMTimeRange(start: f.minExposureDuration, end: f.maxExposureDuration))
@@ -87,6 +87,7 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
             lock.exposureLocked = true
             lock.iso = fast.iso
             lock.exposureDuration = duration.seconds
+            lock.tooDark = fast.tooDark
         } else if device.isExposureModeSupported(.locked) {
             device.exposureMode = .locked
             lock.exposureLocked = true

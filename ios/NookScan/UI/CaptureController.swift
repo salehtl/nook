@@ -127,6 +127,7 @@ final class CaptureController: ObservableObject, Identifiable {
         guard kept != nil || frame.timestamp - lastPublish >= 0.1 else { return }
         lastPublish = frame.timestamp
         let count = recorder.keptCount, tracking = frame.tracking, lockState = recorder.lockState
+        if motion.exposure == nil, case .locked(let lock) = lockState { motion.exposure = lock.exposureDuration }
         let fast = motion.isTooFast || recentBlurry >= 5
         let hint = tracking.isNormal ? smoothedPitch.flatMap { recorder.pass.postureHint(pitchDegrees: $0) } : nil
         let progress = total.map { Double(framesSeen) / Double(max(1, $0)) }

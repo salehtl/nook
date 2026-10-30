@@ -15,6 +15,8 @@ struct CameraLock: Equatable {
     /// Seconds.
     var exposureDuration: Double?
     var whiteBalanceGains: WhiteBalanceGains?
+    /// The shutter had to stay slower than `AdaptiveShutter.slowest`: the room is too dark for sharp frames.
+    var tooDark = false
 
     static let none = CameraLock()
 
@@ -22,20 +24,41 @@ struct CameraLock: Equatable {
     var isFullyLocked: Bool { exposureLocked && whiteBalanceLocked }
 }
 
-/// The exposure to lock: auto exposure's brightness, at a shutter no slower than `maxDuration`. Indoors auto exposure
-/// settles near 1/100 s, and a phone turning at 12°/s smears a 1/100 s frame by about 3 px (11 px at 40°/s); splat
-/// training averages sensor noise away across views but learns blur. So the shutter is shortened and ISO raised to
-/// keep the same exposure. When ISO would pass `maxISO`, ISO stops there and the shutter lengthens just enough.
-enum ShutterCap {
-    /// 1/250 s: 2.5× less motion blur than auto exposure's usual indoor 1/100 s, at 2.5× the ISO.
-    static let maxDuration = 1.0 / 250
+/// The exposure to lock: auto exposure's brightness (shutter × ISO), at the fastest shutter the light allows. Splat
+/// training averages sensor noise away across hundreds of views but learns motion blur, so the trade always favours
+/// a faster shutter. Indoors auto exposure settles near 1/100 s, where a phone turning at 12°/s smears a frame by
+/// about 3 px:
+/// 1. The fastest shutter down to `fastest` (1/1000 s) that keeps ISO within `isoBudget`: a bright room lands near
+///    1/1000 s, an ordinary one in between.
+/// 2. If that is slower than `slowest` (1/250 s), ISO goes up to the format's maximum to hold `slowest`.
+/// 3. If even that can't hold it, the shutter lengthens just enough (`tooDark`: the room needs more light).
+/// Never slower than auto exposure's own shutter.
+enum AdaptiveShutter {
+    static let fastest = 1.0 / 1000
+    static let slowest = 1.0 / 250
+    /// Where video-frame noise starts to cost more than it saves; a first guess, to be checked on a real scan.
+    static let isoBudget = 800.0
 
-    static func exposure(duration: Double, iso: Double, maxDuration: Double = maxDuration,
-                         minISO: Double, maxISO: Double) -> (duration: Double, iso: Double) {
-        guard duration > maxDuration, duration > 0, iso > 0 else { return (duration, iso) }
+    struct Exposure: Equatable {
+        var duration: Double
+        var iso: Double
+        /// Even the format's maximum ISO couldn't hold `slowest`.
+        var tooDark: Bool
+    }
+
+    static func exposure(duration: Double, iso: Double, minISO: Double, maxISO: Double) -> Exposure {
+        guard duration > 0, iso > 0, maxISO >= minISO else { return Exposure(duration: duration, iso: iso, tooDark: false) }
         let light = duration * iso
-        let newISO = min(maxISO, max(minISO, light / maxDuration))
-        return (min(duration, light / newISO), newISO)
+        func at(_ iso: Double) -> Exposure {
+            let i = min(max(iso, minISO), maxISO)
+            return Exposure(duration: light / i, iso: i, tooDark: false)
+        }
+        var e = at(min(isoBudget, maxISO))
+        if e.duration < fastest { e = at(light / fastest) }   // bright: 1/1000 s at a lower ISO
+        if e.duration > slowest { e = at(light / slowest) }   // dim: past the budget, up to the maximum ISO
+        e.tooDark = e.duration > slowest * 1.001
+        if e.duration >= duration { return Exposure(duration: duration, iso: iso, tooDark: e.tooDark) }
+        return e
     }
 }
 

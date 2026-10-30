@@ -141,24 +141,50 @@ struct ExposureLockTests {
         try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
     }
 
-    @Test func shutterCapKeepsBrightnessAtAFasterShutter() {
-        // the majlis scan: auto exposure settled at 1/100 s, ISO 141
-        let e = ShutterCap.exposure(duration: 0.01, iso: 141, minISO: 25, maxISO: 3000)
-        #expect(abs(e.duration - 1.0 / 250) < 1e-9)
+    @Test func adaptiveShutterOrdinaryRoomStaysWithinTheISOBudget() {
+        // the majlis scan: auto exposure settled at 1/100 s, ISO 141 -> ISO 800 at about 1/567 s
+        let e = AdaptiveShutter.exposure(duration: 0.01, iso: 141, minISO: 25, maxISO: 3000)
+        #expect(e.iso == AdaptiveShutter.isoBudget)
+        #expect(e.duration < AdaptiveShutter.slowest && e.duration > AdaptiveShutter.fastest)
         #expect(abs(e.duration * e.iso - 0.01 * 141) < 1e-6, "same exposure, so the same brightness")
+        #expect(!e.tooDark)
     }
 
-    @Test func shutterCapLeavesFastShuttersAlone() {
-        let e = ShutterCap.exposure(duration: 1.0 / 500, iso: 64, minISO: 25, maxISO: 3000)
-        #expect(e.duration == 1.0 / 500 && e.iso == 64)
+    @Test func adaptiveShutterBrightRoomGoesTo1000th() {
+        let e = AdaptiveShutter.exposure(duration: 1.0 / 120, iso: 50, minISO: 25, maxISO: 3000)
+        #expect(abs(e.duration - AdaptiveShutter.fastest) < 1e-9)
+        #expect(abs(e.duration * e.iso - 50.0 / 120) < 1e-6)
     }
 
-    @Test func shutterCapStopsAtMaxISOAndLengthensTheShutterInstead() {
-        // a dim room: 1/30 s at ISO 800 would need ISO 6667 at 1/250 s
-        let e = ShutterCap.exposure(duration: 1.0 / 30, iso: 800, minISO: 25, maxISO: 2000)
-        #expect(e.iso == 2000)
-        #expect(abs(e.duration - 800.0 / 30 / 2000) < 1e-9)
-        #expect(e.duration > ShutterCap.maxDuration && e.duration < 1.0 / 30)
+    @Test func adaptiveShutterDimRoomPassesTheBudgetToHold250th() {
+        let e = AdaptiveShutter.exposure(duration: 1.0 / 30, iso: 200, minISO: 25, maxISO: 3000)
+        #expect(abs(e.duration - AdaptiveShutter.slowest) < 1e-9)
+        #expect(e.iso > AdaptiveShutter.isoBudget && !e.tooDark)
+    }
+
+    @Test func adaptiveShutterTooDarkLengthensAndSaysSo() {
+        let e = AdaptiveShutter.exposure(duration: 1.0 / 30, iso: 1600, minISO: 25, maxISO: 2000)
+        #expect(e.iso == 2000 && e.tooDark)
+        #expect(e.duration > AdaptiveShutter.slowest && e.duration < 1.0 / 30)
+    }
+
+    @Test func adaptiveShutterNeverSlowsAutoExposureDown() {
+        let e = AdaptiveShutter.exposure(duration: 1.0 / 4000, iso: 25, minISO: 25, maxISO: 3000)
+        #expect(e.duration == 1.0 / 4000 && e.iso == 25)
+    }
+
+    @Test func slowDownWarningFollowsPredictedBlur() {
+        var m = MotionMonitor()
+        var t = simd_float4x4(1)
+        for i in 0..<60 {  // turning at 30°/s
+            t = simd_float4x4(simd_quatf(angle: Float(i) * 0.5 * .pi / 180, axis: [0, 1, 0]))
+            m.update(timestamp: Double(i) / 60, transform: t)
+        }
+        #expect(!m.isTooFast, "30°/s is under the 60°/s speed limit before the shutter is known")
+        m.exposure = 1.0 / 100
+        #expect(m.isTooFast, "about 7 px of blur at 1/100 s")
+        m.exposure = 1.0 / 1000
+        #expect(!m.isTooFast, "under 1 px at 1/1000 s")
     }
 }
 

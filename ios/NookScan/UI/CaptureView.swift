@@ -250,8 +250,10 @@ private struct LockIndicator: View {
         switch state {
         case .settling, .locking:
             ("Locking exposure…", "lock.open", .white)
+        case .locked(let lock) where lock.tooDark:
+            ("Too dark for a fast shutter: turn on the lights", "lightbulb.slash", .orange)
         case .locked(let lock) where lock.isFullyLocked:
-            ("Exposure + WB locked", "lock.fill", .yellow)
+            (lock.exposureDuration.map { "Locked · 1/\(Int(($0 > 0 ? 1 / $0 : 0).rounded())) s" } ?? "Exposure + WB locked", "lock.fill", .yellow)
         case .locked(let lock):
             (lock.exposureLocked ? "Exposure locked · WB auto" : "WB locked · exposure auto", "lock.trianglebadge.exclamationmark", .orange)
         case .unlockable:
