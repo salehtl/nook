@@ -423,6 +423,28 @@ class PoseCorrection(torch.nn.Module):
                 "rot_deg_median": round(deg.median().item(), 3), "rot_deg_max": round(deg.max().item(), 3)}
 
 
+class PoseAdam:
+    """Adam over one camera at a time. Each camera has its own moments and step count, and only the drawn camera moves:
+    a plain Adam keeps stepping every camera on stale momentum, and its step count, shared by all cameras, turns a
+    camera's first update into about 3 x lr instead of lr. A camera is drawn only steps / n times, so lr sets its reach:
+    about lr x that many in meters and radians, less with the decay."""
+
+    def __init__(self, weight: torch.nn.Parameter, lr: float, steps: int, betas=(0.9, 0.999), eps=1e-15):
+        self.weight, self.lr, self.gamma, self.betas, self.eps = weight, lr, 0.01 ** (1.0 / steps), betas, eps
+        self.m, self.v = torch.zeros_like(weight), torch.zeros_like(weight)
+        self.t = torch.zeros(len(weight), device=weight.device)
+
+    @torch.no_grad()
+    def step(self, i: int, global_step: int) -> None:
+        g, (b1, b2) = self.weight.grad[i], self.betas
+        self.t[i] += 1
+        self.m[i] = b1 * self.m[i] + (1 - b1) * g
+        self.v[i] = b2 * self.v[i] + (1 - b2) * g * g
+        m_hat, v_hat = self.m[i] / (1 - b1 ** self.t[i]), self.v[i] / (1 - b2 ** self.t[i])
+        self.weight[i] -= self.lr * self.gamma ** global_step * m_hat / (v_hat.sqrt() + self.eps)
+        self.weight.grad = None
+
+
 def train(args) -> dict:
     started = time.time()
     if not torch.cuda.is_available():
@@ -481,8 +503,7 @@ def train(args) -> dict:
     poses = None
     if args.pose_opt:
         poses = PoseCorrection(torch.linalg.inv(viewmats))
-        # weight decay keeps corrections small, so the poses can't wander off together with the splats
-        pose_optim = torch.optim.Adam(poses.parameters(), lr=args.pose_opt_lr, weight_decay=1e-6)
+        pose_optim = PoseAdam(poses.embed.weight, args.pose_opt_lr, args.steps)
         say(f"refining camera poses (lr {args.pose_opt_lr:g}); held-out frames keep their ARKit poses")
     sub_start = sub_end = None
     if args.motion_blur > 1 or args.rolling_shutter_ms > 0:
@@ -509,6 +530,13 @@ def train(args) -> dict:
             order = rng.permutation(n)
         img = images[i].to(dev, non_blocking=True)
         h, w = img.shape[:2]
+        K = Ks[i:i + 1]
+        if args.res_ramp > 0 and step < args.res_ramp * args.steps:  # low resolution first (DashGaussian's idea)
+            s = args.res_start + (1 - args.res_start) * step / (args.res_ramp * args.steps)
+            nh, nw = max(16, round(h * s / 2) * 2), max(16, round(w * s / 2) * 2)
+            img = F.interpolate(img.permute(2, 0, 1)[None].float(), (nh, nw), mode="area")[0].permute(1, 2, 0)
+            K = K * torch.tensor([[[nw / w], [nh / h], [1.0]]], device=dev)
+            h, w = nh, nw
         sh_deg = args.sh_degree if args.init else min(step // SH_INTERVAL, args.sh_degree)
         colors = torch.cat([splats["sh0"], splats["shN"]], 1) if args.sh_degree > 0 else splats["sh0"]
         if sub_start is None:  # one pinhole camera at the frame's pose
@@ -527,12 +555,12 @@ def train(args) -> dict:
         renders, _, info = rasterization(
             means=splats["means"], quats=splats["quats"], scales=torch.exp(splats["scales"]),
             opacities=torch.sigmoid(splats["opacities"]), colors=colors,
-            viewmats=vm, Ks=Ks[i:i + 1].expand(k, 3, 3), width=w, height=h,
+            viewmats=vm, Ks=K.expand(k, 3, 3), width=w, height=h,
             sh_degree=sh_deg, packed=False, near_plane=0.01, far_plane=1e10, rasterize_mode="classic",
             render_mode="RGB+ED" if depths[i] is not None else "RGB", **rs)
         renders = renders.mean(0, keepdim=True)
         pred = renders[0, ..., :3]  # [H, W, 3]
-        target = img.float() / 255.0
+        target = img.float() / 255.0  # the ramp's area average is float already, and still 0-255
         l1 = (pred - target).abs().mean()
         ssim_val = ssim(pred.permute(2, 0, 1)[None], target.permute(2, 0, 1)[None])
         loss = (1 - SSIM_LAMBDA) * l1 + SSIM_LAMBDA * (1 - ssim_val)
@@ -547,8 +575,7 @@ def train(args) -> dict:
             opt.step(visible)
             opt.zero_grad(set_to_none=True)
         if poses is not None:
-            pose_optim.step()
-            pose_optim.zero_grad(set_to_none=True)
+            pose_optim.step(i, step)
         means_sched.step()
         with torch.no_grad():
             splats["scales"].clamp_(max=max_log_scale)
@@ -591,7 +618,9 @@ def train(args) -> dict:
             "peak_vram_gib": {"allocated": round(torch.cuda.max_memory_allocated() / 2**30, 2),
                               "reserved": round(torch.cuda.max_memory_reserved() / 2**30, 2)},
             "trainer": f"gsplat {gsplat_version} (MCMC)", "pose_opt": pose_stats,
-            "init": args.init, "depth_weight": args.depth_weight}
+            "init": args.init, "depth_weight": args.depth_weight, "res_ramp": args.res_ramp,
+            "res_start": args.res_start, "rolling_shutter_ms": args.rolling_shutter_ms,
+            "pose_opt_lr": args.pose_opt_lr if args.pose_opt else None}
 
 
 def main(argv=None) -> None:
@@ -618,6 +647,9 @@ def main(argv=None) -> None:
     p.add_argument("--rolling-shutter-ms", type=float, default=0.0,
                    help="the sensor's readout time, top row to bottom row (0: global shutter); renders with gsplat's "
                         "rolling-shutter camera (3DGUT)")
+    p.add_argument("--res-ramp", type=float, default=0.0, metavar="FRAC",
+                   help="grow the training resolution linearly over this fraction of the steps (0: full size throughout)")
+    p.add_argument("--res-start", type=float, default=0.25, help="the starting scale of --res-ramp")
     p.add_argument("--init", metavar="SPLAT", help="fine-tune from this splat (.ply or .spz, the capture's world frame) "
                                                    "instead of training from seed points; a few thousand steps")
     args = p.parse_args(argv)
