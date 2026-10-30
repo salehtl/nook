@@ -623,7 +623,7 @@ The v2 preset trains every capture for the same number of steps, so a 1,200-fram
 
 ## 5. Processing server API (`nook-scan serve`)
 
-A job server that trains captures on the machine it runs on: kakapo in production, the Mac in evals. **Python stdlib only.** It listens on `127.0.0.1`, and remote access comes only through `tailscale serve`.
+A job server that trains captures on the machine it runs on: kakapo in production, the Mac in evals. **Python stdlib only.** It listens on `127.0.0.1`, and remote access comes only through the host's LAN proxy (`nook.salehtl.com` on kakapo).
 
 ```
 uv run --project scan nook-scan serve [--host 127.0.0.1] [--port 8095] [--data-dir DIR] [--room-dir DIR] [--steps N] [--quality draft|high] [--max-splats N]

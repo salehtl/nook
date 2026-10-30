@@ -32,7 +32,7 @@ For a dry run with no spend, set `NOOK_FAL_MOCK=fixtures/fal`.
 
 ### On kakapo (Linux)
 
-- **Key**: `nook-add` reads `FAL_KEY` from `~/src/nook/.env`. It isn't in sops and the `nook` service doesn't have one; never look in `/run/secrets`. If `.env` is missing, check with `grep -c '^FAL_KEY=.' .env` (never print it) and give the user this to run in their own terminal (not via `!`, so the key stays off screen and out of history):
+- **Key**: `nook-add` reads `FAL_KEY` from `~/src/nook/.env`. The `nook` service has its own key in sops, which isn't for this CLI; never look in `/run/secrets`. If `.env` is missing, check with `grep -c '^FAL_KEY=.' .env` (never print it) and give the user this to run in their own terminal (not via `!`, so the key stays off screen and out of history):
 
   ```bash
   (umask 077; read -rsp 'FAL key: ' k; echo; printf 'FAL_KEY=%s\n' "$k" > ~/src/nook/.env)

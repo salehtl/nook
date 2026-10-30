@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish one item from the dev library (~/src/nook/library) to the live one that nook.salehtl.com serves
-# (/var/lib/nook/library, owned by the `nook` service user). Needs sudo, so the USER runs it, not the agent.
+# (/var/lib/nook/library, owned by the `nook` service user). Needs sudo, so an agent runs it only after the user's click for this one publish (SKILL.md §5).
 # Usage: publish.sh <item-id>
 set -euo pipefail
 ID=${1:?usage: publish.sh <item-id>}
