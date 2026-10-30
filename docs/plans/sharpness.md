@@ -37,6 +37,7 @@ Two sessions, split by files so they never edit the same thing. Neither touches 
 ## Requests
 
 - **kakapo → Mac (2026-10-30):** if the rebuilt app marks a test walk, write `"test_walk": true` per frame (and `"pass": 4` if it adds one). The trainer on `sharpness` will accept both and score test-walk frames without training on them. **The deployed server validates passes 1-3 only**, so a capture with `"pass": 4` is refused until this branch is merged and deployed.
+- **kakapo → Mac (2026-10-30), for the next capture build:** add a level loop at seated height (about 1.15 m) and a level loop at standing height (about 1.6 m), and a slow close pass around the main furniture from 2-3 heights. Allow perhaps 5-8 min in total (an estimate). Reason: `scan-20261030-154924` has almost no level frames at the heights the room is judged from. Not yet proved by a rescan; compare the new scan on the same scoreboard, but do not mix its scores with this scan's.
 
 ## Tuning for speed (started 2026-10-30, kakapo session): how to pick this up
 
@@ -72,6 +73,8 @@ Goal: under 30 min upload to room, no visible loss, judged at the seated (1.15 m
 - **Stills are not sharper by every measure:** at 960 px, video gradient energy (0.0240) beat stills (0.0215) on this scan, against the 1.39x in the brief. Scored frames are video only, which may bias the stills test.
 - **MCMC does not place blobs by error.** gsplat's `mcmc.py` and `ops.py` choose by opacity, so blurry areas don't directly get more blobs.
 - **Spark:** default Spark scored 3.1 dB below gsplat on `base-25k`; `extSplats` plus `accumExtSplats` gave only +0.05 dB. The old `psnr_judge.mjs` scored stale sorts under software GL (20.1 dB against 23.9 dB), so older Spark numbers from software GL are suspect.
+- **The scan plan misses the target views** (`coverage.py`, this one scan, not proved by a rescan). Pass 1: 390 frames at 1.31-1.46 m, 19-9 deg down. Pass 2: 732 frames at 1.53-1.89 m, 45 deg down to 45 deg up. The seated view (1.15 m, level) is below nearly all cameras, and few frames are level at 1.6 m. A held-out frame has only about 5-9 similar training frames (within 50 cm, 20 deg). The walk took 2.4 min.
+- **Phone speed is not the limit at a 2 ms shutter.** The fastest stretch (0.82 m/s) has the best LPIPS, 0.324. Downward views of busy objects score worst (0.58-0.75), upward views of plain surfaces best (0.32-0.52). Content is mixed in with coverage, so this is not all a coverage fault.
 - **Next question:** `probe.sh` scores runs on frames they trained on. Sharp there means coverage or Spark is the limit, so stop tuning. Soft there means training or poses.
 - **Host limits:** kakapo fell to 1.2 GiB available during this work (no swap). Run browser tests one at a time under `flock ~/nook-exp/browser.lock`, in a scope with `MemoryMax=6G` and `CPUQuota=800%`.
 - **An app upload starts a job on the deployed server that holds the GPU lock for hours.** Only Saleh stopped the last one; an agent's cancel call was blocked.
