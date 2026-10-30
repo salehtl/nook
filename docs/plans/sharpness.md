@@ -19,7 +19,8 @@ merged PRs and kakapo running the result. Nothing is merged or deployed yet.
   Needs `timestamp`/`exposure_duration` per frame.
 - `scan/src/nook_scan/dataset.py`: prepared frames carry `timestamp` and `exposure_duration`.
 - iOS: `ShutterCap` locks at ≤ 1/250 s with ISO raised to keep brightness (tests in `ExposureLockTests`). Not built
-  yet: the Mac's `xcode-select` points at CommandLineTools (`sudo xcode-select -s /Applications/Xcode.app`).
+  or tested here; Saleh builds and tests iOS changes himself through TestFlight, so edit `ios/` freely and say what
+  to check on the phone (a new scan of the majlis with the capped shutter, then compare against this one).
 
 ## Harness on kakapo (`~/nook-exp`, copies in `evals/sharpness/`)
 - `cap/` unzipped capture, `blur.json` per-frame blur, `env.sh` (`$PY` = nook-gsplat's python, `$SPY` = nook-scan's).
