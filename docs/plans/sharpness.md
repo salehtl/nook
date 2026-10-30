@@ -12,7 +12,7 @@ Two sessions, split by files so they never edit the same thing. Neither touches 
 |---|---|---|
 | Owns | `ios/` | everything else: `gsplat/`, `scan/`, `poses/`, `nix/`, `contract/`, `evals/`, `docs/`, `CLAUDE.md` |
 | Branch | `shutter-cap` (its own PR) | `sharpness` (this branch) |
-| Work | the capped shutter (1/250 s, ISO raised to match) and any later capture changes; simulator tests; the TestFlight build (`ios/scripts/release.sh`, with Saleh's OK); comparing the new scan with "majlis better" in the browser | the GPU experiments in `~/nook-exp` (sole user of the GPU and of `~/nook-exp`; the Mac session no longer queues runs); trainer and nook-scan changes; the nook PR; the kakapo pin bump and deploy |
+| Work | the adaptive shutter (below) and any later capture changes; simulator tests; the TestFlight build (`ios/scripts/release.sh`, with Saleh's OK); comparing the new scan with "majlis better" in the browser | the GPU experiments in `~/nook-exp` (sole user of the GPU and of `~/nook-exp`; the Mac session no longer queues runs); trainer and nook-scan changes; the nook PR; the kakapo pin bump and deploy |
 | Merges | its own PR into `main` | its own PR into `main`, then the kakapo PR (Saleh asked for both to be merged and deployed) |
 
 - **Talking to each other:** the sessions can't message each other, so they write here. Either one may add a line
@@ -23,6 +23,15 @@ Two sessions, split by files so they never edit the same thing. Neither touches 
   contract change: `exposure_duration` and `lock_exposure_duration` already record it.
 - **Testing the capture side:** Saleh rescans the majlis with the TestFlight build the same way as "majlis better" (same
   passes) and sends it to kakapo. The kakapo session trains it with the winning settings and compares the two rooms.
+
+## Capture side (Mac session, branch `shutter-cap`)
+- **Adaptive shutter at the lock:** auto exposure's brightness at the fastest shutter the light allows: down to
+  1/1000 s within ISO 800; past that, ISO up to the maximum to hold 1/250 s; slower only in a dark room, which the
+  capture screen flags ("Too dark for a fast shutter"). `exposure_duration` per frame and `lock_iso` /
+  `lock_exposure_duration` in `meta.json` record what was used; no contract change.
+- **Slow-down warning predicts blur** (pixels moved while the shutter is open) and warns past 2 px.
+- **To compare:** the rescan's frames should show `exposure_duration` ≈ 0.001–0.004 s instead of 0.01. If noise
+  shows at ISO 800+, the budget (`AdaptiveShutter.isoBudget`) is the knob.
 
 ## Requests
 
