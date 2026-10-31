@@ -193,7 +193,7 @@ await shot(d, 'desktop-shell')
 
 // --- desktop: retrain (§5.1 planner) -----------------------------------------------------------------------------------
 const defs = await ev(d, (n) => window.nook.retrainDefaults(n), A)
-check('retrainDefaults() returns the scaled settings and an estimate', defs?.settings?.steps === 72600 && defs?.eta_s > 0, fmt(defs))
+check('retrainDefaults() returns the scaled settings and an estimate', defs?.settings?.steps === 30000 && defs?.eta_s > 0, fmt(defs))
 const rj = await ev(d, (n) => window.nook.retrainRoom(n, { steps: 40000 }, 'Sharper'), A)
 check('P26 retrainRoom() queues <base>-r2', rj?.name === `${A}-r2` && rj?.kind === 'retrain', fmt(rj))
 const rb = await ev(d, (n) => window.nook.retrainRoom(n), B)

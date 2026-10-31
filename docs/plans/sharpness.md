@@ -49,6 +49,20 @@ Goal: under 30 min upload to room, no visible loss, judged at the seated (1.15 m
 - **Survives logout, not reboot.** It runs in tmux, not `sudo systemd-run` (no sudo for project work; `Linger=no`). After a reboot restart the queue and re-add the line that was running.
 - **Fixed:** pose refinement now uses a per-camera Adam with decay (`PoseAdam`). Each camera is drawn only about `steps / n` times, so `lr` limits how far it can move: about 0.2 mm or 0.01 deg per unit of 1e-5 per look.
 
+### Outcome (2026-10-31)
+
+**Defaults on this branch:** rebuilt seeds, 25 steps per frame (20k-30k), 1.5M splats, pose refinement at lr 1e-3, resolution ramp from 1/4 over the first half of the steps, depth sort in Spark. Measured on `scan-20261030-154924`: **30.0 min from accepted capture to finished room** (`s1-full`, 1,122 frames, 28,050 steps, 1,407,257 splats delivered; a mug COLMAP job shared the CPU for its first minutes). The upload itself isn't counted. Same settings on the scoreboard: `s1-G`, LPIPS 0.534, sharpness 0.469, 24.2 min of training.
+
+**Best quality, opt-in:** `--colmap-poses` (setting `colmap_poses`). `s1-H` (full COLMAP, rebuilt seeds at its poses, ramp, pose refinement, 1M splats, 15 min of training): PSNR 24.28, LPIPS 0.476, sharpness 0.511, clearly the best in the images. COLMAP took 6.4 h on 1,074 frames with other jobs on the host, and 6 min on the 453-frame mug scan. Cheaper COLMAP settings gave less: 10 min, LPIPS 0.546 (`s1-cf`); 23 min, LPIPS 0.515 (`s1-cg`).
+
+**So the target isn't fully met:** 30 minutes works, but the room is visibly rougher than with COLMAP poses, on the sofa, table and door. The biggest open gain is a faster way to reach COLMAP-quality poses (fewer frames in the adjustment and interpolated corrections, a faster solver, or fixing ARKit's drift between passes).
+
+**The mug (`scan-20261030-221504`) on the web app:** the deployed server has none of this branch's code, so the capture went up as `scan-20261030-221505` with COLMAP poses and rebuilt `points.ply` already in it (`evals/sharpness/refined_capture.py`), room `mug-colmap`, deployed defaults (36,240 steps, 2M splats, no pose refinement). The original capture is untouched.
+
+**Local rooms:** `~/nook-exp/rooms`: `s1-full` (the defaults, all frames) and `s1-best` (from `s1-H`, trained without the held-out frames). Serve them with the branch's planner: `python3 planner/serve.py --host 127.0.0.1 --port 18765 --room-dir ~/nook-exp/rooms`, and tunnel with `ssh -L 18765:127.0.0.1:18765 kakapo`. Images: `~/nook-exp/cmp/`, `~/nook-exp/runs/*/shots`. Table: `~/nook-exp/table.md`.
+
+**Harness faults worth knowing:** scripts need `#!/usr/bin/env bash` on NixOS. Use `$PY`, not `$SPY`, for `colmap_refine.py` (scipy). Don't expand `$PY` inside a queue line's double quotes.
+
 ### Learnings so far (2026-10-30, on `scan-20261030-154924`, 20k steps, 1M splats unless noted)
 
 | Run | PSNR | SSIM | LPIPS | Sharpness (1 px blur) | Train min |
