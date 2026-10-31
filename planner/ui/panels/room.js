@@ -184,6 +184,9 @@ export function mount(ctx) {
   warmth.classList.add('is-warmth')
   warmth.append(h('div.rp-ticks', h('span', 'Cool'), h('span', 'Warm')))
   for (const s of [exposure, warmth]) s.input.addEventListener('dblclick', () => engine.setLook(s === exposure ? { exposure: 1 } : { warmth: 0 }))
+  const trueColor = toggle({ label: 'True colour', hint: 'The room as trained, to compare with your photos: no tone curve, exposure or warmth', checked: false,
+    onChange: (on) => engine.setTrueColor(on) })
+  trueColor.input.dataset.nook = 'true-color'
   const shadows = toggle({ label: 'Contact shadows', checked: true, onChange: (on) => engine.setContactShadows(on) })
   const relightBtn = button({ label: 'Relight', kind: 'secondary', onClick: async () => {
     relighting = true; syncLook()
@@ -192,7 +195,7 @@ export function mount(ctx) {
     shell.toast('Furniture relit from the room centre', { kind: 'ok', id: 'relit' })
   } })
   const relight = h('div.rp-relight', h('span.toggle-text', h('span.toggle-label', 'Relight furniture'), h('span.toggle-hint', 'Bakes the scan\'s light onto items again, from the room centre.')), relightBtn)
-  lookBody.append(exposure, warmth, shadows, relight)
+  lookBody.append(exposure, warmth, trueColor, shadows, relight)
 
   // --- layout ---------------------------------------------------------------------------------------------------
   function render() {
@@ -236,9 +239,11 @@ export function mount(ctx) {
     exposure.classList.toggle('is-changed', Math.abs(l.exposure - 1) > 1e-3)
     warmth.classList.toggle('is-changed', Math.abs(l.warmth) > 1e-3)
     shadows.input.checked = !!l.contactShadows
+    trueColor.input.checked = !!l.trueColor
+    exposure.input.disabled = warmth.input.disabled = !!l.trueColor
     relightBtn.disabled = relighting || l.roomKind !== 'splat'
     relightBtn.lastChild.textContent = relighting ? 'Relighting…' : 'Relight'
-    lookSummary.textContent = `${shell.isPhone() ? 'Exposure ' : ''}${l.exposure.toFixed(2)}× · ${warmthWord(l.warmth).toLowerCase()} · shadows ${l.contactShadows ? 'on' : 'off'}`
+    lookSummary.textContent = `${shell.isPhone() ? 'Exposure ' : ''}${l.exposure.toFixed(2)}× · ${warmthWord(l.warmth).toLowerCase()} · shadows ${l.contactShadows ? 'on' : 'off'}${l.trueColor ? ' · true colour' : ''}`
   }
 
   function sync() {

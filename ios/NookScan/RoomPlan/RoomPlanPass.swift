@@ -3,7 +3,7 @@ import Foundation
 import RoomPlan
 import simd
 
-/// What the photo passes leave for lining up the RoomPlan pass (contract §4.12): the floor, the vertical planes and
+/// What the scan leave for lining up the RoomPlan pass (contract §4.12): the floor, the vertical planes and
 /// the phone's last pose, all in capture world.
 struct CaptureAnchors {
     var floorY: Float?
@@ -23,7 +23,7 @@ enum RoomPlanSettings {
     }
 }
 
-/// The separate RoomPlan pass after the photo passes (v4 decision 0b): RoomPlan runs its own ARSession, so it can't
+/// The separate RoomPlan pass after the scan (v4 decision 0b): RoomPlan runs its own ARSession, so it can't
 /// disturb the capture's (video format, depth, exposure lock, keyframes, stills). When it ends, the room is built,
 /// lined up with the capture (ShellAlignment) and written next to it (RoomPlanWriter). If anything fails, or the pass
 /// is skipped, the capture stays a valid v1.2 capture.

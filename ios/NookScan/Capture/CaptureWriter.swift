@@ -59,6 +59,8 @@ struct CaptureSummary: Equatable {
     let stillCount: Int
     let pointCount: Int
     let floorY: Float?
+    /// Lowest and highest camera positions, meters above the floor. nil without a floor or frames.
+    var heightRange: ClosedRange<Float>? = nil
 }
 
 enum CaptureError: LocalizedError {
@@ -114,6 +116,7 @@ final class CaptureWriter {
     private var positions: [Float] = []
     private var colors: [UInt8] = []
     private var seedGrid = SeedGrid(cellSize: CaptureWriter.seedCell)
+    private var cameraY: ClosedRange<Float>?
     private var error: Error?
 
     init(folder: URL, info: CaptureInfo) throws {
@@ -207,14 +210,20 @@ final class CaptureWriter {
                 if cameraLock.whiteBalanceLocked, let g = cameraLock.whiteBalanceGains, [g.r, g.g, g.b].allSatisfy(\.isFinite) {
                     meta["lock_white_balance_gains"] = ["r": Self.decimal(g.r, 4), "g": Self.decimal(g.g, 4), "b": Self.decimal(g.b, 4)]
                 }
+                if cameraLock.exposureLocked {
+                    meta["camera_settings"] = cameraLock.isManual ? "manual" : "auto"
+                    if !cameraLock.isManual { meta["flicker_detected"] = cameraLock.flickerDetected }
+                    if let ev = cameraLock.flickerEV, ev.isFinite { meta["flicker_ev"] = Self.decimal(ev, 3) }
+                }
                 if let ending {
                     meta["end_reason"] = ending.reason
                     if let message = ending.message { meta["end_message"] = message }
                     meta["thermal_state"] = DeviceInfo.thermalState
                 }
                 try writeJSON(meta, to: "meta.json")
+                let heights = floorY.flatMap { floor in cameraY.map { ($0.lowerBound - floor)...($0.upperBound - floor) } }
                 return CaptureSummary(folder: folder, frameCount: frames.count, depthCount: depthCount,
-                                      stillCount: stillCount, pointCount: pointCount, floorY: floorY)
+                                      stillCount: stillCount, pointCount: pointCount, floorY: floorY, heightRange: heights)
             } catch {
                 throw CaptureError.write(error.localizedDescription)
             }
@@ -267,10 +276,8 @@ final class CaptureWriter {
         ]
         if let d = kf.exposureDuration, d.isFinite, d > 0 { frame["exposure_duration"] = Self.decimal(d, 7) }
         if let ev = kf.exposureOffset, ev.isFinite { frame["exposure_offset"] = Self.decimal(ev, 4) }
-        if let pass = kf.pass {
-            frame["pass"] = pass.contractNumber
-            if pass == .testWalk { frame["test_walk"] = true }
-        }
+        let y = kf.transform.columns.3.y
+        if y.isFinite { cameraY = cameraY.map { min($0.lowerBound, y)...max($0.upperBound, y) } ?? y...y }
         if let still = kf.still { frame.merge(queueStill(still, name: name)) { $1 } }
         if let camera {
             if abs(k.fx - camera.fx) > 1e-3 || abs(k.fy - camera.fy) > 1e-3 || abs(k.cx - camera.cx) > 1e-3 || abs(k.cy - camera.cy) > 1e-3 {

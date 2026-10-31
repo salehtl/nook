@@ -91,7 +91,6 @@ struct ExposureLockTests {
 
         var decisions: [FrameDecision] = []
         for i in 0..<40 {
-            if i == 30 { recorder.pass = .giant }
             let frame = FakeFrame(timestamp: Double(i) / 10, x: Float(i) / 10, tracking: i < 5 ? .limited("Starting up") : .normal)
             decisions.append(recorder.handle(frame))
             Thread.sleep(forTimeInterval: 0.003)   // let the writer keep up, so no frame is dropped as busy
@@ -116,8 +115,6 @@ struct ExposureLockTests {
         #expect(frames.count == 22)
         #expect(frames.allSatisfy { abs(($0["exposure_duration"] as? Double ?? 0) - 1.0 / 60) < 1e-6 })
         #expect(frames.allSatisfy { $0["exposure_offset"] as? Double == -0.5 })
-        #expect(frames.prefix(12).allSatisfy { $0["pass"] as? Int == 1 })
-        #expect(frames.suffix(10).allSatisfy { $0["pass"] as? Int == 2 })
         #expect(frames.first?["timestamp"] as? Double == 0, "time starts at the first kept keyframe")
     }
 

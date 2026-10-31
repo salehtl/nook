@@ -17,6 +17,12 @@ struct CameraLock: Equatable {
     var whiteBalanceGains: WhiteBalanceGains?
     /// The shutter had to stay slower than `AdaptiveShutter.slowest`: the room is too dark for sharp frames.
     var tooDark = false
+    /// Auto found the lights flickering and moved to a shutter that covers a whole flicker (contract §4.14).
+    var flickerDetected = false
+    /// The brightness jump Auto measured at its fast shutter, in EV.
+    var flickerEV: Double?
+    /// The user chose the shutter or ISO.
+    var isManual = false
 
     static let none = CameraLock()
 
@@ -110,6 +116,11 @@ struct ExposureLockPolicy: Equatable {
     mutating func didLock(_ lock: CameraLock) {
         guard state == .locking else { return }
         state = lock.isAnyLocked ? .locked(lock) : .unlockable
+    }
+
+    /// The lock changed after the first one (the flicker check moved the shutter).
+    mutating func didRelock(_ lock: CameraLock) {
+        if case .locked = state { state = .locked(lock) }
     }
 
     /// Whether keyframes may be kept yet.

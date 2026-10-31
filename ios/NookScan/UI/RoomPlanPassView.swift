@@ -14,7 +14,7 @@ struct RoomPlanGate<Content: View>: View {
     }
 }
 
-/// The room-shell pass after the photo passes (contract §4.12): RoomPlan's camera view with its coaching in plain
+/// The room-shell pass after the scan (contract §4.12): RoomPlan's camera view with its coaching in plain
 /// words, a minute's timer and the walls found so far.
 struct RoomPlanPassView: View {
     @ObservedObject var pass: RoomPlanPass

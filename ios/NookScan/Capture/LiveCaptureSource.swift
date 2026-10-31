@@ -24,6 +24,17 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
     private var verticalPlanes: [UUID: WallPlane] = [:]
     /// What `lockCamera` locked, for checking stills against it. Guarded by `lock`.
     private var cameraLock = CameraLock.none
+    /// Auto exposure's shutter × ISO when the lock was taken: the brightness every later shutter keeps.
+    private var meteredLight: Double?
+    /// What the user chose. Set before the scan starts; the lock reads it once.
+    var settings = CameraSettings()
+    /// Whether this phone may silence its shutter: it depends on the country, not on the session.
+    private static let canSilenceStills = AVCapturePhotoOutput().isShutterSoundSuppressionSupported
+    /// ISO values this camera format allows, for the settings sheet.
+    static var isoRange: ClosedRange<Double>? {
+        guard let f = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera?.activeFormat else { return nil }
+        return Double(f.minISO)...Double(f.maxISO)
+    }
     /// Stills are copied and checked here, never on the delegate queue.
     private let stillQueue = DispatchQueue(label: "nook.capture.stills", qos: .userInitiated)
     private static let log = Logger(subsystem: "com.salehtl.nookscan", category: "stills")
@@ -72,24 +83,28 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
 
     var canLockCamera: Bool { true }
 
-    /// Locks exposure and white balance of ARKit's camera: auto exposure's brightness at the fastest shutter the light
-    /// allows (`AdaptiveShutter`), and the current white balance. Autofocus stays on: per-frame intrinsics follow it.
+    /// Locks exposure and white balance of ARKit's camera: `settings` (on Auto, auto exposure's brightness at the fastest
+    /// shutter the light allows), and the current white balance. Autofocus stays on: per-frame intrinsics follow it.
     func lockCamera() -> CameraLock {
         guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else { return .none }
         do { try device.lockForConfiguration() } catch { return .none }
         defer { device.unlockForConfiguration() }
         var lock = CameraLock()
         let f = device.activeFormat
-        let fast = AdaptiveShutter.exposure(duration: device.exposureDuration.seconds, iso: Double(device.iso),
-                                            minISO: Double(f.minISO), maxISO: Double(f.maxISO))
-        if device.isExposureModeSupported(.custom), fast.duration < device.exposureDuration.seconds {
-            let duration = CMTimeClampToRange(CMTime(seconds: fast.duration, preferredTimescale: 1_000_000_000),
+        let metered = device.exposureDuration.seconds
+        let target = settings.exposure(meteredDuration: metered, meteredISO: Double(device.iso),
+                                       isoRange: Double(f.minISO)...Double(f.maxISO),
+                                       durationRange: f.minExposureDuration.seconds...f.maxExposureDuration.seconds)
+        lock.isManual = !settings.isAuto
+        self.lock.lock(); meteredLight = metered * Double(device.iso); self.lock.unlock()
+        if device.isExposureModeSupported(.custom), !settings.isAuto || target.duration < metered {
+            let duration = CMTimeClampToRange(CMTime(seconds: target.duration, preferredTimescale: 1_000_000_000),
                                               range: CMTimeRange(start: f.minExposureDuration, end: f.maxExposureDuration))
-            device.setExposureModeCustom(duration: duration, iso: Float(fast.iso))
+            device.setExposureModeCustom(duration: duration, iso: Float(target.iso))
             lock.exposureLocked = true
-            lock.iso = fast.iso
+            lock.iso = target.iso
             lock.exposureDuration = duration.seconds
-            lock.tooDark = fast.tooDark
+            lock.tooDark = target.tooDark
         } else if device.isExposureModeSupported(.locked) {
             device.exposureMode = .locked
             lock.exposureLocked = true
@@ -104,6 +119,26 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
         }
         self.lock.lock(); cameraLock = lock; self.lock.unlock()
         return lock
+    }
+
+    func relockCamera(shutter: Double) -> CameraLock? {
+        lock.lock(); var current = cameraLock; let light = meteredLight; lock.unlock()
+        guard let light, let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera,
+              device.isExposureModeSupported(.custom), (try? device.lockForConfiguration()) != nil else { return nil }
+        defer { device.unlockForConfiguration() }
+        let f = device.activeFormat
+        let duration = CMTimeClampToRange(CMTime(seconds: shutter, preferredTimescale: 1_000_000_000),
+                                          range: CMTimeRange(start: f.minExposureDuration, end: f.maxExposureDuration))
+        let wanted = light / duration.seconds
+        let iso = min(max(wanted, Double(f.minISO)), Double(f.maxISO))
+        // More than about 0.3 EV off the same brightness: this camera can't make the move.
+        guard abs(log2(iso / wanted)) <= 0.3 else { return nil }
+        device.setExposureModeCustom(duration: duration, iso: Float(iso))
+        current.iso = iso
+        current.exposureDuration = duration.seconds
+        current.tooDark = duration.seconds * iso < light * 0.8
+        lock.lock(); cameraLock = current; lock.unlock()
+        return current
     }
 
     /// Back to continuous auto exposure and white balance.
@@ -142,6 +177,8 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
             let settings = format.defaultPhotoSettings
             settings.flashMode = .off
             settings.photoQualityPrioritization = .speed
+            // Stills come several times a second: their click is only noise. Apple refuses this in some countries.
+            if Self.canSilenceStills { settings.isShutterSoundSuppressionEnabled = true }
             session.captureHighResolutionFrame(using: settings, completion: handler)
         } else {
             session.captureHighResolutionFrame(completion: handler)
@@ -265,6 +302,10 @@ private struct ARCaptureFrame: CaptureFrame {
 
     func sharpness() -> Float {
         ImageUtils.sharpness(ofLumaPlaneOf: frame.capturedImage)
+    }
+
+    func meanLuma() -> Float? {
+        ImageUtils.meanLuma(ofLumaPlaneOf: frame.capturedImage)
     }
 
     func makeKeyframe() -> Keyframe? {

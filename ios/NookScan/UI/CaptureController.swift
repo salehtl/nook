@@ -1,9 +1,8 @@
 import Foundation
 import simd
 
-/// Runs one capture for the UI: source → CaptureRecorder, plus the guidance state (frame count, tracking,
-/// slow-down, exposure lock, guided passes and their coverage). Frame handling happens on the source's queue;
-/// published state is updated on main.
+/// Runs one capture for the UI: source → CaptureRecorder, plus what the screen shows (frame count, tracking,
+/// slow-down, exposure lock, pause). Frame handling happens on the source's queue; published state is updated on main.
 final class CaptureController: ObservableObject, Identifiable {
     enum Phase: Equatable {
         case recording
@@ -18,12 +17,13 @@ final class CaptureController: ObservableObject, Identifiable {
     @Published private(set) var frameCount = 0
     @Published private(set) var tracking: TrackingStatus = .limited("Starting up")
     @Published private(set) var tooFast = false
-    /// Current guided pass and the heading coverage of each pass.
-    @Published private(set) var guide = PassGuide()
+    /// Start was tapped: the camera settings are locked in and frames are being judged. Replay starts by itself.
+    @Published private(set) var isStarted = false
+    @Published private(set) var isPaused = false
+    /// The flicker check is running: the phone should hold still.
+    @Published private(set) var checkingFlicker = false
     /// Exposure and white-balance lock (contract §4.8). Keyframes are only kept once it's settled.
     @Published private(set) var lockState = ExposureLockPolicy.State.settling(normalSince: nil)
-    /// "Tilt the phone down…" when the phone is held wrong for the current pass.
-    @Published private(set) var postureHint: String?
     /// Replay only: fraction of the recording played.
     @Published private(set) var progress: Double?
     /// The session was interrupted: no more frames are kept, but what was recorded can still be saved.
@@ -34,7 +34,7 @@ final class CaptureController: ObservableObject, Identifiable {
     @Published private(set) var lowStorage = false
     /// Close to the server's upload limit: time to wrap up.
     @Published private(set) var nearlyFull = false
-    /// The separate RoomPlan pass (contract §4.12), started once the photo passes are saved, or nil when it isn't
+    /// The separate RoomPlan pass (contract §4.12), started once the scan is saved, or nil when it isn't
     /// offered (no LiDAR, turned off in Settings, replay).
     @Published private(set) var roomPlan: RoomPlanPass?
     private let acceptLock = NSLock()
@@ -53,9 +53,7 @@ final class CaptureController: ObservableObject, Identifiable {
     private var lastPublish = -Double.infinity
     private var framesSeen = 0
     private var recentBlurry = 0
-    private var smoothedPitch: Float?
-    private var smoothedHeight: Float?
-    private var heightReference = HeightReference()
+    private var startedOnQueue = false
 
     init(source: CaptureSource, capturesRoot: URL) {
         self.source = source
@@ -65,16 +63,10 @@ final class CaptureController: ObservableObject, Identifiable {
 
     var isLive: Bool { source is LiveCaptureSource }
 
-    /// What a typical guided scan needs free: about 3.5 GB, plus the zip made to send it.
+    /// What a typical scan needs free: about 3.5 GB, plus the zip made to send it.
     static let minFreeBytes: Int64 = 8_000_000_000
 
-    /// Passes to mention before finishing, so a tap on Done meant for Next pass doesn't end the scan. Empty when
-    /// there's nothing left to do, or nothing more can be recorded.
-    var missingBeforeFinish: [ScanPass] {
-        isLive && !interrupted ? guide.missing : []
-    }
-
-    /// Whether a RoomPlan pass follows the photo passes: a live LiDAR capture with the setting on.
+    /// Whether a RoomPlan pass follows the scan: a live LiDAR capture with the setting on.
     var offersRoomPlan: Bool { isLive && source.hasDepth && RoomPlanSettings.isSupported && RoomPlanSettings.isEnabled }
 
     func start() {
@@ -84,10 +76,11 @@ final class CaptureController: ObservableObject, Identifiable {
         let recorder: CaptureRecorder
         do {
             let lockCamera: (() -> CameraLock)? = source.canLockCamera ? { [weak source] in source?.lockCamera() ?? .none } : nil
+            let relock: ((Double) -> CameraLock?)? = source.canLockCamera ? { [weak source] in source?.relockCamera(shutter: $0) } : nil
             let captureStill: ((@escaping (Keyframe?) -> Void) -> Void)? = source.canCaptureStills
                 ? { [weak source] done in source.map { $0.captureStill(completion: done) } ?? done(nil) } : nil
             recorder = try CaptureRecorder(folder: folder, info: CaptureInfo(device: source.deviceName, lidar: source.hasDepth),
-                                           lockCamera: lockCamera, captureStill: captureStill)
+                                           lockCamera: lockCamera, relockCamera: relock, captureStill: captureStill)
         } catch {
             phase = .failed(error.localizedDescription)
             return
@@ -102,6 +95,7 @@ final class CaptureController: ObservableObject, Identifiable {
             DispatchQueue.main.async { self?.handle(issue) }
         }
         let total = (source as? ReplayCaptureSource)?.entries.count
+        if !isLive { begin() }
         source.start(onFrame: { [weak self] frame in
             self?.process(frame, recorder: recorder, total: total)
         }, onEnd: { [weak self] in
@@ -109,12 +103,34 @@ final class CaptureController: ObservableObject, Identifiable {
         })
     }
 
+    /// Start: the camera settings are final from here on. Exposure locks about a second later.
+    func begin() {
+        guard !isStarted, let recorder else { return }
+        let settings = CameraSettings.current
+        (source as? LiveCaptureSource)?.settings = settings
+        recorder.takesStills = settings.takeStills
+        isStarted = true
+        acceptLock.lock(); startedOnQueue = true; acceptLock.unlock()
+    }
+
+    func togglePause() {
+        guard phase == .recording, let recorder else { return }
+        isPaused.toggle()
+        recorder.isPaused = isPaused
+    }
+
     private func handle(_ issue: LiveCaptureSource.Issue) {
         guard phase == .recording else { return }
         stopAccepting()
         switch issue {
         case .interrupted:
-            interrupted = true
+            // Nothing recorded yet: there's nothing to save, and a stopped session can't resume.
+            if recorder?.keptCount ?? 0 == 0 {
+                discard()
+                phase = .failed("Scan interrupted before anything was saved. Close this and start again.")
+            } else {
+                interrupted = true
+            }
         case .failed(let message, let settings):
             needsSettings = settings
             if frameCount >= Self.minFrames {
@@ -134,29 +150,31 @@ final class CaptureController: ObservableObject, Identifiable {
         acceptLock.lock()
         let ok = accepting
         if ok, frame.tracking.isNormal { lastPose = frame.transform }
+        let started = startedOnQueue
         acceptLock.unlock()
         guard ok else { return }
-        let pass = recorder.pass
+        guard started else {   // the ready screen: only tracking matters
+            guard frame.timestamp - lastPublish >= 0.1 else { return }
+            lastPublish = frame.timestamp
+            let tracking = frame.tracking
+            DispatchQueue.main.async { if self.tracking != tracking { self.tracking = tracking } }
+            return
+        }
         let decision = recorder.handle(frame)
         motion.update(timestamp: frame.timestamp, transform: frame.transform)
         framesSeen += 1
         recentBlurry = decision == .blurry ? recentBlurry + 1 : (decision == .keep ? 0 : recentBlurry)
-        let pitch = Pose.pitchDegrees(frame.transform)
-        let y = Pose.position(frame.transform).y
-        smoothedPitch = smoothedPitch.map { $0 + 0.2 * (pitch - $0) } ?? pitch
-        smoothedHeight = smoothedHeight.map { $0 + 0.2 * (y - $0) } ?? y
-        if decision == .keep, pass == .standard { heightReference.add(y) }
-        let kept = decision == .keep
-            ? (yaw: Pose.yaw(frame.transform), posture: Posture(pitchDegrees: pitch, relativeHeight: heightReference.relative(y))) : nil
-        guard kept != nil || frame.timestamp - lastPublish >= 0.1 else { return }
+        guard decision == .keep || frame.timestamp - lastPublish >= 0.1 else { return }
         lastPublish = frame.timestamp
         let count = recorder.keptCount, tracking = frame.tracking, lockState = recorder.lockState
-        if motion.exposure == nil, case .locked(let lock) = lockState { motion.exposure = lock.exposureDuration }
-        let fast = motion.isTooFast || recentBlurry >= 5
-        var hint: String?
-        if tracking.isNormal, let smoothedPitch, let smoothedHeight {
-            hint = pass.postureHint(Posture(pitchDegrees: smoothedPitch, relativeHeight: heightReference.relative(smoothedHeight)))
+        if case .locked(let lock) = lockState, let shutter = lock.exposureDuration {
+            motion.exposure = shutter
+            // A flicker-safe or hand-picked slow shutter blurs more by choice: warn only when it's really too fast.
+            motion.maxBlurPixels = shutter > AdaptiveShutter.slowest * 1.001 ? 4 : 2
         }
+        if decision == .paused { recentBlurry = 0 }
+        let fast = decision != .paused && (motion.isTooFast || recentBlurry >= 5)   // walking while paused is the point
+        let checking = recorder.isCheckingFlicker
         let full = recorder.isNearlyFull
         let progress = total.map { Double(framesSeen) / Double(max(1, $0)) }
         DispatchQueue.main.async {
@@ -165,17 +183,10 @@ final class CaptureController: ObservableObject, Identifiable {
             if self.tracking != tracking { self.tracking = tracking }
             if self.tooFast != fast { self.tooFast = fast }
             if self.lockState != lockState { self.lockState = lockState }
-            if self.postureHint != hint { self.postureHint = hint }
+            if self.checkingFlicker != checking { self.checkingFlicker = checking }
             if self.nearlyFull != full { self.nearlyFull = full }
-            if let kept { self.guide.add(yaw: kept.yaw, posture: kept.posture) }
             self.progress = progress
         }
-    }
-
-    /// Moves to the next guided pass: keyframes from now on record it.
-    func nextPass() {
-        guard phase == .recording, let recorder, guide.advance() else { return }
-        recorder.pass = guide.pass
     }
 
     /// Stops the source and saves. Called by "Done", when a replay runs out, or (with `ending`) when ARKit fails.

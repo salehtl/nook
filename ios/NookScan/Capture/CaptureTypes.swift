@@ -79,8 +79,6 @@ struct Keyframe {
     /// Exposure time in seconds and exposure offset in EV, from ARCamera (contract §4.8). nil for replayed frames.
     var exposureDuration: Double? = nil
     var exposureOffset: Double? = nil
-    /// Guided pass the frame was taken in, set by CaptureRecorder.
-    var pass: ScanPass? = nil
     /// The high-resolution still taken at this frame's moment, if any. Its pose is `transform`.
     var still: Still? = nil
 }
@@ -95,6 +93,8 @@ protocol CaptureFrame {
     func sharpness() -> Float
     /// Copies the image, intrinsics and depth into owned memory.
     func makeKeyframe() -> Keyframe?
+    /// Mean brightness (0-255), for the flicker check. nil where it can't be measured.
+    func meanLuma() -> Float?
 }
 
 /// Where frames come from: ARKit on a device, or a recorded capture folder (simulator and tests).
@@ -118,6 +118,8 @@ protocol CaptureSource: AnyObject {
     /// Locks exposure and white balance at their current values and reports what was locked.
     /// Called on the frame queue, once tracking has settled.
     func lockCamera() -> CameraLock
+    /// Moves a locked exposure to this shutter at the same brightness, and reports the new lock. nil if it can't.
+    func relockCamera(shutter: Double) -> CameraLock?
     /// Whether the source can take high-resolution stills (contract §4.10).
     var canCaptureStills: Bool { get }
     /// Takes one still without blocking the caller. `completion` runs once, on any queue, with a keyframe built
@@ -126,7 +128,12 @@ protocol CaptureSource: AnyObject {
     func captureStill(completion: @escaping (Keyframe?) -> Void)
 }
 
+extension CaptureFrame {
+    func meanLuma() -> Float? { nil }
+}
+
 extension CaptureSource {
+    func relockCamera(shutter: Double) -> CameraLock? { nil }
     var wallPlanes: [WallPlane] { [] }
     var canLockCamera: Bool { false }
     func lockCamera() -> CameraLock { .none }

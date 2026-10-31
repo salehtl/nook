@@ -76,6 +76,7 @@ window.nook = {
   getState: () => engine.getState(),
   // §2.6
   getRenderSettings: () => engine.getRenderSettings(),
+  setTrueColor: (on) => engine.setTrueColor(on),
   setRenderSettings: (s) => {
     if (!s || typeof s !== 'object') { engine.reportError('setRenderSettings needs an object'); return }
     if (s.exposure !== undefined || s.warmth !== undefined) engine.setLook(s)

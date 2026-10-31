@@ -231,6 +231,18 @@
         },
         "thermal_state": {
           "type": "string"
+        },
+        "camera_settings": {
+          "enum": [
+            "auto",
+            "manual"
+          ]
+        },
+        "flicker_detected": {
+          "type": "boolean"
+        },
+        "flicker_ev": {
+          "type": "number"
         }
       }
     }
