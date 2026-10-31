@@ -218,6 +218,19 @@
               ]
             }
           }
+        },
+        "end_reason": {
+          "enum": [
+            "done",
+            "interrupted",
+            "failed"
+          ]
+        },
+        "end_message": {
+          "type": "string"
+        },
+        "thermal_state": {
+          "type": "string"
         }
       }
     }

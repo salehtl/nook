@@ -50,6 +50,8 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
         // Vertical planes only feed the RoomPlan alignment; they don't change what the camera records.
         config.planeDetection = [.horizontal, .vertical]
         if hasDepth { config.frameSemantics.insert(.sceneDepth) }
+        // HDR video tone-maps each frame on its own, so the same wall could change brightness between frames.
+        config.videoHDRAllowed = false
         // The format ARKit recommends for stills (e.g. 1920 × 1440 video with 12 MP stills). Without it a still may
         // be no larger than the video frame.
         if let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
@@ -70,14 +72,25 @@ final class LiveCaptureSource: NSObject, CaptureSource, ARSessionDelegate {
 
     var canLockCamera: Bool { true }
 
-    /// Locks exposure and white balance of ARKit's camera at their current values. Autofocus stays on: per-frame
-    /// intrinsics already follow it.
+    /// Locks exposure and white balance of ARKit's camera: auto exposure's brightness at the fastest shutter the light
+    /// allows (`AdaptiveShutter`), and the current white balance. Autofocus stays on: per-frame intrinsics follow it.
     func lockCamera() -> CameraLock {
         guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else { return .none }
         do { try device.lockForConfiguration() } catch { return .none }
         defer { device.unlockForConfiguration() }
         var lock = CameraLock()
-        if device.isExposureModeSupported(.locked) {
+        let f = device.activeFormat
+        let fast = AdaptiveShutter.exposure(duration: device.exposureDuration.seconds, iso: Double(device.iso),
+                                            minISO: Double(f.minISO), maxISO: Double(f.maxISO))
+        if device.isExposureModeSupported(.custom), fast.duration < device.exposureDuration.seconds {
+            let duration = CMTimeClampToRange(CMTime(seconds: fast.duration, preferredTimescale: 1_000_000_000),
+                                              range: CMTimeRange(start: f.minExposureDuration, end: f.maxExposureDuration))
+            device.setExposureModeCustom(duration: duration, iso: Float(fast.iso))
+            lock.exposureLocked = true
+            lock.iso = fast.iso
+            lock.exposureDuration = duration.seconds
+            lock.tooDark = fast.tooDark
+        } else if device.isExposureModeSupported(.locked) {
             device.exposureMode = .locked
             lock.exposureLocked = true
             lock.iso = Double(device.iso)

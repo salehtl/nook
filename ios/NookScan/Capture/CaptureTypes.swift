@@ -79,7 +79,7 @@ struct Keyframe {
     /// Exposure time in seconds and exposure offset in EV, from ARCamera (contract §4.8). nil for replayed frames.
     var exposureDuration: Double? = nil
     var exposureOffset: Double? = nil
-    /// Guided pass (1–3) the frame was taken in, set by CaptureRecorder.
+    /// Guided pass the frame was taken in, set by CaptureRecorder.
     var pass: ScanPass? = nil
     /// The high-resolution still taken at this frame's moment, if any. Its pose is `transform`.
     var still: Still? = nil
@@ -182,6 +182,17 @@ enum DeviceInfo {
         uname(&u)
         return withUnsafeBytes(of: &u.machine) { raw in
             String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
+        }
+    }
+
+    /// How hot the phone is, for the record of how a capture ended.
+    static var thermalState: String {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: "nominal"
+        case .fair: "fair"
+        case .serious: "serious"
+        case .critical: "critical"
+        @unknown default: "unknown"
         }
     }
 

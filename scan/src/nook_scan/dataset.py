@@ -15,7 +15,7 @@ from .capture import Capture, is_test_walk
 from .ply import read_points, write_points
 
 MAX_SEEDS = 600_000
-PLY_SEED_CAP = 400_000                 # ios CaptureWriter.maxSeedPoints: at this count the app has stopped collecting
+PLY_SEED_CAP = 400_000                 # before app 0.5, ios CaptureWriter.maxSeedPoints: at this count it had stopped collecting
 FAR_MAX_SEEDS = 120_000                # window seeds, added to the room's by the callers of far_points
 DEPTH_MAX_SEEDS = MAX_SEEDS - FAR_MAX_SEEDS
 DEPTH_STRIDE = 3                       # depth pixels between seed candidates, both axes
@@ -163,6 +163,16 @@ def training_frames(cap: Capture, holdout_every: int = 0, held_out: set[int] | N
             if not (is_held_out(i, holdout_every) or (held_out and i in held_out) or is_test_walk(f))]
 
 
+def _hit_old_seed_cap(cap: Capture, n: int) -> bool:
+    """Before app 0.5, points.ply kept the first 400,000 points seen. From 0.5 it keeps one per 3 cm cell, up to 600,000
+    (§4.13), so a large count there means good coverage."""
+    try:
+        version = tuple(int(p) for p in str(cap.meta.get("app_version", "")).split(".")[:2])
+    except ValueError:
+        version = (0, 0)
+    return n >= PLY_SEED_CAP and version < (0, 5)
+
+
 def seed_points(cap: Capture, frames: list[int] | None = None) -> tuple[np.ndarray, np.ndarray | None, str]:
     """Seed points: the capture's points.ply, else back-projected LiDAR depth, else none (the trainer starts from random splats).
 
@@ -175,7 +185,7 @@ def seed_points(cap: Capture, frames: list[int] | None = None) -> tuple[np.ndarr
     xyz, rgb = np.zeros((0, 3), np.float32), None
     if t.get("ply_file_path"):
         xyz, rgb = read_points(cap.root / t["ply_file_path"])
-    rebuild = (len(xyz) >= PLY_SEED_CAP or any(is_test_walk(f) for f in cap.frames)) and any(cap.frames[i].get("depth_file_path") for i in use)
+    rebuild = (_hit_old_seed_cap(cap, len(xyz)) or any(is_test_walk(f) for f in cap.frames)) and any(cap.frames[i].get("depth_file_path") for i in use)
     if len(xyz) and not rebuild:
         return xyz, (rgb if rgb is not None else np.full((len(xyz), 3), 128, np.uint8)), "points.ply"
     dxyz, drgb = _seeds_from_depth(cap, use, DEPTH_MAX_SEEDS)

@@ -555,7 +555,7 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 - I2. The app launches in the simulator with no crash and shows the captures list. Replay mode can produce a capture that appears in the list and can be shared.
 - I3. Release basics:
   - bundle id `com.salehtl.nookscan`, team `8CFG28JHP3`, automatic signing
-  - version 0.4.0 in v4 (the build number is set at release)
+  - version 0.5.0 (the build number is set at release)
   - `NSCameraUsageDescription`, `ITSAppUsesNonExemptEncryption = NO`, `UIRequiredDeviceCapabilities` containing `arkit`
   - a 1024 px app icon
   - deployment target iOS 18.0
@@ -568,13 +568,13 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 - Each frame may carry `"exposure_duration"` (s) and `"exposure_offset"` (EV) from `ARCamera`.
 - **Guided passes:** each frame may carry `"pass": 1 | 2 | 3 | 4`:
   1. loop at chest height
-  2. lower loop, phone tilted down
-  3. walk through the middle
+  2. high loop, phone tilted down (app 0.5; before that, a lower loop tilted down)
+  3. low loop, phone tilted up (app 0.5; before that, a walk through the middle)
   4. reserved for a further pass the app may add
 
   The trainer ignores the pass number. It's only for diagnostics.
 - **Test walk:** a frame may carry `"test_walk": true`. These frames are never trained on, never feed seeds and are never viewpoints. They go to `transforms_val.json` for scoring, with any held-out frames, and they don't count in `n_train` (§4.9.1). They don't set the crop box or the floor. If `points.ply` exists, seeds are rebuilt from the depth maps of the training frames, because its points can't be split by frame.
-- **Seed cap:** the app stops `points.ply` at 400,000 points, which can happen before it has looked up. At 400,000 or more points, with depth maps present, seeds come from the training frames' depth maps instead: 2 cm voxels, larger if needed to fit the budget.
+- **Seed cap (before app 0.5):** the app stopped `points.ply` at 400,000 points, which could happen before it had looked up. At 400,000 or more points, with depth maps present and `app_version` below 0.5, seeds come from the training frames' depth maps instead: 2 cm voxels, larger if needed to fit the budget. From app 0.5, `points.ply` is used as it is (§4.13).
 
 ### 4.9 Trainer v2
 
@@ -743,6 +743,7 @@ retrainRoom(room: string, settings?: object, title?: string): Promise<Job> // PO
 - It's taken under the same exposure and white-balance lock as the video frames.
 - `meta.json` adds `"keyframe_spacing": {"meters": 0.04, "degrees": 3}`.
 - The trainer uses the still in place of the video frame when one is present, downscaled to the quality preset's long side.
+- App 0.5 takes one on every 2nd keyframe where it can, stores it at most 2880 px on the long side (`hires_w`, `hires_h` and the intrinsics match the written JPEG), and stops taking them once the capture reaches 2.8 GB, so it stays under the upload limit (§5).
 
 ### 4.11 Pose refinement (`nook-poses`, kakapo)
 
@@ -771,3 +772,12 @@ A measured shell of the room from Apple's RoomPlan, next to the splat, not in pl
 
 **Acceptance**
 - I4. The replay test writes a v1.3 capture from the RoomPlan fixture (`fixtures/roomplan/`) that passes `validate_capture.py`. Phones without LiDAR show no RoomPlan option.
+
+### 4.13 Capture v1.4: test walk and how the scan ended (optional, app 0.5)
+
+All additions are optional keys, so earlier captures stay valid and servers that don't know them still accept these.
+
+- **Test walk:** after the three loops, the app records a short walk on a new route at seated and standing height. Its frames carry `"pass": 3` and `"test_walk": true`, and have no stills. They exist to score views the trainer never saw, so a trainer that scores a room should leave them out of training and judge on them. A trainer that doesn't know the key simply trains on them.
+- **`meta.end_reason`:** `"done"` (the Done button), `"interrupted"` (Done after the session was interrupted) or `"failed"` (ARKit stopped; `meta.end_message` has its error). Absent on replayed captures and before app 0.5.
+- **`meta.thermal_state`:** `ProcessInfo.thermalState` when the capture ended: `"nominal"`, `"fair"`, `"serious"` or `"critical"`.
+- **Seed points:** `points.ply` holds at most one point per 3 cm cell, up to 600,000, instead of the first 400,000 seen, so every pass contributes.

@@ -11,6 +11,47 @@ struct CaptureInfo {
     var spacing = KeyframeSpacing.standard
 }
 
+/// Why a capture stopped (contract §4.13), so a scan that ended early can be explained from its files.
+enum CaptureEnding: Equatable {
+    case done
+    case interrupted
+    case failed(String)
+
+    var reason: String {
+        switch self {
+        case .done: "done"
+        case .interrupted: "interrupted"
+        case .failed: "failed"
+        }
+    }
+
+    var message: String? {
+        if case .failed(let message) = self { return message }
+        return nil
+    }
+}
+
+/// Keeps seed points evenly spread: one per grid cell, however many frames see that spot. Without it the point budget
+/// goes to whatever the phone sees first and most often (on real scans, the floor), and later frames add nothing.
+struct SeedGrid {
+    let cellSize: Float
+    private var cells = Set<UInt64>()
+
+    init(cellSize: Float) {
+        self.cellSize = cellSize
+    }
+
+    var count: Int { cells.count }
+
+    /// True the first time a point lands in its cell.
+    mutating func insert(x: Float, y: Float, z: Float) -> Bool {
+        func cell(_ v: Float) -> UInt64 {
+            UInt64(truncatingIfNeeded: Int64((v / cellSize).rounded(.down)) + (1 << 20)) & 0x1F_FFFF
+        }
+        return cells.insert(cell(x) << 42 | cell(y) << 21 | cell(z)).inserted
+    }
+}
+
 struct CaptureSummary: Equatable {
     let folder: URL
     let frameCount: Int
@@ -38,9 +79,16 @@ final class CaptureWriter {
     static let maxLongSide = 1920
     static let jpegQuality = 0.9
     static let stillQuality = 0.9
+    /// Stills are stored smaller than the sensor's 12 MP: still sharper than the trainer's 1920 px, half the bytes.
+    static let maxStillLongSide = 2880
     static let seedStride = 8           // depth pixels between seed points, both axes
-    static let maxSeedPoints = 400_000
+    static let seedCell: Float = 0.03   // meters: at most one seed point per cell
+    static let maxSeedPoints = 600_000
     static let seedDepthRange: ClosedRange<Float> = 0.1...8
+    /// The jobs server refuses uploads over 4 GB (contract §5). Stills stop here, leaving room for the video frames.
+    static let stillBudgetBytes: Int64 = 2_800_000_000
+    /// Past this the capture screen asks to wrap up.
+    static let nearlyFullBytes: Int64 = 3_600_000_000
 
     let folder: URL
     let info: CaptureInfo
@@ -54,6 +102,7 @@ final class CaptureWriter {
     private let pendingLock = NSLock()
     private var pending = 0
     private var pendingStills = 0
+    private var bytesWritten: Int64 = 0
     private lazy var ciContext = CIContext(options: [.cacheIntermediates: false])
     private lazy var stillContext = CIContext(options: [.cacheIntermediates: false])
 
@@ -64,6 +113,7 @@ final class CaptureWriter {
     private var stillCount = 0
     private var positions: [Float] = []
     private var colors: [UInt8] = []
+    private var seedGrid = SeedGrid(cellSize: CaptureWriter.seedCell)
     private var error: Error?
 
     init(folder: URL, info: CaptureInfo) throws {
@@ -84,7 +134,18 @@ final class CaptureWriter {
     /// Whether a still taken now could be written without growing the queues past their limits.
     var canTakeStill: Bool {
         pendingLock.lock(); defer { pendingLock.unlock() }
-        return pending < maxPending - 1 && pendingStills < maxPendingStills
+        return pending < maxPending - 1 && pendingStills < maxPendingStills && bytesWritten < Self.stillBudgetBytes
+    }
+
+    /// Close to the server's upload limit (contract §5).
+    var isNearlyFull: Bool {
+        pendingLock.lock(); defer { pendingLock.unlock() }
+        return bytesWritten >= Self.nearlyFullBytes
+    }
+
+    private func countBytes(of url: URL) {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        pendingLock.lock(); bytesWritten += Int64(size); pendingLock.unlock()
     }
 
     /// Queues a keyframe. `index` is 1-based; `time` is seconds since the first keyframe.
@@ -99,7 +160,7 @@ final class CaptureWriter {
 
     /// Waits for queued keyframes, then writes points.ply, transforms.json and meta.json.
     /// `cameraLock` is what the exposure and white-balance lock achieved (contract §4.8).
-    func finish(floorY: Float?, cameraLock: CameraLock = .none) throws -> CaptureSummary {
+    func finish(floorY: Float?, cameraLock: CameraLock = .none, ending: CaptureEnding? = nil) throws -> CaptureSummary {
         // Keyframes first (they queue still encodes), then the stills (a failed one queues a fix-up on `queue`),
         // then the JSON on `queue`, after those fix-ups.
         queue.sync {}
@@ -145,6 +206,11 @@ final class CaptureWriter {
                 }
                 if cameraLock.whiteBalanceLocked, let g = cameraLock.whiteBalanceGains, [g.r, g.g, g.b].allSatisfy(\.isFinite) {
                     meta["lock_white_balance_gains"] = ["r": Self.decimal(g.r, 4), "g": Self.decimal(g.g, 4), "b": Self.decimal(g.b, 4)]
+                }
+                if let ending {
+                    meta["end_reason"] = ending.reason
+                    if let message = ending.message { meta["end_message"] = message }
+                    meta["thermal_state"] = DeviceInfo.thermalState
                 }
                 try writeJSON(meta, to: "meta.json")
                 return CaptureSummary(folder: folder, frameCount: frames.count, depthCount: depthCount,
@@ -192,6 +258,7 @@ final class CaptureWriter {
         }
         let k = kf.intrinsics.scaled(toWidth: image.width, height: image.height)
         try ImageUtils.writeJPEG(image, to: folder.appendingPathComponent("images/\(name).jpg"), quality: Self.jpegQuality)
+        countBytes(of: folder.appendingPathComponent("images/\(name).jpg"))
 
         var frame: [String: Any] = [
             "file_path": "images/\(name).jpg",
@@ -200,7 +267,10 @@ final class CaptureWriter {
         ]
         if let d = kf.exposureDuration, d.isFinite, d > 0 { frame["exposure_duration"] = Self.decimal(d, 7) }
         if let ev = kf.exposureOffset, ev.isFinite { frame["exposure_offset"] = Self.decimal(ev, 4) }
-        if let pass = kf.pass { frame["pass"] = pass.rawValue }
+        if let pass = kf.pass {
+            frame["pass"] = pass.contractNumber
+            if pass == .testWalk { frame["test_walk"] = true }
+        }
         if let still = kf.still { frame.merge(queueStill(still, name: name)) { $1 } }
         if let camera {
             if abs(k.fx - camera.fx) > 1e-3 || abs(k.fy - camera.fy) > 1e-3 || abs(k.cx - camera.cx) > 1e-3 || abs(k.cy - camera.cy) > 1e-3 {
@@ -228,11 +298,19 @@ final class CaptureWriter {
         frames.append(frame)
     }
 
-    /// Queues the full-size JPEG of a still (contract §4.10) and returns its frame keys. If the encode fails, the keys
-    /// are taken off the frame again; the frame itself stays, with its video-resolution image.
+    /// Queues the JPEG of a still (contract §4.10), at most `maxStillLongSide` px, and returns its frame keys. If the
+    /// encode fails, the keys are taken off the frame again; the frame itself stays, with its video-resolution image.
     private func queueStill(_ still: Still, name: String) -> [String: Any] {
         let path = "images_hi/\(name).jpg"
-        let k = still.intrinsics
+        var ci = CIImage(cvPixelBuffer: still.image)
+        let s = Double(Self.maxStillLongSide) / Double(max(ci.extent.width, ci.extent.height))
+        if s < 1 {
+            ci = ci.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1])
+        }
+        // Whole pixels, so the size in transforms.json is exactly the written JPEG's.
+        ci = ci.cropped(to: CGRect(x: 0, y: 0, width: ci.extent.width.rounded(.down), height: ci.extent.height.rounded(.down)))
+        let k = still.intrinsics.scaled(toWidth: Int(ci.extent.width), height: Int(ci.extent.height))
+        let scaled = ci
         pendingLock.lock(); pendingStills += 1; pendingLock.unlock()
         stillCount += 1
         stillQueue.async { [self] in
@@ -240,9 +318,9 @@ final class CaptureWriter {
             do {
                 let url = folder.appendingPathComponent(path)
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let ci = CIImage(cvPixelBuffer: still.image)
                 let quality = kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption
-                try stillContext.writeJPEGRepresentation(of: ci, to: url, colorSpace: ImageUtils.sRGB, options: [quality: Self.stillQuality])
+                try stillContext.writeJPEGRepresentation(of: scaled, to: url, colorSpace: ImageUtils.sRGB, options: [quality: Self.stillQuality])
+                countBytes(of: url)
             } catch {
                 queue.async { [self] in
                     stillCount -= 1
@@ -257,7 +335,8 @@ final class CaptureWriter {
 
     static let stillKeys = ["hires_file_path", "hires_w", "hires_h", "hires_fl_x", "hires_fl_y", "hires_cx", "hires_cy"]
 
-    /// Back-projects every `seedStride`-th depth pixel into world space (OpenGL camera: +Y up, looking along −Z).
+    /// Back-projects every `seedStride`-th depth pixel into world space (OpenGL camera: +Y up, looking along −Z),
+    /// keeping one point per `seedCell`.
     private func addSeeds(depth: DepthMap, image: CGImage, intrinsics k: Intrinsics, transform: simd_float4x4) {
         guard positions.count / 3 < Self.maxSeedPoints,
               let rgb = ImageUtils.rgbxPixels(image, width: depth.width, height: depth.height) else { return }
@@ -272,6 +351,7 @@ final class CaptureWriter {
                 if let c = depth.confidence, c[i] < 2 { continue }
                 let pc = SIMD4<Float>((Float(u) + 0.5 - cx) / fx * z, -(Float(v) + 0.5 - cy) / fy * z, -z, 1)
                 let pw = transform * pc
+                guard seedGrid.insert(x: pw.x, y: pw.y, z: pw.z) else { continue }
                 positions.append(contentsOf: [pw.x, pw.y, pw.z])
                 colors.append(contentsOf: [rgb[i * 4], rgb[i * 4 + 1], rgb[i * 4 + 2]])
             }

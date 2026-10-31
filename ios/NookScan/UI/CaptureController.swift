@@ -30,6 +30,10 @@ final class CaptureController: ObservableObject, Identifiable {
     @Published private(set) var interrupted = false
     /// The last failure can be fixed in the Settings app (camera access).
     @Published private(set) var needsSettings = false
+    /// Not much free space on the phone when the scan started.
+    @Published private(set) var lowStorage = false
+    /// Close to the server's upload limit: time to wrap up.
+    @Published private(set) var nearlyFull = false
     /// The separate RoomPlan pass (contract §4.12), started once the photo passes are saved, or nil when it isn't
     /// offered (no LiDAR, turned off in Settings, replay).
     @Published private(set) var roomPlan: RoomPlanPass?
@@ -50,6 +54,8 @@ final class CaptureController: ObservableObject, Identifiable {
     private var framesSeen = 0
     private var recentBlurry = 0
     private var smoothedPitch: Float?
+    private var smoothedHeight: Float?
+    private var heightReference = HeightReference()
 
     init(source: CaptureSource, capturesRoot: URL) {
         self.source = source
@@ -58,6 +64,15 @@ final class CaptureController: ObservableObject, Identifiable {
     }
 
     var isLive: Bool { source is LiveCaptureSource }
+
+    /// What a typical guided scan needs free: about 3.5 GB, plus the zip made to send it.
+    static let minFreeBytes: Int64 = 8_000_000_000
+
+    /// Passes to mention before finishing, so a tap on Done meant for Next pass doesn't end the scan. Empty when
+    /// there's nothing left to do, or nothing more can be recorded.
+    var missingBeforeFinish: [ScanPass] {
+        isLive && !interrupted ? guide.missing : []
+    }
 
     /// Whether a RoomPlan pass follows the photo passes: a live LiDAR capture with the setting on.
     var offersRoomPlan: Bool { isLive && source.hasDepth && RoomPlanSettings.isSupported && RoomPlanSettings.isEnabled }
@@ -79,6 +94,10 @@ final class CaptureController: ObservableObject, Identifiable {
         }
         self.recorder = recorder
         lockState = recorder.lockState
+        if isLive, let free = try? capturesRoot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage {
+            lowStorage = free < Self.minFreeBytes
+        }
         (source as? LiveCaptureSource)?.onIssue = { [weak self] issue in
             DispatchQueue.main.async { self?.handle(issue) }
         }
@@ -99,7 +118,7 @@ final class CaptureController: ObservableObject, Identifiable {
         case .failed(let message, let settings):
             needsSettings = settings
             if frameCount >= Self.minFrames {
-                finish()   // keep what was recorded before the failure
+                finish(ending: .failed(message))   // keep what was recorded before the failure
             } else {
                 discard()
                 phase = .failed(message)
@@ -117,18 +136,28 @@ final class CaptureController: ObservableObject, Identifiable {
         if ok, frame.tracking.isNormal { lastPose = frame.transform }
         acceptLock.unlock()
         guard ok else { return }
+        let pass = recorder.pass
         let decision = recorder.handle(frame)
         motion.update(timestamp: frame.timestamp, transform: frame.transform)
         framesSeen += 1
         recentBlurry = decision == .blurry ? recentBlurry + 1 : (decision == .keep ? 0 : recentBlurry)
         let pitch = Pose.pitchDegrees(frame.transform)
+        let y = Pose.position(frame.transform).y
         smoothedPitch = smoothedPitch.map { $0 + 0.2 * (pitch - $0) } ?? pitch
-        let kept = decision == .keep ? (yaw: Pose.yaw(frame.transform), pitch: pitch) : nil
+        smoothedHeight = smoothedHeight.map { $0 + 0.2 * (y - $0) } ?? y
+        if decision == .keep, pass == .standard { heightReference.add(y) }
+        let kept = decision == .keep
+            ? (yaw: Pose.yaw(frame.transform), posture: Posture(pitchDegrees: pitch, relativeHeight: heightReference.relative(y))) : nil
         guard kept != nil || frame.timestamp - lastPublish >= 0.1 else { return }
         lastPublish = frame.timestamp
         let count = recorder.keptCount, tracking = frame.tracking, lockState = recorder.lockState
+        if motion.exposure == nil, case .locked(let lock) = lockState { motion.exposure = lock.exposureDuration }
         let fast = motion.isTooFast || recentBlurry >= 5
-        let hint = tracking.isNormal ? smoothedPitch.flatMap { recorder.pass.postureHint(pitchDegrees: $0) } : nil
+        var hint: String?
+        if tracking.isNormal, let smoothedPitch, let smoothedHeight {
+            hint = pass.postureHint(Posture(pitchDegrees: smoothedPitch, relativeHeight: heightReference.relative(smoothedHeight)))
+        }
+        let full = recorder.isNearlyFull
         let progress = total.map { Double(framesSeen) / Double(max(1, $0)) }
         DispatchQueue.main.async {
             guard self.phase == .recording else { return }
@@ -137,7 +166,8 @@ final class CaptureController: ObservableObject, Identifiable {
             if self.tooFast != fast { self.tooFast = fast }
             if self.lockState != lockState { self.lockState = lockState }
             if self.postureHint != hint { self.postureHint = hint }
-            if let kept { self.guide.add(yaw: kept.yaw, pitchDegrees: kept.pitch) }
+            if self.nearlyFull != full { self.nearlyFull = full }
+            if let kept { self.guide.add(yaw: kept.yaw, posture: kept.posture) }
             self.progress = progress
         }
     }
@@ -148,16 +178,17 @@ final class CaptureController: ObservableObject, Identifiable {
         recorder.pass = guide.pass
     }
 
-    /// Stops the source and saves. Called by "Done", or when a replay runs out.
-    func finish() {
+    /// Stops the source and saves. Called by "Done", when a replay runs out, or (with `ending`) when ARKit fails.
+    func finish(ending: CaptureEnding? = nil) {
         guard phase == .recording, let recorder else { return }
+        let ending = ending ?? (interrupted ? .interrupted : .done)
         phase = .saving
         source.stop()
         let floorY = source.floorY
         acceptLock.lock(); let endPose = lastPose; acceptLock.unlock()
         let anchors = CaptureAnchors(floorY: floorY, walls: source.wallPlanes, endPose: endPose)
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try recorder.finish(floorY: floorY) }
+            let result = Result { try recorder.finish(floorY: floorY, ending: ending) }
             DispatchQueue.main.async {
                 if self.discardRequested {
                     try? FileManager.default.removeItem(at: recorder.folder)
