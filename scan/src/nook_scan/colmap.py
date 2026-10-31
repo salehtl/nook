@@ -33,6 +33,8 @@ PAIR_MAX_M = 2.5           # ... and stand within this distance
 MAX_SHIFT_M = 1.0          # outlier guard: a camera that moves further than this from ARKit keeps its ARKit pose ...
 MAX_ROT_DEG = 15.0         # ... or turns further than this. One test moved a poorly seen camera 6 m and 52 degrees.
 MIN_REFINED_SHARE = 0.5    # fewer refined cameras than this share means COLMAP failed on this capture
+ALIGN_SAMPLES = 200         # small samples tried for the first alignment fit
+MIN_SCALE = 0.8              # ARKit is metric, so the alignment scale must stay near 1 (0.96-1.04 in the tests)
 ORIENT_WEIGHT = 0.1        # the share of the cameras' orientations in the alignment's rotation fit
 SAY_EVERY_S = 30.0
 GL2CV = np.diag([1.0, -1, -1, 1])
@@ -205,7 +207,16 @@ def _align(new: dict, c2w: dict) -> tuple[float, dict, list[str]]:
         return s, aligned
 
     names = list(new)
-    keep = names
+    # Start from the small sample whose fit has the lowest median shift: a fit to all cameras can collapse the scale on an
+    # outlier, and then every camera looks close to it.
+    rng = np.random.default_rng(0)
+    best = np.inf
+    for _ in range(ALIGN_SAMPLES):
+        sample = [names[i] for i in rng.choice(len(names), min(6, len(names)), replace=False)]
+        _, aligned = fit(sample)
+        med = float(np.median([_moved(c2w[n], aligned[n])[0] for n in names]))
+        if med < best:
+            best, keep = med, sample
     for _ in range(3):
         _, aligned = fit(keep)
         keep = sorted(names, key=lambda n: _moved(c2w[n], aligned[n])[0])[:max(3, len(names) // 2)]
@@ -280,6 +291,9 @@ def refine(data_dir: Path, features: int = FEATURES, pairs_k: int = PAIRS_K, rou
     if len(new) < 3:
         raise ScanError(f"pose refinement failed: COLMAP placed only {len(new)} of {len(names)} cameras: train without --colmap-poses")
     scale, aligned, good = _align(new, c2w)
+    if not MIN_SCALE <= scale <= 1 / MIN_SCALE:
+        raise ScanError(f"pose refinement failed: COLMAP's walk is {scale:.2f} x ARKit's after alignment, too far from 1 to trust: "
+                        "train without --colmap-poses")
     if len(good) < MIN_REFINED_SHARE * len(names):
         raise ScanError(f"pose refinement failed: only {len(good)} of {len(names)} cameras stayed within {MAX_SHIFT_M:g} m and "
                         f"{MAX_ROT_DEG:g} degrees of ARKit: train without --colmap-poses")

@@ -255,7 +255,8 @@ def cmd_train(args) -> int:
         result = trainer.train(prep.data_dir, work / "out", cfg["steps"], prep.long_side, cfg["sh_degree"],
                                cfg["train_max_splats"], args.progress_every,
                                stills_max_size=cfg["stills_max_size"] if prep.stills else None, pose_opt=cfg["pose_opt"],
-                               depth_weight=args.depth_weight, init=Path(args.init).expanduser().resolve() if args.init else None)
+                               depth_weight=args.depth_weight, init=Path(args.init).expanduser().resolve() if args.init else None,
+                               res_ramp=0.0 if args.quality == "draft" else None)
         if args.keep_raw:
             shutil.copyfile(result["ply"], Path(args.keep_raw).expanduser())
         say("finishing: cropping floaters and writing the room")

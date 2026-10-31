@@ -16,7 +16,8 @@ export const SETTINGS = [
   { key: 'max_image_size', label: 'Video frame size', min: 640, max: 3840, unit: 'px', hint: 'Long side of each video frame it learns from. Bigger: finer texture, more memory.' },
   { key: 'stills_max_size', label: 'Still photo size', min: 640, max: 4032, unit: 'px', hint: 'Long side of the high-resolution stills, when the scan has them.' },
   { key: 'sh_degree', label: 'Colour detail', min: 0, max: 3, hint: 'How colour shifts with the angle you look from: 3 is the most lifelike, 0 the lightest file.' },
-  { key: 'pose_opt', label: 'Refine camera poses', bool: true, hint: 'Lets training nudge where the phone was. Can rescue a wobbly scan; slower.' },
+  { key: 'pose_opt', label: 'Refine camera poses', bool: true, hint: 'Lets training nudge where the phone was. On by default, at almost no cost.' },
+  { key: 'colmap_poses', label: 'Best poses (COLMAP)', bool: true, hint: 'Solves where the phone was from the photos before training. The sharpest room, but hours on a whole room.' },
   { key: 'holdout_every', label: 'Hold out every Nth frame', min: 0, max: 50, hint: 'Keeps some frames out of training to score the result. 0 trains on every frame.' },
 ]
 const minutes = (s) => (!(s > 0) ? '' : s < 90 ? `about ${Math.max(1, Math.round(s / 60))} min` : s < 5400 ? `about ${Math.round(s / 60)} min` : `about ${(s / 3600).toFixed(1)} h`)

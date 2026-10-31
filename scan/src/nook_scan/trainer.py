@@ -41,7 +41,7 @@ def train_log() -> Path:
 
 def train(data_dir: Path, out_dir: Path, steps: int, max_image_size: int, sh_degree: int, max_splats: int,
           progress_every: float = 20.0, stills_max_size: int | None = None, pose_opt: bool = False,
-          depth_weight: float = 0.0, init: Path | None = None) -> dict:
+          depth_weight: float = 0.0, init: Path | None = None, res_ramp: float | None = None) -> dict:
     """Train the prepared dataset in `data_dir`. Returns {"ply": Path, "psnr": None}.
 
     `stills_max_size` sizes the frames dataset.prepare marked as stills; it's only passed on when it differs from
@@ -63,6 +63,8 @@ def train(data_dir: Path, out_dir: Path, steps: int, max_image_size: int, sh_deg
         cmd += ["--depth-weight", str(depth_weight)]
     if init:
         cmd += ["--init", str(init)]
+    if res_ramp is not None:  # --quality draft stays at full size, as v1 did
+        cmd += ["--res-ramp", str(res_ramp)]
     cmd += os.environ.get("NOOK_GSPLAT_ARGS", "").split()  # experiments, e.g. "--pose-opt-lr 2e-5"
     log = train_log()
     log.parent.mkdir(parents=True, exist_ok=True)

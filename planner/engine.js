@@ -1077,7 +1077,10 @@ function bakeEnvironment(probe = env.customProbe) {
     try {
       for (let i = 0; spark.sorting && i < 300; i++) await new Promise((r) => setTimeout(r, 10))
       scene.background = room.fill || background
+      // renderCubeMap sorts once for all six faces, so they need the view-independent radial order.
+      spark.sortRadial = true
       const cube = await spark.renderCubeMap({ scene, worldCenter: center, size: ENV_SIZE, near: 0.05, far: 200, hideObjects: hide, filter: true })
+      spark.sortRadial = false
       scene.background = background
       if (token !== roomToken || room.kind !== 'splat') return
       const rt = pmrem.fromCubemap(cube)
@@ -1092,6 +1095,7 @@ function bakeEnvironment(probe = env.customProbe) {
       // Re-sort for the real camera before the frame unfreezes, so furniture splats never blink out.
       await spark.update({ scene, camera })
     } finally {
+      spark.sortRadial = false
       scene.background = background
       spark.autoUpdate = true
       baking = false
