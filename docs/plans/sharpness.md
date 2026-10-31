@@ -3,7 +3,7 @@
 **Goal (Saleh):** a crisp splat of the majlis. "majlis better" = room `scan-20261027-214555` (1,079 frames, 331 stills at
 4032×3024, LiDAR; the working copy is unzipped in `~/nook-exp/cap`, so don't go to `/var/lib/nook` for it). End state is merged
 PRs and kakapo running the result, but **every merge and deploy needs Saleh's word in your own session**; this note
-is not that word. Nothing is merged or deployed yet.
+is not that word. Done on 2026-10-31: nook PR #6 merged (`692e123`), kakapo PR #75 merged and deployed (`1b83e21`); see "Outcome".
 
 ## Who does what (agreed with Saleh, 2026-10-30)
 
@@ -18,7 +18,7 @@ Two sessions, split by files so they never edit the same thing. Neither touches 
 
 - **Talking to each other:** the sessions can't message each other, so they write here. Either one may add a line
   under "Requests" below (the one exception to the file split), commit it on its own branch and push; the other reads
-  it with `git fetch && git show origin/<branch>:docs/plans/sharpness.md`. Saleh relays anything urgent.
+  it with `git fetch && git show origin/<branch>:docs/plans/sharpness.md` (since PR #6, this note is on `main`). Saleh relays anything urgent.
 - **Contract:** a capture change that the trainer must read (a new `meta.json` or frame key) is specified in
   `contract/CONTRACT.md` by the kakapo session first; the Mac session then writes it. The capped shutter needs no
   contract change: `exposure_duration` and `lock_exposure_duration` already record it.
@@ -59,7 +59,11 @@ Goal: under 30 min upload to room, no visible loss, judged at the seated (1.15 m
 
 **So the target isn't fully met:** 30 minutes works, but the room is visibly rougher than with COLMAP poses, on the sofa, table and door. The biggest open gain is a faster way to reach COLMAP-quality poses (fewer frames in the adjustment and interpolated corrections, a faster solver, or fixing ARKit's drift between passes).
 
-**The mug (`scan-20261030-221504`) on the web app:** the deployed server has none of this branch's code, so the capture went up as `scan-20261030-221505` with COLMAP poses and rebuilt `points.ply` already in it (`evals/sharpness/refined_capture.py`), room `mug-colmap`, deployed defaults (36,240 steps, 2M splats, no pose refinement). The original capture is untouched.
+**Rooms on the web app:** both were trained before the deploy, on the old server code. The mug (`scan-20261030-221504`): the capture went up as `scan-20261030-221505` with COLMAP poses and rebuilt `points.ply` already in it (`evals/sharpness/refined_capture.py`), room `mug-colmap`, deployed defaults (36,240 steps, 2M splats, no pose refinement). The original capture is untouched.
+
+**The room with COLMAP poses (`majlis-colmap`):** `scan-20261030-154924` went up the same way as `scan-20261030-154925`, with 1,073 of its 1,122 frames: the 48 guard frames have no refined poses, and frame 1116 moved 52 degrees. Deployed defaults of that time: 85,840 steps, 2M splats, 141 min from upload to room, 1.5M delivered. It became the current room; `mug-colmap` stays listed. Trained again from the capture, unlike `s1-best`, so the two can look different. Neither has been opened in the live planner.
+
+**Still open:** no real iPhone test of depth sort or level of detail. No whole room through `colmap_poses` in the service, which has no `MemoryMax` (kakapo has no swap). A faster way to COLMAP-quality poses. The planner's linear-light blending (-1.43 dB on one older room). Whether app 0.5's test walk covers the level views at seated and standing height.
 
 **Local rooms:** `~/nook-exp/rooms`: `s1-full` (the defaults, all frames) and `s1-best` (from `s1-H`, trained without the held-out frames). Serve them with the branch's planner: `python3 planner/serve.py --host 127.0.0.1 --port 18765 --room-dir ~/nook-exp/rooms`, and tunnel with `ssh -L 18765:127.0.0.1:18765 kakapo`. Images: `~/nook-exp/cmp/`, `~/nook-exp/runs/*/shots`. Table: `~/nook-exp/table.md`.
 
