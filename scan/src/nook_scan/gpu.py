@@ -17,16 +17,16 @@ import sys
 NVIDIA_SMI = ("nvidia-smi", "/run/current-system/sw/bin/nvidia-smi", "/usr/bin/nvidia-smi")
 
 SMALL_VRAM_GB = 10             # the small class: 6-10 GB (kakapo's RTX 2060); above this, the large class
-# Training caps (`train_max_splats`). gsplat on the RTX 2060 peaked at 2.45 GB with 1.2M splats at 1920 px (0a run A),
-# so 2M leaves room for higher step counts and stills; 0a's B runs set the final numbers.
-TRAIN_MAX_SPLATS = {"small": 2_000_000, "large": 3_000_000}
+# Training caps (`train_max_splats`). 1.5M on the RTX 2060 peaked at 2.74 GB and keeps a room near 30 min; it's also the
+# delivery cap, so nothing trained is pruned for size. More splats gave a small gain and cost time (docs/plans/sharpness.md).
+TRAIN_MAX_SPLATS = {"small": 1_500_000, "large": 3_000_000}
 # What the room is pruned to after cropping (`deliver_max_splats`): Spark loads it in the browser and on phones,
 # next to the furniture.
 DELIVER_MAX_SPLATS = 1_500_000
 # Speed for `eta_s`: seconds per 1,000 steps per million splats, whole run (preparing, training, cropping, writing).
-# Placeholder from 0a run A on the RTX 2060: 20k steps at 1.2M splats, 1,089 frames at 1920 px, 1,163 s in total.
-# The large class isn't measured; it uses the same number until it is.
-SECONDS_PER_KSTEP_MSPLAT = {"small": 1163 / (20 * 1.2), "large": 1163 / (20 * 1.2)}
+# Measured on the RTX 2060, run s1-G: 25k steps at 1.5M splats, 978 frames at 1920 px, the ramp and pose refinement:
+# 1,452 s training, plus about 100 s preparing and finishing. The large class isn't measured; it uses the same number.
+SECONDS_PER_KSTEP_MSPLAT = {"small": 1552 / (25 * 1.5), "large": 1552 / (25 * 1.5)}
 
 
 def _run(cmd: list[str]) -> str:

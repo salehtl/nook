@@ -56,6 +56,7 @@ python3 planner/serve.py [--port 8765] [--room-file room/room.json] [--layouts-d
 
 - `?library=<url>`: library to load (default `/library/library.json`). Asset paths resolve relative to it. A missing library is an empty library, not an error.
 - `?room=<name>`: the room to open (§2.7).
+- `?lod=0`: keep the plain room splats (no level of detail, §2.6).
 
 ### 2.3 Features (MVP)
 
@@ -135,6 +136,8 @@ Goal: semi-realistic for $0 in the planner, plus an optional paid photoreal pass
 3. **Contact shadows**: every placed item (GLB or splat) gets a soft blob shadow on the floor: a radial-gradient quad slightly larger than its footprint, just above y = 0, which follows the item's position and rotation. It can be toggled.
 4. Splat furniture already matches the scan's look. Nothing changes there beyond the contact shadow.
 
+**Level of detail:** after a splat room loads and its first bake ends, the planner builds Spark's on-device LoD tree in a worker (`createLodSplats()`), and Spark then draws a view selection within its platform budget. No server file is needed. The tree is skipped on a phone when the room has at most 1,500,000 splats, when `navigator.deviceMemory < 4`, and with `?lod=0`. A failed build keeps the plain splats and reports no error. Room picks and the floor fit always read the plain splats, so a pick doesn't depend on the camera or on LoD. `lodRenderScale` is 0.5. `getState().room` gains `lod?: 'off' | 'building' | 'on'`; `splatCount` stays the scan's full count.
+
 **Render this view (paid, about $0.04)**. The default model is `nano-banana`, picked by a live comparison (evals/golden/RESULTS.md).
 
 5. A **Render** button (top bar) captures the current view (the canvas only, no UI) as a JPEG and asks for confirmation, showing the model and its price. It then `POST`s to `/api/render` and shows the result side by side with the input. A **Renders** panel lists past renders, newest first.
@@ -183,6 +186,7 @@ listRenders(): Promise<RenderMeta[]>
 - P14. In mock mode, `renderView()` writes the jpg/input/json files, appends a mock cost row, and returns a URL that serves the image. The render shows up in `listRenders()` and in the Renders panel.
 - P15. Without a key (and not in mock mode), `/api/render` returns 503 with the FAL_KEY message, and the UI shows it as a toast.
 - P16. Performance: with the fixture splat room and 3 items, orbiting stays interactive. Baking happens only on load, on save, or when asked, never per frame.
+- P27. With LoD on, a pick matches the same pick with `?lod=0` within 1 cm. The image at 1280 × 800 stays within 5 % of the plain room's Laplacian variance.
 - P10. A missing or corrupt asset shows an error message and the rest of the app keeps working.
 
 ### 2.7 Rooms (planner v2)
@@ -535,7 +539,8 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 - It then writes or updates `<room-dir>/room.json` (room.schema.json): `splat` is the path of the SPZ relative to the repo root (or to `<room-dir>`'s parent when outside the repo), and `transform` is `position [0, −floor_y, 0]`, `quaternion [0,0,0,1]`, `scale 1`. Other existing keys, such as `look` and `placeholder`, are kept. The same config is also written to `<room-dir>/<name>.room.json` (§2.7), so the room keeps its alignment after a later scan repoints `room.json`.
   - `floor_y` comes from `meta.floor_y`. Otherwise it's estimated from seed or depth points (a low percentile of the y values of near-horizontal dense regions).
 - `--holdout-every N` (default 0) excludes frames with `index % N == 0` from training, so that evals can score them.
-- The last stdout line is JSON: `{ "name", "ply", "room_json", "splats", "floor_y", "steps", "seconds", "trainer": "<name and version>" }`.
+- The last stdout line is JSON: `{ "name", "ply", "room_json", "splats", "floor_y", "steps", "seconds", "trainer": "<name and version>", "floor_warning": "<line>" | null, "frames": {"train", "held_out", "test_walk"} }`.
+- **Floor sanity:** `meta.floor_y` is the lowest large flat surface, which can be another level seen through an opening. When the median camera height above it is outside 0.9-1.9 m, `train` and `check` warn, name the seed points' estimate if it's plausible, and set `floor_warning`. `floor_y` itself is kept.
 - Failures exit non-zero with one actionable stderr line (no traceback), and write nothing into `<room-dir>`.
 
 ### 4.7 Acceptance: nook-scan
@@ -561,12 +566,15 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
   - `"exposure_locked": bool` and `"white_balance_locked": bool`: whether the app locked them for the whole capture. The app locks both once tracking has been `normal` for about 1 s. Keyframes are only kept after the locks are in place.
   - `"lock_iso"`, `"lock_exposure_duration"` (s), and `"lock_white_balance_gains": {"r","g","b"}`: the locked values, for reference.
 - Each frame may carry `"exposure_duration"` (s) and `"exposure_offset"` (EV) from `ARCamera`.
-- **Guided passes:** each frame may carry `"pass": 1 | 2 | 3`:
+- **Guided passes:** each frame may carry `"pass": 1 | 2 | 3 | 4`:
   1. loop at chest height
   2. high loop, phone tilted down (app 0.5; before that, a lower loop tilted down)
   3. low loop, phone tilted up (app 0.5; before that, a walk through the middle)
+  4. reserved for a further pass the app may add
 
   The trainer ignores the pass number. It's only for diagnostics.
+- **Test walk:** a frame may carry `"test_walk": true`. These frames are never trained on, never feed seeds and are never viewpoints. They go to `transforms_val.json` for scoring, with any held-out frames, and they don't count in `n_train` (§4.9.1). They don't set the crop box or the floor. If `points.ply` exists, seeds are rebuilt from the depth maps of the training frames, because its points can't be split by frame.
+- **Seed cap (before app 0.5):** the app stopped `points.ply` at 400,000 points, which could happen before it had looked up. At 400,000 or more points, with depth maps present and `app_version` below 0.5, seeds come from the training frames' depth maps instead: 2 cm voxels, larger if needed to fit the budget. From app 0.5, `points.ply` is used as it is (§4.13).
 
 ### 4.9 Trainer v2
 
@@ -585,8 +593,8 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 The v2 preset trains every capture for the same number of steps, so a 1,200-frame scan comes out undertrained. v3 scales them.
 
 **Scaled settings** (`--quality high`, the default):
-- `steps = clamp(k × n_train, 20,000, 120,000)`, where `n_train` is the number of training frames (after `--holdout-every`). `k = 80` steps per frame (v4 phase 0a: on a 1,089-frame capture at 2M splats, 40 → 80 steps per frame raised held-out PSNR from 21.44 to 22.03 dB).
-- `train_max_splats`: a constant per GPU class (`scan/src/nook_scan/gpu.py`), never computed from free VRAM, so `--dry-run` gives the same answer on any machine. For now: 2,000,000 on a 6–10 GB card (kakapo's RTX 2060), 3,000,000 above 10 GB.
+- `steps = clamp(k × n_train, 20,000, 30,000)`, where `n_train` is the number of training frames (after `--holdout-every`, without test-walk frames). `k = 25` steps per frame, about 25k steps for a 1,000-frame room, about 25 min of training (docs/plans/sharpness.md). `pose_opt` is on, with a learning rate of 1e-3 per camera; training starts at a quarter of the resolution and grows to full size over the first half of the steps. Together with rebuilt seeds (§4.8), these replaced 80 steps per frame.
+- `train_max_splats`: a constant per GPU class (`scan/src/nook_scan/gpu.py`), never computed from free VRAM, so `--dry-run` gives the same answer on any machine. For now: 1,500,000 on a 6–10 GB card (kakapo's RTX 2060), 3,000,000 above 10 GB.
 - High-resolution stills (§4.10) train at `stills_max_size` (default: the same as `max_image_size`, 1920; 0a decides whether 2880 pays off). Video frames stay at `max_image_size`.
 - `deliver_max_splats` (default 1,500,000): after cropping, splats beyond this are pruned, lowest `opacity × volume` first, before the room's SPZ and PLY are written. The planner and phones load the delivered room. `--keep-full-ply` also writes the unpruned crop as `<name>.full.ply`.
 - `--quality draft` stays as v1 (10k steps, 1280 px). Explicit flags beat both presets.
@@ -601,10 +609,17 @@ The v2 preset trains every capture for the same number of steps, so a 1,200-fram
 | `max_image_size` | `--max-image-size` | 640–3840 |
 | `stills_max_size` | `--stills-max-size` | 640–4032 |
 | `sh_degree` | `--sh-degree` | 0–3 |
-| `pose_opt` | `--pose-opt` (a real flag now, not `NOOK_GSPLAT_ARGS`) | bool |
+| `pose_opt` | `--pose-opt`, `--no-pose-opt` | bool (default on in `high`) |
+| `colmap_poses` | `--colmap-poses` | bool (default false) |
 | `holdout_every` | `--holdout-every` | 0 or 2–50 |
 
 `--refine-poses` (`nook-poses`) stays as a CLI flag but isn't offered as a setting: it didn't help.
+
+**COLMAP poses (opt-in):** `--colmap-poses` (setting `colmap_poses`, mutually exclusive with `--refine-poses`) refines the poses of the prepared dataset with COLMAP before training: SIFT (8192 features at the prepared image size), matching on pose-derived pairs (30 per image, plus 4 neighbours in time), triangulation at the known poses and bundle adjustment with fixed intrinsics, 2 rounds of 200 iterations. It gave the best room in the tests, but it took 6.4 hours on a 1,074-frame room, so it is off by default. CPU only, on half the cores, at low priority. `NOOK_COLMAP_BIN` names the binary, else `colmap` on PATH; when it is missing, the run fails before any work.
+- Training and held-out frames are refined together. The result is aligned back onto the ARKit frame by a similarity on the camera centers (with a small share of the orientations), fitted without outliers, so a room's transform stays valid. `transforms.json` and `transforms_val.json` are replaced; the originals stay as `transforms.arkit.json` and `transforms_val.arkit.json`.
+- Outlier guard: a camera that moved more than 1 m or 15 degrees from ARKit, or that COLMAP did not place, keeps its ARKit pose and is reported. The run fails if fewer than half of the cameras pass, or if COLMAP places fewer than 3.
+- When the capture has depth, seeds and window seeds are rebuilt from the training frames' depth maps at the refined poses, and `points.ply` is rewritten. Without depth, `points.ply` stays. The floor estimate, crop and viewpoints use the refined poses and rebuilt seeds. Photometric gains stay measured at the ARKit poses.
+- The last-line JSON gains `"pose_refinement"`, null when off. `eta_s` adds a rough 22 s per frame for this setting, from one run. The real time varies with the room.
 
 **Experimental: depth loss and fine-tuning** (CLI only for now, not retrain settings, until a real test shows they help):
 - `--depth-weight W` (0–10, default 0 = off): adds `W ×` an L1 loss in log depth between the rendered expected depth and the frame's LiDAR depth (§4 `depth/`), on pixels with a return under 5 m and away from depth edges. Meant to keep floaters out of the room's free space. Frames without depth train as before.

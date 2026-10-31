@@ -16,10 +16,10 @@ from pathlib import Path
 import numpy as np
 
 from . import REPO, ScanError, say
-from . import capture, dataset, gpu, photometric, poses, post, room, roomplan, trainer
+from . import capture, colmap, dataset, gpu, photometric, poses, post, room, roomplan, trainer
 from .settings import PRESETS
 from . import settings as settings_mod
-from .ply import write_splats
+from .ply import read_points, write_splats
 from .spz import write_spz
 
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -54,7 +54,8 @@ def build_parser() -> Parser:
                                                           f"(default: {gpu.DELIVER_MAX_SPLATS:,}, at most --max-splats)")
     t.add_argument("--keep-full-ply", action="store_true", help="also write the unpruned crop as <name>.full.ply")
     t.add_argument("--sh-degree", type=int, choices=range(4), metavar="{0-3}", help="spherical-harmonics degree of the splat (default: from --quality; 3 is ~2.5x bigger)")
-    t.add_argument("--pose-opt", action="store_true", help="refine the camera poses along with the splats (nook-gsplat --pose-opt)")
+    t.add_argument("--pose-opt", action=argparse.BooleanOptionalAction, default=None,
+                   help="refine the camera poses along with the splats (nook-gsplat --pose-opt; default: on for --quality high)")
     t.add_argument("--depth-weight", type=float, default=0.0, metavar="W",
                    help="pull the splats toward the capture's LiDAR depth (0 = off; 0.2 keeps floaters out of the room's free space)")
     t.add_argument("--init", metavar="SPLAT",
@@ -66,8 +67,12 @@ def build_parser() -> Parser:
     t.add_argument("--photometric", action="store_true",
                    help="even out exposure and white balance between frames before training (captures without exposure lock). "
                         "Off by default: the room looks more even, but held-out photos keep their own exposure, so it scores lower")
-    t.add_argument("--refine-poses", action="store_true",
-                   help="refine the ARKit camera poses with nook-poses (VGGT, kakapo) before training (contract §4.11)")
+    refine = t.add_mutually_exclusive_group()
+    refine.add_argument("--refine-poses", action="store_true",
+                        help="refine the ARKit camera poses with nook-poses (VGGT, kakapo) before training (contract §4.11)")
+    refine.add_argument("--colmap-poses", action="store_true",
+                        help="refine the ARKit camera poses with COLMAP before training and rebuild the seeds from depth at them: "
+                             "the best room in the tests, but it adds hours on a 1,000-frame room (contract §4.9.1)")
     # Tuning and server plumbing, not for everyday use.
     t.add_argument("--keep-raw", help=argparse.SUPPRESS)
     t.add_argument("--progress-every", type=float, default=20.0, help=argparse.SUPPRESS)
@@ -105,16 +110,21 @@ def cmd_check(args) -> int:
         print(f"ok   {root.name}: {len(cap.frames)} frames {t['w']}x{t['h']}, lidar={m['lidar']}, depth={depth}, "
               f"seeds={'yes' if t.get('ply_file_path') else 'no'}, span {np.linalg.norm(np.ptp(pos, axis=0)):.2f} m, floor_y={m.get('floor_y')}, "
               f"exposure_locked={m.get('exposure_locked')}")
+        if m.get("floor_y") is not None:  # points.ply only: rebuilding seeds from depth is too slow for a check
+            seeds = read_points(root / t["ply_file_path"])[0] if t.get("ply_file_path") else None
+            warning = post.floor_warning(m["floor_y"], pos, seeds)
+            if warning:
+                print(f"warn {warning}")
     return 0
 
 
-def resolve(args, n_frames: int) -> dict:
+def resolve(args, n_frames: int, test_walk=()) -> dict:
     """The effective settings (§4.9.1 keys): the preset scaled to the capture, overridden by explicit flags. The CLI's
     limits are looser than the retrain ranges (settings.RANGES), so evals can train tiny runs."""
     s = settings_mod.resolve(n_frames, args.quality, {
         "steps": args.steps, "train_max_splats": args.max_splats, "deliver_max_splats": args.deliver_max_splats,
         "max_image_size": args.max_image_size, "stills_max_size": args.stills_max_size, "sh_degree": args.sh_degree,
-        "pose_opt": args.pose_opt or None, "holdout_every": args.holdout_every})
+        "pose_opt": args.pose_opt, "holdout_every": args.holdout_every, "colmap_poses": args.colmap_poses or None}, test_walk)
     if s["holdout_every"] < 0 or s["holdout_every"] == 1:
         raise ScanError("--holdout-every must be 0 (off) or at least 2")
     if s["steps"] < 100:
@@ -129,6 +139,41 @@ def resolve(args, n_frames: int) -> dict:
     return s
 
 
+def with_far_seeds(cap, frames: list[int], seeds: tuple, distance: float) -> tuple:
+    """The room's seeds plus window seeds (`distance` 0: none), which never count for the floor or the crop."""
+    if distance > 0 and seeds[1] is not None:
+        far, far_rgb = dataset.far_points(cap, frames, distance)
+        if len(far):
+            say(f"window seeds: {len(far)} points {distance:g} m out, where LiDAR saw nothing bright")
+            return np.concatenate([seeds[0], far]), np.concatenate([seeds[1], far_rgb]), seeds[2]
+    return seeds
+
+
+def refine_with_colmap(cap, prep, frames: list[int], far_seeds: float) -> tuple[dict, np.ndarray | None]:
+    """Refine the prepared dataset's poses, move `cap` onto them, and rebuild the seeds from depth at them. Exposure
+    gains stay as measured at the ARKit poses: COLMAP needs the written images, and a few cm don't change a gain.
+    Returns the stats, and the room's new seeds (None without depth maps: points.ply stays, at the ARKit poses)."""
+    stats = colmap.refine(prep.data_dir)
+    say(f"poses refined with COLMAP: {stats['refined']} of {stats['frames']} cameras, median shift {stats['shift_cm_median']} cm "
+        f"(max {stats['shift_cm_max']}), rotation median {stats['rot_deg_median']} deg (max {stats['rot_deg_max']}), scale {stats['scale']}, "
+        f"in {stats['seconds']:.0f} s")
+    kept = stats["outliers"] + stats["unregistered"]
+    if kept:
+        worst = "; ".join(f"{o['frame']} {o['shift_m']} m, {o['rot_deg']} deg" for o in stats["outlier_frames"][:5])
+        say(f"warning: {kept} cameras keep their ARKit poses: {stats['outliers']} moved over {colmap.MAX_SHIFT_M:g} m or "
+            f"{colmap.MAX_ROT_DEG:g} deg{f' ({worst})' if worst else ''}, {stats['unregistered']} not placed by COLMAP")
+    dataset.apply_poses(cap, prep.data_dir)
+    xyz, rgb = dataset.depth_seeds(cap, frames)
+    if not len(xyz):
+        say("warning: no depth maps, so the seeds stay at the ARKit poses")
+        stats["seeds"] = {"rebuilt": False, "points": len(prep.seeds), "source": prep.seed_source}
+        return stats, None
+    dataset.replace_seeds(prep, *with_far_seeds(cap, frames, (xyz, rgb, "depth"), far_seeds))
+    say(f"seeds rebuilt from depth at the refined poses: {len(prep.seeds)} points")
+    stats["seeds"] = {"rebuilt": True, "points": len(prep.seeds), "source": prep.seed_source}
+    return stats, xyz
+
+
 def cmd_train(args) -> int:
     started = time.time()
     if not SLUG.match(args.name):
@@ -140,8 +185,9 @@ def cmd_train(args) -> int:
     if args.init and not Path(args.init).expanduser().is_file():
         raise ScanError(f"--init {args.init}: no such splat file (pass a room's .spz or .ply)")
     if args.dry_run:  # the capture's frame count is all it needs: read it without unzipping
-        n_frames = capture.peek(args.capture)["frames"]
-        print(json.dumps(settings_mod.summary(n_frames, args.quality, resolve(args, n_frames))), flush=True)
+        info = capture.peek(args.capture)
+        n_frames, walk = info["frames"], info["test_walk"]
+        print(json.dumps(settings_mod.summary(n_frames, args.quality, resolve(args, n_frames, walk), walk)), flush=True)
         return 0
     room_dir = Path(args.room_dir).expanduser()
     if room_dir.exists() and not room_dir.is_dir():
@@ -149,6 +195,8 @@ def cmd_train(args) -> int:
     room.read_existing(room_dir)  # fail fast on a broken room.json; it is re-read at commit time
     if args.refine_poses:
         poses.binary()  # fail fast when nook-poses isn't installed here
+    if args.colmap_poses:
+        colmap.binary()  # the same for COLMAP
     far_seeds = args.far_seeds if args.far_seeds is not None else PRESETS[args.quality]["far_seeds"]
 
     work = Path(tempfile.mkdtemp(prefix="nook-scan-"))
@@ -156,18 +204,15 @@ def cmd_train(args) -> int:
         say("preparing: checking the capture")
         root = capture.open_capture(args.capture, work)
         cap = capture.load(root)
-        cfg = resolve(args, len(cap.frames))
+        walk = [i for i, f in enumerate(cap.frames) if capture.is_test_walk(f)]
+        cfg = resolve(args, len(cap.frames), walk)
         say(f"capture {root.name}: {len(cap.frames)} frames, valid ({args.quality} quality: {cfg['steps']} steps, "
             f"images up to {cfg['max_image_size']} px, up to {cfg['train_max_splats']:,} splats in training and "
             f"{cfg['deliver_max_splats']:,} delivered)")
-        seeds = dataset.seed_points(cap)
+        train_frames = dataset.training_frames(cap, cfg["holdout_every"])
+        seeds = dataset.seed_points(cap, train_frames)
         room_seeds = seeds[0]  # the room itself: floor estimate and crop bounds (far seeds are added below)
-        train_frames = [i for i in range(len(cap.frames)) if not dataset.is_held_out(i, cfg["holdout_every"])]
-        if far_seeds > 0 and seeds[1] is not None:
-            far, far_rgb = dataset.far_points(cap, train_frames, far_seeds)
-            if len(far):
-                say(f"window seeds: {len(far)} points {far_seeds:g} m out, where LiDAR saw nothing bright")
-                seeds = (np.concatenate([seeds[0], far]), np.concatenate([seeds[1], far_rgb]), seeds[2])
+        seeds = with_far_seeds(cap, train_frames, seeds, far_seeds)
         gains = None
         if args.photometric:
             g = photometric.measure(cap, train_frames, room_seeds)
@@ -181,7 +226,7 @@ def cmd_train(args) -> int:
         say("preparing: writing the training images")
         prep = dataset.prepare(cap, work, cfg["holdout_every"], cfg["max_image_size"], seeds=seeds, gains=gains,
                                stills_max_size=cfg["stills_max_size"])
-        say(f"dataset: {prep.n_train} training frames, {prep.n_eval} held out, {len(prep.seeds)} seed points ({prep.seed_source})")
+        say(f"dataset: {prep.n_train} training frames, {prep.n_eval} held out ({len(walk)} on the test walk), {len(prep.seeds)} seed points ({prep.seed_source})")
         if not len(prep.seeds):
             say("warning: no seed points or depth in this capture, the trainer starts from random splats (expect a blurrier room)")
         pose_summary = None
@@ -189,7 +234,13 @@ def cmd_train(args) -> int:
             pose_summary = poses.refine(prep.data_dir)
             say(f"poses refined: median shift {pose_summary['shift_cm_median']} cm (max {pose_summary['shift_cm_max']}), "
                 f"rotation median {pose_summary['rot_deg_median']} deg, in {pose_summary['seconds']:.0f} s")
-        cams = cap.poses()[:, :3, 3]
+        pose_refinement = None
+        if cfg["colmap_poses"]:
+            # From here on `cap` and room_seeds are at the refined poses: floor estimate, crop, window check, viewpoints.
+            pose_refinement, rebuilt = refine_with_colmap(cap, prep, train_frames, far_seeds)
+            if rebuilt is not None:
+                room_seeds = rebuilt
+        cams = np.delete(cap.poses()[:, :3, 3], walk, axis=0)  # the test walk is only scored: it sets neither the crop nor the floor
         floor_y, floor_source = cap.meta.get("floor_y"), "ARKit floor plane in meta.json"
         if floor_y is None:
             floor_y, floor_source = post.estimate_floor(room_seeds, cams), f"estimated from {prep.seed_source} points"
@@ -197,11 +248,15 @@ def cmd_train(args) -> int:
             raise ScanError("can't tell where the floor is (no ARKit floor plane in meta.json and no seed points or LiDAR depth below the camera): "
                             "scan again with the floor in view")
         say(f"floor at y = {floor_y:.3f} m ({floor_source})")
+        floor_warning = post.floor_warning(floor_y, cams, room_seeds if cap.meta.get("floor_y") is not None else None)
+        if floor_warning:
+            say(f"warning: {floor_warning}")
 
         result = trainer.train(prep.data_dir, work / "out", cfg["steps"], prep.long_side, cfg["sh_degree"],
                                cfg["train_max_splats"], args.progress_every,
                                stills_max_size=cfg["stills_max_size"] if prep.stills else None, pose_opt=cfg["pose_opt"],
-                               depth_weight=args.depth_weight, init=Path(args.init).expanduser().resolve() if args.init else None)
+                               depth_weight=args.depth_weight, init=Path(args.init).expanduser().resolve() if args.init else None,
+                               res_ramp=0.0 if args.quality == "draft" else None)
         if args.keep_raw:
             shutil.copyfile(result["ply"], Path(args.keep_raw).expanduser())
         say("finishing: cropping floaters and writing the room")
@@ -280,10 +335,10 @@ def cmd_train(args) -> int:
         "splats": int(len(splats)), "delivered_splats": int(len(splats)), "cropped_splats": int(len(full)),
         "floor_y": round(float(floor_y), 4), "steps": cfg["steps"], "seconds": round(time.time() - started, 1),
         "trainer": trainer.NAME, "psnr": result["psnr"], "floor_source": floor_source,
-        "frames": {"train": prep.n_train, "held_out": prep.n_eval}, "seeds": prep.seed_source,
+        "floor_warning": floor_warning, "frames": {"train": prep.n_train, "held_out": prep.n_eval, "test_walk": len(walk)}, "seeds": prep.seed_source,
         "quality": args.quality, "max_image_size": prep.long_side, "max_splats": cfg["train_max_splats"],
         "photometric": gains is not None, "sh_degree": cfg["sh_degree"], "viewpoints": len(views),
-        "poses": pose_summary, "settings": cfg, "parent": args.parent,
+        "poses": pose_summary, "pose_refinement": pose_refinement, "settings": cfg, "parent": args.parent,
         "roomplan": f"{room_dir / args.name}.roomplan.json" if extras else None,
         "full_ply": str(room_dir / f"{args.name}.full.ply") if args.keep_full_ply else None,
     }

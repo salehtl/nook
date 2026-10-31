@@ -18,6 +18,11 @@ SCHEMA_PATH = REPO / "contract" / "capture.schema.json"  # NOOK_CONTRACT_DIR ove
 _JUNK = ("__MACOSX", ".DS_Store")
 
 
+def is_test_walk(f: dict) -> bool:
+    """A frame of the test walk (contract §4.8): scored, never trained on, never a seed or a viewpoint."""
+    return f.get("test_walk") is True
+
+
 @dataclass
 class Capture:
     root: Path
@@ -79,7 +84,7 @@ def open_capture(arg: str, workdir: Path) -> Path:
 
 def peek(arg: str | Path) -> dict:
     """What a capture holds, read from its transforms.json and meta.json without extracting the zip or checking it:
-    {"name", "frames", "stills", "roomplan"}. For `--dry-run` and the server's kept captures. Raises ScanError."""
+    {"name", "frames", "stills", "roomplan", "test_walk" (frame indices)}. For `--dry-run` and the server's kept captures. Raises ScanError."""
     p = Path(arg).expanduser()
     try:
         if p.is_dir():
@@ -107,7 +112,8 @@ def peek(arg: str | Path) -> dict:
     if not isinstance(frames, list):
         raise ScanError("transforms.json has no frames list: the capture is damaged, export it again from the app")
     return {"name": name, "frames": len(frames), "stills": sum(1 for f in frames if isinstance(f, dict) and f.get("hires_file_path")),
-            "roomplan": has_roomplan and isinstance(meta, dict) and meta.get("roomplan") is not None}
+            "roomplan": has_roomplan and isinstance(meta, dict) and meta.get("roomplan") is not None,
+            "test_walk": [i for i, f in enumerate(frames) if isinstance(f, dict) and is_test_walk(f)]}
 
 
 def _load_json(root: Path, name: str) -> dict:

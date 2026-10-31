@@ -8,6 +8,7 @@ from .ply import read_vertices
 
 MIN_ALPHA = 1 / 255      # splats fainter than one 8-bit step are dropped
 MARGIN_M = 0.3           # slack around the captured volume
+CAMERA_HEIGHT_M = (0.9, 1.9)   # plausible median phone height above the floor on a handheld walk
 REQUIRED = ["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
 
 
@@ -116,3 +117,20 @@ def estimate_floor(seeds: np.ndarray, cams: np.ndarray) -> float | None:
     k = int(strong.min())
     layer = below[(below >= edges[k] - 0.03) & (below <= edges[k + 1] + 0.03)]
     return float(np.median(layer))
+
+
+def floor_warning(floor_y: float, cams: np.ndarray, seeds: np.ndarray | None = None) -> str | None:
+    """One actionable line when floor_y puts the phone at an implausible height, else None. The app takes the lowest
+    large flat surface, which can be a floor seen through an opening, or a table. `seeds`, when given, lets the line say
+    where the seed or depth points put the floor; floor_y itself is never replaced."""
+    low, high = CAMERA_HEIGHT_M
+    median = float(np.median(cams[:, 1]))
+    height = median - floor_y
+    if low <= height <= high:
+        return None
+    line = (f"floor_y {floor_y:.2f} puts the phone {height:.2f} m above the floor (a handheld walk is {low}-{high} m), "
+            "so it may be another level or a table")
+    estimate = estimate_floor(seeds, cams) if seeds is not None else None
+    if estimate is not None and low <= median - estimate <= high:
+        line += f"; the seed points suggest y = {estimate:.2f} (phone {median - estimate:.2f} m up)"
+    return line + ": floor_y is kept, so check the room in the planner and use Pick floor if it is wrong"

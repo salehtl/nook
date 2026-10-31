@@ -26,7 +26,8 @@
 //   isRoomDirty() / isLayoutDirty() / getDirty() { room, layout }   unsaved alignment/look; items changed since load/save
 //   getRoomConfig()        working room config (room.schema.json, normalized; live object, don't mutate)
 //   getSavedRoomConfig()   last config read from or written to the server
-//   getRoom()              { kind: 'placeholder'|'splat', loaded, failed, error, splatCount, dropped: fileName|null, name }
+//   getRoom()              { kind: 'placeholder'|'splat', loaded, failed, error, splatCount, lod, dropped: fileName|null, name }
+//                          lod: 'off' | 'building' | 'on', the room splat's level of detail (see buildRoomLod)
 //                          error (after a failed load): { kind: 'missing'|'offline'|'bad', file, message }
 //   getEyeHeight()         1.15 / 1.6 m in seated / standing, null in orbit
 //   getRoomStatus()        status line text ("placeholder 3.5 × 4 × 2.7 m", "loading …", …)
@@ -177,7 +178,17 @@ const canvas = renderer.domElement
 
 const scene = new THREE.Scene()
 scene.background = new THREE.Color(0x1b1d21)
-const spark = new SparkRenderer({ renderer })
+// lodRaycast: 0 stops Spark's second, coarse LoD traversal for raycasts: room picks test every splat (hitRoomSplat).
+// lodRenderScale: 0.5 keeps splats down to half a pixel: at the default 1.0 a real room lost 8-10 % of its Laplacian
+// variance at 1280 × 800, at 0.5 under 0.5 %. The splat budget still caps what's drawn.
+// onDirty: an LoD selection or sort that lands after the wake tail still gets drawn (one frame, not a new tail).
+// sortRadial: false orders splats by camera depth, as gsplat does in training. Spark's default radial order cost 2.4 dB
+// against the photos on a real room (evals/psnr_judge.mjs). maxPixelRadius 2048: gsplat doesn't clamp either (+0.36 dB);
+// phones keep Spark's default, because large splats near the camera add fill cost that nobody has measured there.
+const spark = new SparkRenderer({
+  renderer, lodRaycast: 0, lodRenderScale: 0.5, onDirty: () => wake(50), sortRadial: false,
+  ...(/iPhone|iPad|iPod|Android/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ? {} : { maxPixelRadius: 2048 }),
+})
 scene.add(spark)
 
 // --- look: the whole frame (scan splats included) is rendered linear into a half-float target, then one
@@ -302,7 +313,7 @@ const noRaycast = (o) => { o.traverse((c) => { c.raycast = () => {} }); return o
 export const IDENTITY = () => ({ position: [0, 0, 0], quaternion: [0, 0, 0, 1], scale: 1 })
 let roomConfig = normalizeRoomConfig({ version: 1, placeholder: { ...DEFAULT_PLACEHOLDER } })
 let savedRoomConfig = clone(roomConfig)
-const room = { kind: 'placeholder', loaded: false, failed: false, error: null, mesh: null, splatCount: 0, localBox: null, fill: null, dropped: null }
+const room = { kind: 'placeholder', loaded: false, failed: false, error: null, mesh: null, splatCount: 0, lod: 'off', localBox: null, fill: null, dropped: null }
 let loadAbort = null // AbortController of the scan download in flight
 let roomToken = 0
 let roomStatus = 'loading…'
@@ -418,7 +429,33 @@ function disposeRoomSplat() {
   env.chain.then(() => { try { mesh.dispose() } catch { /* ignore */ } })
   room.mesh = null
   room.splatCount = 0
+  room.lod = 'off'
   room.localBox = null
+}
+
+// Level of detail (Spark's tiny-lod tree, built on the device in a worker; contract §2.6). The room opens and bakes its
+// light from the plain splats exactly as without LoD; the tree follows when it's ready, and from then on Spark draws a
+// selection for the view, at most its platform budget (1 M Android, 1.5 M iOS, 2.5 M desktop). The plain splats stay:
+// picks and the floor fit read them. The tree costs far more memory than it saves (about 450 MB at 1.4 M splats, SH 3),
+// so a phone builds it only for a room above LOD_PHONE_ABOVE. A device known to be short of memory, ?lod=0 or a failed
+// build keep the plain splats.
+const LOD_PHONE_ABOVE = 1_500_000
+const IS_PHONE = /iPhone|iPad|iPod|Android/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+const LOD_WANTED = params.get('lod') !== '0' && !(navigator.deviceMemory < 4)
+function buildRoomLod(mesh) {
+  if (!LOD_WANTED || (IS_PHONE && room.splatCount <= LOD_PHONE_ABOVE)) return
+  env.chain.then(async () => {
+    if (room.mesh !== mesh) return
+    room.lod = 'building'
+    try {
+      await mesh.createLodSplats()
+      if (room.mesh === mesh) room.lod = 'on'
+    } catch (e) {
+      if (room.mesh === mesh) room.lod = 'off'
+      console.info('[nook] no level of detail for this room:', e?.message || e)
+    }
+    wake()
+  })
 }
 
 function showPlaceholder() {
@@ -585,6 +622,7 @@ async function loadRoomInternal(cfg, { fileBytes = null, fileName = null, frame 
   // A new scan lights the furniture from its center; this doesn't hold up loadRoom().
   env.customProbe = null
   quiet(bakeEnvironment())
+  buildRoomLod(mesh)
 }
 
 // Axis-aligned box of splat centers, 1st–99th percentile per axis (ignores floaters). With `meanColor` (a
@@ -1039,7 +1077,10 @@ function bakeEnvironment(probe = env.customProbe) {
     try {
       for (let i = 0; spark.sorting && i < 300; i++) await new Promise((r) => setTimeout(r, 10))
       scene.background = room.fill || background
+      // renderCubeMap sorts once for all six faces, so they need the view-independent radial order.
+      spark.sortRadial = true
       const cube = await spark.renderCubeMap({ scene, worldCenter: center, size: ENV_SIZE, near: 0.05, far: 200, hideObjects: hide, filter: true })
+      spark.sortRadial = false
       scene.background = background
       if (token !== roomToken || room.kind !== 'splat') return
       const rt = pmrem.fromCubemap(cube)
@@ -1054,6 +1095,7 @@ function bakeEnvironment(probe = env.customProbe) {
       // Re-sort for the real camera before the frame unfreezes, so furniture splats never blink out.
       await spark.update({ scene, camera })
     } finally {
+      spark.sortRadial = false
       scene.background = background
       spark.autoUpdate = true
       baking = false
@@ -1947,8 +1989,16 @@ function hitItems() {
 }
 function hitRoomSplat() {
   if (!room.mesh || room.kind !== 'splat') return null
-  const hits = raycaster.intersectObject(room.mesh, false)
-  return hits.length ? { point: hits[0].point.clone(), distance: hits[0].distance } : null
+  // Test every splat of the scan, not the view's LoD selection, so that a pick doesn't depend on the camera. Spark has
+  // no option for this: raycast() follows these two context values, set by each update (pinned Spark, see index.html).
+  const c = room.mesh.context, lod = c.enableLod.value, drawn = c.numSplats.value
+  if (lod) { c.enableLod.value = false; c.numSplats.value = room.mesh.packedSplats.numSplats }
+  try {
+    const hits = raycaster.intersectObject(room.mesh, false)
+    return hits.length ? { point: hits[0].point.clone(), distance: hits[0].distance } : null
+  } finally {
+    if (lod) { c.enableLod.value = true; c.numSplats.value = drawn }
+  }
 }
 function hitAnything() {
   const cands = []
@@ -2043,7 +2093,7 @@ function fitFloorAt(p) {
   if (!room.mesh) return null
   const m = room.mesh.matrixWorld, v = new THREE.Vector3()
   const xs = [], ys = [], zs = []
-  const n = room.mesh.numSplats || 0
+  const n = room.splatCount // not mesh.numSplats: with LoD on, that's the view's selection
   const stride = Math.max(1, Math.floor(n / 400000))
   room.mesh.forEachSplat((i, c) => {
     if (i % stride) return
@@ -2430,7 +2480,7 @@ function getState() {
       name: roomName,
       kind: room.kind,
       loaded: room.loaded,
-      ...(room.kind === 'splat' ? { splatCount: room.splatCount } : {}),
+      ...(room.kind === 'splat' ? { splatCount: room.splatCount, lod: room.lod } : {}),
       transform: { position: t.position.slice(), quaternion: t.quaternion.slice(), scale: t.scale },
       viewpoints: viewpoints().length,
       roomplan: !!shell.url,
@@ -2520,7 +2570,7 @@ export const engine = {
   getDirty: () => ({ ...dirty }),
   getRoomConfig: () => roomConfig,
   getSavedRoomConfig: () => savedRoomConfig,
-  getRoom: () => ({ kind: room.kind, loaded: room.loaded, failed: room.failed, error: room.error ? { ...room.error } : null, splatCount: room.splatCount, dropped: room.dropped, name: roomName }),
+  getRoom: () => ({ kind: room.kind, loaded: room.loaded, failed: room.failed, error: room.error ? { ...room.error } : null, splatCount: room.splatCount, lod: room.lod, dropped: room.dropped, name: roomName }),
   getEyeHeight: () => EYE[view] ?? null,
   getRoomStatus: () => roomStatus,
   getRoomEuler,

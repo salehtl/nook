@@ -24,7 +24,7 @@ jobs: dict[str, dict] = {}
 captures: dict[str, dict] = {}   # kept captures (§5.1): name -> {name, size_bytes, created, n_frames, roomplan}
 SETTINGS = {  # §4.9.1: key -> (type, min, max)
     "steps": (int, 1000, 200_000), "train_max_splats": (int, 100_000, 4_000_000), "deliver_max_splats": (int, 100_000, 4_000_000),
-    "max_image_size": (int, 640, 3840), "stills_max_size": (int, 640, 4032), "sh_degree": (int, 0, 3), "pose_opt": (bool, None, None),
+    "max_image_size": (int, 640, 3840), "stills_max_size": (int, 640, 4032), "sh_degree": (int, 0, 3), "pose_opt": (bool, None, None), "colmap_poses": (bool, None, None),
     "holdout_every": (int, 0, 50),
 }
 RN = re.compile(r"-r(\d+)$")
@@ -48,8 +48,8 @@ def new_job(capture: str, name: str, kind: str = "upload", parent: str | None = 
 
 def defaults(cap: dict, holdout_every: int = 0) -> dict:
     n = cap["n_frames"] - (len(range(0, cap["n_frames"], holdout_every)) if holdout_every else 0)
-    s = {"steps": min(120_000, max(20_000, 80 * n)), "train_max_splats": 2_000_000, "deliver_max_splats": 1_500_000,
-         "max_image_size": 1920, "stills_max_size": 1920, "sh_degree": 3, "pose_opt": False, "holdout_every": holdout_every}
+    s = {"steps": min(30_000, max(20_000, 25 * n)), "train_max_splats": 1_500_000, "deliver_max_splats": 1_500_000,
+         "max_image_size": 1920, "stills_max_size": 1920, "sh_degree": 3, "pose_opt": True, "colmap_poses": False, "holdout_every": holdout_every}
     return {"n_train": n, "settings": s, "eta_s": round(s["steps"] / 1000 * 75)}
 
 

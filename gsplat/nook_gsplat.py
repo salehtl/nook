@@ -161,7 +161,8 @@ def load_capture(root: Path, holdout_every: int, max_image_size: int, stills_max
                     depth = torch.from_numpy(np.asarray(dm, dtype=np.float32) / 1000.0).half()
             except OSError as e:
                 raise Fail(f"cannot read {f['depth_file_path']}: {e}")
-        return img, np.linalg.inv(c2w @ gl_to_cv), K, c2w[:3, 3], depth
+        stamp = (f.get("timestamp"), f.get("exposure_duration"))
+        return img, np.linalg.inv(c2w @ gl_to_cv), K, c2w[:3, 3], depth, stamp
 
     with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:  # PIL decodes outside the GIL
         out = list(pool.map(load, train))
@@ -170,6 +171,7 @@ def load_capture(root: Path, holdout_every: int, max_image_size: int, stills_max
     viewmats = torch.tensor(np.stack([o[1] for o in out]), dtype=torch.float32)
     Ks = torch.tensor(np.stack([o[2] for o in out]), dtype=torch.float32)
     centers = np.stack([o[3] for o in out])
+    stamps = [o[5] for o in out]
 
     seeds = None
     ply = root / t.get("ply_file_path", "points.ply")
@@ -177,7 +179,7 @@ def load_capture(root: Path, holdout_every: int, max_image_size: int, stills_max
         seeds = read_points(ply)
         if not len(seeds[0]):
             seeds = None
-    return t, len(frames), images, viewmats, Ks, centers, seeds, depths
+    return t, len(frames), images, viewmats, Ks, centers, seeds, depths, stamps
 
 
 # --- training ----------------------------------------------------------------------------------------------------
@@ -334,6 +336,49 @@ def write_ply(path: Path, splats, sh_degree: int) -> int:
     return len(data)
 
 
+def exposure_poses(c2w: np.ndarray, stamps: list, Ks: np.ndarray, samples: int, px_per_sample: float,
+                   readout_s: float) -> tuple[np.ndarray, np.ndarray, list[int]]:
+    """Camera-to-world poses (OpenCV) across each frame's exposure, from the camera's motion between its neighbours
+    in time: [N, samples, 4, 4] at the start of the readout, the same at its end (rolling shutter; equal to the first
+    when readout_s is 0), and how many of the samples each frame uses. A frame that moved by under px_per_sample
+    pixels during its exposure (or has no timestamp) gets one sample, its own pose.
+
+    The poses are spread evenly over the exposure (`exposure_duration`, 10 ms when missing), centered on the frame's
+    timestamp; with a readout time, the top row sees the pose readout_s / 2 earlier and the bottom row readout_s / 2
+    later. Velocities are central differences over the neighbouring frames, so the camera path is taken as straight
+    and evenly turning over the exposure: the shape of the blur, not just its length."""
+    from scipy.spatial.transform import Rotation
+
+    n = len(c2w)
+    start = np.repeat(c2w[:, None], samples, 1)
+    end = start.copy()
+    counts = [1] * n
+    timed = sorted((s[0], i) for i, s in enumerate(stamps) if s[0] is not None)
+    for r, (t, i) in enumerate(timed):
+        a, b = timed[max(r - 1, 0)], timed[min(r + 1, len(timed) - 1)]
+        dt = b[0] - a[0]
+        if dt <= 0 or dt > 0.6:  # an end of the walk, or a gap: no reliable motion
+            continue
+        ra, rb = c2w[a[1], :3, :3], c2w[b[1], :3, :3]
+        omega = Rotation.from_matrix(rb @ ra.T).as_rotvec() / dt  # world frame, rad/s
+        vel = (c2w[b[1], :3, 3] - c2w[a[1], :3, 3]) / dt
+        exp_s = stamps[i][1] or 0.01
+        f = float(Ks[i, 0, 0])
+        blur_px = f * exp_s * (np.linalg.norm(omega) + np.linalg.norm(vel) / 1.5)  # rotation, plus moving 1.5 m away
+        k = int(min(samples, max(1, math.ceil(blur_px / px_per_sample))))
+        if k == 1 and readout_s <= 0:
+            continue
+        counts[i] = k
+        offs = np.linspace(-exp_s / 2, exp_s / 2, k) if k > 1 else np.zeros(1)
+        for j, tau in enumerate(offs):
+            for out, d in ((start, -readout_s / 2), (end, readout_s / 2)):
+                m = c2w[i].copy()
+                m[:3, :3] = Rotation.from_rotvec(omega * (tau + d)).as_matrix() @ m[:3, :3]
+                m[:3, 3] += vel * (tau + d)
+                out[i, j] = m
+    return start, end, counts
+
+
 def rot6d_to_matrix(d6: torch.Tensor) -> torch.Tensor:
     """[N, 6] continuous rotation representation (Zhou et al. 2019) to [N, 3, 3] rotation matrices."""
     a1, a2 = d6[..., :3], d6[..., 3:]
@@ -363,8 +408,10 @@ class PoseCorrection(torch.nn.Module):
         t[:, :3, 3] = d[:, :3]
         return t
 
-    def viewmats(self, idx: torch.Tensor) -> torch.Tensor:
-        return torch.linalg.inv(self.c2w[idx] @ self.delta(idx))
+    def viewmats(self, idx: torch.Tensor, c2w: torch.Tensor | None = None) -> torch.Tensor:
+        """View matrices of cameras `idx`, corrected; `c2w` ([len(idx), 4, 4], default: their poses) applies the same
+        correction to other poses of those cameras, e.g. across the exposure."""
+        return torch.linalg.inv((self.c2w[idx] if c2w is None else c2w) @ self.delta(idx))
 
     @torch.no_grad()
     def stats(self) -> dict:
@@ -376,12 +423,35 @@ class PoseCorrection(torch.nn.Module):
                 "rot_deg_median": round(deg.median().item(), 3), "rot_deg_max": round(deg.max().item(), 3)}
 
 
+class PoseAdam:
+    """Adam over one camera at a time. Each camera has its own moments and step count, and only the drawn camera moves:
+    a plain Adam keeps stepping every camera on stale momentum, and its step count, shared by all cameras, turns a
+    camera's first update into about 3 x lr instead of lr. A camera is drawn only steps / n times, so lr sets its reach:
+    about lr x that many in meters and radians, less with the decay."""
+
+    def __init__(self, weight: torch.nn.Parameter, lr: float, steps: int, betas=(0.9, 0.999), eps=1e-15):
+        self.weight, self.lr, self.gamma, self.betas, self.eps = weight, lr, 0.01 ** (1.0 / steps), betas, eps
+        self.m, self.v = torch.zeros_like(weight), torch.zeros_like(weight)
+        self.t = torch.zeros(len(weight), device=weight.device)
+
+    @torch.no_grad()
+    def step(self, i: int, global_step: int) -> None:
+        g, (b1, b2) = self.weight.grad[i], self.betas
+        self.t[i] += 1
+        self.m[i] = b1 * self.m[i] + (1 - b1) * g
+        self.v[i] = b2 * self.v[i] + (1 - b2) * g * g
+        m_hat, v_hat = self.m[i] / (1 - b1 ** self.t[i]), self.v[i] / (1 - b2 ** self.t[i])
+        self.weight[i] -= self.lr * self.gamma ** global_step * m_hat / (v_hat.sqrt() + self.eps)
+        self.weight.grad = None
+
+
 def train(args) -> dict:
     started = time.time()
     if not torch.cuda.is_available():
         raise Fail("no CUDA GPU available: nook-gsplat needs an NVIDIA GPU and its driver (libcuda.so, "
                    "/run/opengl-driver/lib on NixOS)")
     from gsplat import MCMCStrategy, SelectiveAdam, rasterization
+    from gsplat.cuda._wrapper import RollingShutterType
     from gsplat.version import __version__ as gsplat_version
 
     dev = torch.device("cuda")
@@ -389,7 +459,7 @@ def train(args) -> dict:
     rng = np.random.default_rng(args.seed)
     torch.backends.cudnn.benchmark = True
 
-    t, n_frames, images, viewmats, Ks, centers, seeds, depths = load_capture(
+    t, n_frames, images, viewmats, Ks, centers, seeds, depths, stamps = load_capture(
         Path(args.capture), args.holdout_every, args.max_image_size, args.stills_max_size, with_depth=args.depth_weight > 0)
     n = len(images)
     scene_scale = 1.1 * float(np.linalg.norm(centers - centers.mean(0), axis=1).max())
@@ -433,9 +503,19 @@ def train(args) -> dict:
     poses = None
     if args.pose_opt:
         poses = PoseCorrection(torch.linalg.inv(viewmats))
-        # weight decay keeps corrections small, so the poses can't wander off together with the splats
-        pose_optim = torch.optim.Adam(poses.parameters(), lr=args.pose_opt_lr, weight_decay=1e-6)
+        pose_optim = PoseAdam(poses.embed.weight, args.pose_opt_lr, args.steps)
         say(f"refining camera poses (lr {args.pose_opt_lr:g}); held-out frames keep their ARKit poses")
+    sub_start = sub_end = None
+    if args.motion_blur > 1 or args.rolling_shutter_ms > 0:
+        c2w_np = torch.linalg.inv(viewmats).cpu().double().numpy()
+        start_np, end_np, counts = exposure_poses(c2w_np, stamps, Ks.cpu().numpy(), max(1, args.motion_blur),
+                                                  args.motion_blur_px, args.rolling_shutter_ms / 1000)
+        sub_start = torch.tensor(start_np, dtype=torch.float32, device=dev)
+        sub_end = torch.tensor(end_np, dtype=torch.float32, device=dev)
+        timed = sum(s[0] is not None for s in stamps)
+        say(f"modelling camera motion during the exposure in {timed} of {n} frames: "
+            f"{sum(c > 1 for c in counts)} blurred enough for {max(counts)} poses (mean {np.mean(counts):.2f} renders "
+            f"per step)" + (f", rolling shutter read out in {args.rolling_shutter_ms:g} ms" if args.rolling_shutter_ms > 0 else ""))
 
     say(f"training {args.steps} steps, up to {args.max_splats:,} splats of at most {MAX_SCALE * scene_scale:.2f} m, "
         f"SH degree {args.sh_degree} (gsplat {gsplat_version}, {torch.cuda.get_device_name(0)})")
@@ -450,17 +530,37 @@ def train(args) -> dict:
             order = rng.permutation(n)
         img = images[i].to(dev, non_blocking=True)
         h, w = img.shape[:2]
+        K = Ks[i:i + 1]
+        if args.res_ramp > 0 and not args.init and step < args.res_ramp * args.steps:  # low resolution first (DashGaussian's idea)
+            s = args.res_start + (1 - args.res_start) * step / (args.res_ramp * args.steps)
+            nh, nw = max(16, round(h * s / 2) * 2), max(16, round(w * s / 2) * 2)
+            img = F.interpolate(img.permute(2, 0, 1)[None].float(), (nh, nw), mode="area")[0].permute(1, 2, 0)
+            K = K * torch.tensor([[[nw / w], [nh / h], [1.0]]], device=dev)
+            h, w = nh, nw
         sh_deg = args.sh_degree if args.init else min(step // SH_INTERVAL, args.sh_degree)
         colors = torch.cat([splats["sh0"], splats["shN"]], 1) if args.sh_degree > 0 else splats["sh0"]
+        if sub_start is None:  # one pinhole camera at the frame's pose
+            k, rs = 1, {}
+            vm = poses.viewmats(torch.tensor([i], device=dev)) if poses is not None else viewmats[i:i + 1]
+        else:  # the k poses across the exposure, rendered together and averaged: the photo's motion blur
+            k = counts[i]
+            cams = torch.full((k,), i, device=dev)
+            if poses is not None:
+                vm = poses.viewmats(cams, sub_start[i, :k])
+                vm_rs = poses.viewmats(cams, sub_end[i, :k])
+            else:
+                vm, vm_rs = torch.linalg.inv(sub_start[i, :k]), torch.linalg.inv(sub_end[i, :k])
+            rs = ({"with_ut": True, "with_eval3d": True, "viewmats_rs": vm_rs,
+                   "rolling_shutter": RollingShutterType.ROLLING_TOP_TO_BOTTOM} if args.rolling_shutter_ms > 0 else {})
         renders, _, info = rasterization(
             means=splats["means"], quats=splats["quats"], scales=torch.exp(splats["scales"]),
             opacities=torch.sigmoid(splats["opacities"]), colors=colors,
-            viewmats=poses.viewmats(torch.tensor([i], device=dev)) if poses is not None else viewmats[i:i + 1],
-            Ks=Ks[i:i + 1], width=w, height=h,
+            viewmats=vm, Ks=K.expand(k, 3, 3), width=w, height=h,
             sh_degree=sh_deg, packed=False, near_plane=0.01, far_plane=1e10, rasterize_mode="classic",
-            render_mode="RGB+ED" if depths[i] is not None else "RGB")
+            render_mode="RGB+ED" if depths[i] is not None else "RGB", **rs)
+        renders = renders.mean(0, keepdim=True)
         pred = renders[0, ..., :3]  # [H, W, 3]
-        target = img.float() / 255.0
+        target = img.float() / 255.0  # the ramp's area average is float already, and still 0-255
         l1 = (pred - target).abs().mean()
         ssim_val = ssim(pred.permute(2, 0, 1)[None], target.permute(2, 0, 1)[None])
         loss = (1 - SSIM_LAMBDA) * l1 + SSIM_LAMBDA * (1 - ssim_val)
@@ -475,8 +575,7 @@ def train(args) -> dict:
             opt.step(visible)
             opt.zero_grad(set_to_none=True)
         if poses is not None:
-            pose_optim.step()
-            pose_optim.zero_grad(set_to_none=True)
+            pose_optim.step(i, step)
         means_sched.step()
         with torch.no_grad():
             splats["scales"].clamp_(max=max_log_scale)
@@ -519,7 +618,9 @@ def train(args) -> dict:
             "peak_vram_gib": {"allocated": round(torch.cuda.max_memory_allocated() / 2**30, 2),
                               "reserved": round(torch.cuda.max_memory_reserved() / 2**30, 2)},
             "trainer": f"gsplat {gsplat_version} (MCMC)", "pose_opt": pose_stats,
-            "init": args.init, "depth_weight": args.depth_weight}
+            "init": args.init, "depth_weight": args.depth_weight, "res_ramp": args.res_ramp,
+            "res_start": args.res_start, "rolling_shutter_ms": args.rolling_shutter_ms,
+            "pose_opt_lr": args.pose_opt_lr if args.pose_opt else None}
 
 
 def main(argv=None) -> None:
@@ -534,10 +635,22 @@ def main(argv=None) -> None:
     p.add_argument("--holdout-every", type=int, default=0, help="skip frames with index %% N == 0 (0: train on all)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--pose-opt", action="store_true", help="refine the training cameras' poses along with the splats")
-    p.add_argument("--pose-opt-lr", type=float, default=1e-5, help="learning rate of the pose corrections")
+    p.add_argument("--pose-opt-lr", type=float, default=1e-3, help="learning rate of the pose corrections")
     p.add_argument("--depth-weight", type=float, default=0.0,
                    help="weight of a log-depth loss against the frames' LiDAR depth (0: off; 0.1-0.3 keeps floaters "
                         "out of free space)")
+    p.add_argument("--motion-blur", type=int, default=1, metavar="K",
+                   help="render up to K poses across each photo's exposure and average them, so motion blur in the "
+                        "photos isn't learned into the room (1: off); needs timestamps in transforms.json")
+    p.add_argument("--motion-blur-px", type=float, default=2.0,
+                   help="one pose per this many pixels of predicted motion blur (with --motion-blur)")
+    p.add_argument("--rolling-shutter-ms", type=float, default=0.0,
+                   help="the sensor's readout time, top row to bottom row (0: global shutter); renders with gsplat's "
+                        "rolling-shutter camera (3DGUT)")
+    p.add_argument("--res-ramp", type=float, default=0.5, metavar="FRAC",
+                   help="grow the training resolution linearly over this fraction of the steps (0: full size throughout; "
+                        "--init always trains at full size)")
+    p.add_argument("--res-start", type=float, default=0.25, help="the starting scale of --res-ramp")
     p.add_argument("--init", metavar="SPLAT", help="fine-tune from this splat (.ply or .spz, the capture's world frame) "
                                                    "instead of training from seed points; a few thousand steps")
     args = p.parse_args(argv)

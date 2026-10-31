@@ -213,7 +213,7 @@ class Server:
             try:
                 info = capture.peek(path)
             except ScanError:
-                info = {"name": name, "frames": 0, "stills": 0, "roomplan": False}
+                info = {"name": name, "frames": 0, "stills": 0, "roomplan": False, "test_walk": []}
             self.peeks[key] = dict(info, size_bytes=st.st_size, created=datetime.fromtimestamp(st.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         return self.peeks[key]
 
@@ -236,13 +236,13 @@ class Server:
         if not info:
             raise ScanError(f"the capture {capture_name} is gone from the server: upload it again")
         quality = self.quality if kind == "upload" else "high"
-        return settings.resolve(info["frames"], quality, {**self.overrides, **(requested or {})})
+        return settings.resolve(info["frames"], quality, {**self.overrides, **(requested or {})}, info["test_walk"])
 
     def defaults(self, capture_name: str) -> tuple[int, dict]:
         info = self.peek(capture_name)
         if not info:
             return 404, {"error": f"no kept capture {capture_name}: upload it again to retrain"}
-        return 200, settings.summary(info["frames"], "high", {**self.overrides, "holdout_every": 0})
+        return 200, settings.summary(info["frames"], "high", {**self.overrides, "holdout_every": 0}, info["test_walk"])
 
     def _taken(self, base: str) -> list[int]:
         """N of every room named <base>-rN, on disk or in a job that isn't failed or cancelled. A truncated base

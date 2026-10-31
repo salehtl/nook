@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from . import REPO, ScanError
+from .capture import is_test_walk
 
 MAX_VIEWPOINTS = 24
 MIN_EYE_M = 1.0            # viewpoints sit at least this far above the floor (contract §4.9)
@@ -133,9 +134,11 @@ def in_room(vp: dict, transform: dict) -> dict:
 
 def viewpoints(cap, floor_y: float, transform: dict | None = None) -> list[dict]:
     """Up to MAX_VIEWPOINTS planner viewpoints. Without `transform`, the room is the capture lifted by -floor_y (a new
-    scan); with one (a retrain keeping its parent's alignment), each pose is moved by it."""
+    scan); with one (a retrain keeping its parent's alignment), each pose is moved by it. The test walk's frames
+    (contract §4.8) are scored, so they are not viewpoints."""
     poses = cap.poses()
-    picks = pick_viewpoints(poses, floor_y)
+    walk = [i for i, f in enumerate(cap.frames) if not is_test_walk(f)]
+    picks = [walk[j] for j in pick_viewpoints(poses[walk], floor_y)]
     if transform is None:
         return [viewpoint(poses[i], cap.intrinsics(cap.frames[i]), cap.size(cap.frames[i]), floor_y) for i in picks]
     return [in_room(viewpoint(poses[i], cap.intrinsics(cap.frames[i]), cap.size(cap.frames[i]), 0.0), transform) for i in picks]
