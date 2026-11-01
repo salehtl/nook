@@ -55,14 +55,6 @@ final class OnboardingTests: XCTestCase {
         }
     }
 
-    func testPassStripRenders() throws {
-        for pass in ScanPass.allCases {
-            let image = try render(PassStrip(pass: pass, animated: false), size: CGSize(width: 361, height: 60))
-            XCTAssertGreaterThan(try inkFraction(image), 0.2, "\(pass) strip")
-        }
-        XCTAssertEqual(ScanPass.allCases.map(ScanGuide.forPass), [.pass1, .pass2, .pass3, .testWalk])
-    }
-
     func testFirstRunFlag() throws {
         let suite = "nook-onboarding-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -85,9 +77,9 @@ final class OnboardingTests: XCTestCase {
         for card in ScanGuide.cards {
             XCTAssertTrue(doc.contains(card.source), "card \(card.heading): not in SCANNING.md: \(card.source)")
         }
-        XCTAssertEqual(ScanGuide.allCases.count, 7)
+        XCTAssertEqual(ScanGuide.allCases.count, 4)
         XCTAssertEqual(ScanGuide.visible(lidar: true), ScanGuide.allCases)
-        XCTAssertEqual(ScanGuide.visible(lidar: false), [.prepare, .lockLight, .pass1, .pass2, .pass3, .testWalk],
+        XCTAssertEqual(ScanGuide.visible(lidar: false), [.prepare, .lockLight, .scan],
                        "phones without LiDAR never see the room-shell guide")
         XCTAssertTrue(doc.contains(RoomPlanPassView.prompt), "the RoomPlan pass prompt is SCANNING.md's")
         XCTAssertEqual(Set(ScanGuide.cards.map(\.isDo)), [true, false], "both do and don't cards")

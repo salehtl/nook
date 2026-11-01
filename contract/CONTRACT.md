@@ -138,6 +138,8 @@ Goal: semi-realistic for $0 in the planner, plus an optional paid photoreal pass
 
 **Level of detail:** after a splat room loads and its first bake ends, the planner builds Spark's on-device LoD tree in a worker (`createLodSplats()`), and Spark then draws a view selection within its platform budget. No server file is needed. The tree is skipped on a phone when the room has at most 1,500,000 splats, when `navigator.deviceMemory < 4`, and with `?lod=0`. A failed build keeps the plain splats and reports no error. Room picks and the floor fit always read the plain splats, so a pick doesn't depend on the camera or on LoD. `lodRenderScale` is 0.5. `getState().room` gains `lod?: 'off' | 'building' | 'on'`; `splatCount` stays the scan's full count.
 
+**True colour:** a toggle in the Look control that bypasses ACES, exposure and warmth, so the room shows the colours it trained on, for comparing with the photos. Off by default, and not saved with the room. Blending stays in linear light, so it isn't identical to the trainer's render. Hook: `setTrueColor(on)`; `getRenderSettings()` gains `trueColor`, and `toneMapping` is `'none'` while it's on. Paid renders always use the normal look.
+
 **Render this view (paid, about $0.04)**. The default model is `nano-banana`, picked by a live comparison (evals/golden/RESULTS.md).
 
 5. A **Render** button (top bar) captures the current view (the canvas only, no UI) as a JPEG and asks for confirmation, showing the model and its price. It then `POST`s to `/api/render` and shows the result side by side with the input. A **Renders** panel lists past renders, newest first.
@@ -555,7 +557,7 @@ uv run --project scan nook-scan train <capture.zip|dir> [--name scan] [--room-di
 - I2. The app launches in the simulator with no crash and shows the captures list. Replay mode can produce a capture that appears in the list and can be shared.
 - I3. Release basics:
   - bundle id `com.salehtl.nookscan`, team `8CFG28JHP3`, automatic signing
-  - version 0.5.0 (the build number is set at release)
+  - version 0.6.0 (the build number is set at release)
   - `NSCameraUsageDescription`, `ITSAppUsesNonExemptEncryption = NO`, `UIRequiredDeviceCapabilities` containing `arkit`
   - a 1024 px app icon
   - deployment target iOS 18.0
@@ -743,7 +745,7 @@ retrainRoom(room: string, settings?: object, title?: string): Promise<Job> // PO
 - It's taken under the same exposure and white-balance lock as the video frames.
 - `meta.json` adds `"keyframe_spacing": {"meters": 0.04, "degrees": 3}`.
 - The trainer uses the still in place of the video frame when one is present, downscaled to the quality preset's long side.
-- App 0.5 takes one on every 2nd keyframe where it can, stores it at most 2880 px on the long side (`hires_w`, `hires_h` and the intrinsics match the written JPEG), and stops taking them once the capture reaches 2.8 GB, so it stays under the upload limit (§5).
+- App 0.5 takes one on every 2nd keyframe where it can (app 0.6: every 3rd), stores it at most 2880 px on the long side (`hires_w`, `hires_h` and the intrinsics match the written JPEG), and stops taking them once the capture reaches 2.8 GB, so it stays under the upload limit (§5).
 
 ### 4.11 Pose refinement (`nook-poses`, kakapo)
 
@@ -781,3 +783,13 @@ All additions are optional keys, so earlier captures stay valid and servers that
 - **`meta.end_reason`:** `"done"` (the Done button), `"interrupted"` (Done after the session was interrupted) or `"failed"` (ARKit stopped; `meta.end_message` has its error). Absent on replayed captures and before app 0.5.
 - **`meta.thermal_state`:** `ProcessInfo.thermalState` when the capture ended: `"nominal"`, `"fair"`, `"serious"` or `"critical"`.
 - **Seed points:** `points.ply` holds at most one point per 3 cm cell, up to 600,000, instead of the first 400,000 seen, so every pass contributes.
+
+### 4.14 Capture v1.5: free scanning and camera settings (optional, app 0.6)
+
+Frames from app 0.6 have no `pass` and no `test_walk`: there are no guided passes and no test walk. Scoring holds back stretches of ordinary frames instead (`evals/sharpness/prep2.py`), and a final room trains on every frame. The §4.8 and §4.13 keys stay valid for earlier captures.
+
+- **Before Start** the app records nothing, and shutter (Auto, 1/100, 1/120, 1/250, 1/500, 1/1000 s), ISO (match brightness, or a value) and high-resolution photos can change. From Start they're fixed for the whole capture. Pause stops keyframes and stills while tracking continues; timestamps show the gap.
+- **Auto's flicker check:** with exposure locked on Auto, the app measures the median brightness jump between consecutive frames while the phone holds still, and keeps no keyframes meanwhile. Past 0.06 EV it tries 1/100 s, then 1/120 s, at the same brightness (within about 0.3 EV, or it stays put), and keeps the first that's steady, else the steadier. Frames where the phone moves don't count, and the check gives up after 4 s. It can miss 60 Hz mains, whose flicker lands on the same phase of every frame.
+- **`meta.camera_settings`:** `"auto"` or `"manual"`, when exposure was locked. `lock_iso` and `lock_exposure_duration` hold the final values.
+- **`meta.flicker_detected`** (bool, Auto only) and **`meta.flicker_ev`** (the jump measured at Auto's fast shutter, in EV).
+- Stills: one keyframe in three, silent where iOS allows it (iOS 26 and later), and none when high-resolution photos are off.

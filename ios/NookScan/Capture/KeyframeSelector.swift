@@ -8,6 +8,8 @@ enum FrameDecision: Equatable {
     case blurry
     /// Exposure and white balance aren't locked yet (contract §4.8): nothing is kept before the lock.
     case waitingForLock
+    /// The user paused: tracking goes on, nothing is kept.
+    case paused
     /// The writer is behind; the frame is dropped so memory stays bounded.
     case busy
     case stopped

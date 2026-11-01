@@ -54,7 +54,7 @@ struct SettingsView: View {
                     } header: {
                         Text("Scanning")
                     } footer: {
-                        Text("After the photo passes, RoomPlan measures the walls, floor, doors and windows in about a minute. The planner shows them as a see-through shell. Skip it any time; the scan is kept either way.")
+                        Text("After the scan, RoomPlan measures the walls, floor, doors and windows in about a minute. The planner shows them as a see-through shell. Skip it any time; the scan is kept either way.")
                     }
                 }
                 Section {

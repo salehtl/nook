@@ -155,6 +155,16 @@ check('P13 toggling contact shadows', off === 0 && on === nItems, `off ${off} on
 await page.evaluate(() => window.nook.setRenderSettings({ exposure: 1.4, warmth: 0.3 }))
 rs = await page.evaluate(() => window.nook.getRenderSettings())
 check('P11 setRenderSettings applies exposure and warmth live', near(rs.exposure, 1.4, 1e-6) && near(rs.warmth, 0.3, 1e-6), fmt(rs))
+// True colour (§2.6): bypasses ACES, exposure and warmth, and the image really changes.
+const lookShot = async () => { await page.waitForTimeout(400); return (await page.screenshot({ type: 'png' })).toString('base64') }
+const beforeTrue = await lookShot()
+await page.evaluate(() => window.nook.setTrueColor(true))
+const trueRs = await page.evaluate(() => window.nook.getRenderSettings())
+const inTrue = await lookShot()
+check('P11 True colour turns tone mapping off and changes the image', trueRs.toneMapping === 'none' && trueRs.trueColor === true && inTrue !== beforeTrue, fmt(trueRs))
+await page.evaluate(() => window.nook.setTrueColor(false))
+const afterTrue = await page.evaluate(() => window.nook.getRenderSettings())
+check('P11 True colour off restores ACES and the look', afterTrue.toneMapping === 'aces' && near(afterTrue.exposure, 1.4, 1e-6) && near(afterTrue.warmth, 0.3, 1e-6), fmt(afterTrue))
 await page.evaluate(() => window.nook.setRenderSettings({ exposure: 1, warmth: 0 }))
 await settle(page); await shot(page, '02-placeholder-items')
 

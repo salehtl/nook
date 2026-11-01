@@ -2,15 +2,15 @@ import ARKit
 import SwiftUI
 import UIKit
 
-/// The capture screen: live camera (or replay placeholder) with guidance: exposure lock indicator, frame
-/// counter, tracking banner, slow-down warning, and the guided passes with a coverage ring for each.
+/// The capture screen: live camera (or replay placeholder) with a Start step for the camera settings, exposure lock, frame
+/// count, tracking banner, slow-down warning, Pause.
 struct CaptureView: View {
     @ObservedObject var controller: CaptureController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(ProcessingStore.self) private var processing
     @State private var confirmDiscard = false
-    @State private var confirmFinish = false
+    @State private var showCameraSettings = false
 
     var body: some View {
         Group {
@@ -35,25 +35,16 @@ struct CaptureView: View {
                 dismiss()
             }
         }
-        .confirmationDialog("Finish the scan?", isPresented: $confirmFinish, titleVisibility: .visible) {
-            Button("Finish scan") { controller.finish() }
-            Button("Keep scanning", role: .cancel) {}
-        } message: {
-            Text("Still missing: \(controller.missingBeforeFinish.map(\.shortName).joined(separator: ", ")).")
-        }
     }
 
     private var captureScreen: some View {
         ZStack {
             preview.ignoresSafeArea()
             VStack(spacing: 10) {
-                if controller.phase == .recording {
+                if controller.phase == .recording, controller.isStarted {
                     HStack {
-                        LockIndicator(state: controller.lockState)
+                        LockIndicator(state: controller.lockState, checking: controller.checkingFlicker)
                         Spacer()
-                    }
-                    if controller.lockState != .locking, !isSettling {
-                        PassStrip(pass: controller.guide.pass)
                     }
                 }
                 banners
@@ -100,8 +91,6 @@ struct CaptureView: View {
             }
             if controller.tooFast {
                 Banner(text: "Slow down for sharp frames", systemImage: "tortoise.fill", color: .red)
-            } else if let hint = controller.postureHint, controller.lockState != .locking {
-                Banner(text: hint, systemImage: "iphone.gen3", color: .blue)
             }
         }
     }
@@ -110,62 +99,7 @@ struct CaptureView: View {
         VStack(spacing: 14) {
             switch controller.phase {
             case .recording:
-                HStack(alignment: .center, spacing: 18) {
-                    CoverageRing(coverage: controller.guide.current.lit)
-                        .frame(width: 54, height: 54)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("\(controller.frameCount)")
-                            .font(.system(size: 40, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .contentTransition(.numericText())
-                        Text(controller.frameCount < CaptureController.minFrames
-                             ? "frames · need at least \(CaptureController.minFrames)" : "frames")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        PassSteps(guide: controller.guide)
-                        Text(controller.guide.pass.title)
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                    }
-                    Text(promptText)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 10) {
-                    Button(role: .destructive) {
-                        if controller.frameCount > 0 { confirmDiscard = true } else { controller.discard(); dismiss() }
-                    } label: {
-                        Image(systemName: "xmark").frame(width: 20)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("Cancel scan")
-                    if controller.guide.pass.next != nil {
-                        Button {
-                            controller.nextPass()
-                        } label: {
-                            Text(controller.guide.pass.next == .testWalk ? "Test walk" : "Next pass").lineLimit(1).frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(controller.guide.current.isGood ? .green : nil)
-                        .disabled(controller.frameCount == 0)
-                    }
-                    Button {
-                        if controller.missingBeforeFinish.isEmpty { controller.finish() } else { confirmFinish = true }
-                    } label: {
-                        Label("Done", systemImage: "checkmark").lineLimit(1).frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(controller.frameCount == 0)
-                }
-                .controlSize(.large)
+                if controller.isStarted { recordingControls } else { readyControls }
             case .saving:
                 ProgressView("Saving capture…")
                     .frame(maxWidth: .infinity, minHeight: 80)
@@ -176,6 +110,11 @@ struct CaptureView: View {
                     Text("\(summary.frameCount) frames · \(summary.depthCount) depth maps · \(summary.pointCount) seed points")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    if let heights = summary.heightRange {
+                        Text("Camera height \(heights.lowerBound, specifier: "%.1f")–\(heights.upperBound, specifier: "%.1f") m above the floor")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     if let pass = controller.roomPlan {
                         RoomShellStatus(pass: pass)
                     }
@@ -225,26 +164,81 @@ struct CaptureView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
+    /// Before the scan: nothing is recorded yet, and the camera settings can still change.
+    @ViewBuilder private var readyControls: some View {
+        Text("Choose camera settings if you want to, then start and hold still for a moment.")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 10) {
+            Button { controller.discard(); dismiss() } label: {
+                Image(systemName: "xmark").frame(width: 20)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Cancel scan")
+            Button { showCameraSettings = true } label: {
+                Label("Camera", systemImage: "camera.aperture").lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            Button { controller.begin() } label: {
+                Text("Start").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .controlSize(.large)
+        .sheet(isPresented: $showCameraSettings) {
+            CameraSettingsView(isoRange: LiveCaptureSource.isoRange ?? 25...3200)
+        }
+    }
+
+    @ViewBuilder private var recordingControls: some View {
+        Text(statusText)
+            .font(.subheadline.weight(.medium))
+            .monospacedDigit()
+            .frame(maxWidth: .infinity, alignment: .leading)
+        if controller.isLive, !controller.interrupted, controller.lockState != .locking, !isSettling, !controller.checkingFlicker {
+            Button { controller.togglePause() } label: {
+                Label(controller.isPaused ? "Resume" : "Pause", systemImage: controller.isPaused ? "play.fill" : "pause.fill")
+                    .font(.title3.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 48)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(controller.isPaused ? .green : .orange)
+        }
+        HStack(spacing: 10) {
+            Button(role: .destructive) {
+                if controller.frameCount > 0 { confirmDiscard = true } else { controller.discard(); dismiss() }
+            } label: {
+                Image(systemName: "xmark").frame(width: 20)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Cancel scan")
+            Button { controller.finish() } label: {
+                Label("Done", systemImage: "checkmark").lineLimit(1).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .disabled(controller.frameCount == 0)
+        }
+        .controlSize(.large)
+    }
+
     private var isSettling: Bool {
         if case .settling = controller.lockState { return true }
         return false
     }
 
-    private var promptText: String {
-        switch controller.lockState {
-        case .settling, .locking:
-            return "Point the phone at the room and hold steady for a second while exposure and white balance lock."
-        default:
-            return controller.frameCount == 0
-                ? "\(controller.guide.pass.instruction) Move slowly: frames are kept every 4 cm or 3°."
-                : controller.guide.prompt
-        }
+    private var statusText: String {
+        if controller.lockState == .locking || isSettling || controller.checkingFlicker { return "Hold still…" }
+        let frames = "\(controller.frameCount) frames"
+        return controller.isPaused ? "Paused · \(frames)" : frames
     }
 }
 
 /// Exposure and white-balance lock state, like the Camera app's AE/AF LOCK badge. Hidden for replay.
 private struct LockIndicator: View {
     let state: ExposureLockPolicy.State
+    /// The flicker check is running: the lock isn't final, so the phone should stay still.
+    var checking = false
 
     var body: some View {
         if let (text, icon, color) = content {
@@ -258,14 +252,22 @@ private struct LockIndicator: View {
         }
     }
 
+    private func shutterText(_ lock: CameraLock) -> String {
+        guard let d = lock.exposureDuration, d > 0 else { return "exposure and white balance" }
+        return "1/\(Int((1 / d).rounded())) s"
+    }
+
     private var content: (String, String, Color)? {
-        switch state {
+        if checking { return ("Checking the light…", "lock.open", .white) }
+        return switch state {
         case .settling, .locking:
             ("Locking exposure…", "lock.open", .white)
+        case .locked(let lock) where lock.flickerDetected:
+            ("LED flicker: using \(shutterText(lock))", "lightbulb.led", .yellow)
         case .locked(let lock) where lock.tooDark:
             ("Too dark for a fast shutter: turn on the lights", "lightbulb.slash", .orange)
         case .locked(let lock) where lock.isFullyLocked:
-            (lock.exposureDuration.map { "Locked · 1/\(Int(($0 > 0 ? 1 / $0 : 0).rounded())) s" } ?? "Exposure + WB locked", "lock.fill", .yellow)
+            ("Locked · \(shutterText(lock))", "lock.fill", .yellow)
         case .locked(let lock):
             (lock.exposureLocked ? "Exposure locked · WB auto" : "WB locked · exposure auto", "lock.trianglebadge.exclamationmark", .orange)
         case .unlockable:
@@ -273,35 +275,6 @@ private struct LockIndicator: View {
         case .notApplicable:
             nil
         }
-    }
-}
-
-/// Three numbered dots for the guided passes: done passes filled (green when their coverage was good), the current
-/// one outlined.
-private struct PassSteps: View {
-    let guide: PassGuide
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(ScanPass.allCases, id: \.rawValue) { pass in
-                let done = pass.rawValue < guide.pass.rawValue
-                let good = guide.coverage[pass.rawValue - 1].isGood
-                ZStack {
-                    Circle()
-                        .fill(done ? (good ? Color.green : Color.white.opacity(0.35)) : Color.clear)
-                    Circle()
-                        .strokeBorder(pass == guide.pass ? Color.white : Color.white.opacity(0.3), lineWidth: 2)
-                    if done && good {
-                        Image(systemName: "checkmark").font(.system(size: 10, weight: .bold))
-                    } else {
-                        Text("\(pass.rawValue)").font(.caption2.weight(.semibold))
-                    }
-                }
-                .frame(width: 22, height: 22)
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Pass \(guide.pass.rawValue) of \(ScanPass.allCases.count)")
     }
 }
 
@@ -318,24 +291,6 @@ private struct Banner: View {
             .background(color.opacity(0.85), in: Capsule())
             .foregroundStyle(.white)
             .transition(.move(edge: .top).combined(with: .opacity))
-    }
-}
-
-/// Twelve segments, one per 30° of heading, lit once a keyframe looked that way.
-private struct CoverageRing: View {
-    let coverage: [Bool]
-
-    var body: some View {
-        let n = coverage.count
-        ZStack {
-            ForEach(0..<n, id: \.self) { i in
-                Circle()
-                    .trim(from: CGFloat(i) / CGFloat(n) + 0.008, to: CGFloat(i + 1) / CGFloat(n) - 0.008)
-                    .stroke(coverage[i] ? Color.green : Color.white.opacity(0.2), style: StrokeStyle(lineWidth: 7, lineCap: .butt))
-                    .rotationEffect(.degrees(-90))
-            }
-        }
-        .accessibilityLabel("Coverage \(coverage.filter { $0 }.count) of \(n) directions")
     }
 }
 

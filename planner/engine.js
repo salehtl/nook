@@ -77,7 +77,7 @@
 //   startPickMode('floor'|'two'), cancelPickMode(); floor: previewFloorAt(x, y) (a tap does it), applyPickFloor()
 //   (levels the scan around the point when it tilts there, then puts the point at y = 0); two: setPickPointAt(i, x, y),
 //   resetTwoPoints(), applyTwoPointScale(meters)
-//   setLook({exposure, warmth}), setContactShadows(on), relightInternal(pos|null)
+//   setLook({exposure, warmth}), setTrueColor(on), setContactShadows(on), relightInternal(pos|null)
 //   saveLayoutInternal(name), loadLayoutInternal(name), deleteLayoutInternal(name) (room layouts only),
 //   listLayoutsInternal(), refreshLayouts(), setLayoutName(name)
 //   captureView({maxPx, aspect, quality}), postRender(shot, model, prompt), renderViewInternal(opts), listRendersInternal(), idle()
@@ -226,6 +226,20 @@ function resizePost() {
   post.rt.setSize(Math.max(1, drawSize.x), Math.max(1, drawSize.y))
 }
 resizePost()
+// True colour: the room as trained, for comparing with the photos. No ACES, exposure or warmth (contract §2.6).
+// Not saved with the room: it's a way of inspecting it, and furniture is lit for the normal look.
+let trueColor = false
+function applyTone(on) {
+  post.mat.toneMapped = !on
+  post.mat.needsUpdate = true
+  post.mat.uniforms.uTint.value.copy(on ? new THREE.Vector3(1, 1, 1) : warmthTint(roomConfig.look.warmth))
+}
+function setTrueColor(on) {
+  trueColor = !!on
+  applyTone(trueColor)
+  wake()
+  emitLook()
+}
 function renderFrame() {
   renderer.setRenderTarget(post.rt)
   renderer.render(scene, camera)
@@ -2356,6 +2370,7 @@ function captureView({ maxPx = CAPTURE_MAX, aspect = null, quality = 0.92 } = {}
   // Center the shot on the camera (the on-screen view is shifted right to clear the sidebar).
   camera.clearViewOffset()
   camera.updateProjectionMatrix()
+  if (trueColor) applyTone(false) // renders and thumbnails always use the normal look
   try {
     renderFrame() // read back in the same task, before the browser clears the drawing buffer
     let sw = canvas.width, sh = canvas.height
@@ -2367,6 +2382,7 @@ function captureView({ maxPx = CAPTURE_MAX, aspect = null, quality = 0.92 } = {}
     out.getContext('2d').drawImage(canvas, (canvas.width - sw) / 2, (canvas.height - sh) / 2, sw, sh, 0, 0, out.width, out.height)
     return { dataUrl: out.toDataURL('image/jpeg', quality), width: out.width, height: out.height }
   } finally {
+    if (trueColor) applyTone(true)
     hide.forEach((o, i) => { o.visible = vis[i] })
     updateViewOffset()
   }
@@ -2420,13 +2436,13 @@ async function listRendersInternal() {
 // Look (exposure, warmth) lives in roomConfig.look, so Save room persists it.
 function getLook() {
   const l = roomConfig.look
-  return { exposure: l.exposure, warmth: l.warmth, contactShadows, envSource: env.source, envProbe: env.probe ? env.probe.slice() : null, roomKind: room.kind }
+  return { exposure: l.exposure, warmth: l.warmth, trueColor, contactShadows, envSource: env.source, envProbe: env.probe ? env.probe.slice() : null, roomKind: room.kind }
 }
 function emitLook() { emit('look', getLook()) }
 function applyLook() {
   const l = roomConfig.look
   renderer.toneMappingExposure = l.exposure
-  post.mat.uniforms.uTint.value.copy(warmthTint(l.warmth))
+  post.mat.uniforms.uTint.value.copy(trueColor ? new THREE.Vector3(1, 1, 1) : warmthTint(l.warmth))
   emitLook()
 }
 function setLook(s) {
@@ -2505,7 +2521,8 @@ function getState() {
 
 function getRenderSettings() {
   return {
-    toneMapping: 'aces',
+    toneMapping: trueColor ? 'none' : 'aces',
+    trueColor,
     exposure: roomConfig.look.exposure,
     warmth: roomConfig.look.warmth,
     envSource: env.source,
@@ -2675,6 +2692,7 @@ export const engine = {
   // look
   setLook,
   setContactShadows,
+  setTrueColor,
   relightInternal,
   idle: () => env.chain,
   // layouts

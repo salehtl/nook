@@ -39,7 +39,7 @@ struct WallPlane: Equatable {
 ///   from the matched pairs' angles and the shift solved again.
 /// - **Choosing the candidate:** the one lining up the most wall width. A rectangular room looks the same turned
 ///   180°, so among candidates within 80 % of the best, the one closest to the `prior` wins: where the phone was at
-///   the end of the photo passes versus where RoomPlan's session started (the phone barely moves in between).
+///   the end of the scan versus where RoomPlan's session started (the phone barely moves in between).
 ///
 /// It fails, rather than guessing, when walls in two directions can't be matched.
 enum ShellAlignment {

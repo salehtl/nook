@@ -57,6 +57,25 @@ enum ImageUtils {
                          bytesPerRow: CVPixelBufferGetBytesPerRowOfPlane(pb, 0))
     }
 
+    /// Mean of about 10,000 luma samples across the frame, or nil for a non-planar buffer.
+    static func meanLuma(ofLumaPlaneOf pb: CVPixelBuffer) -> Float? {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard CVPixelBufferIsPlanar(pb), let base = CVPixelBufferGetBaseAddressOfPlane(pb, 0) else { return nil }
+        let w = CVPixelBufferGetWidthOfPlane(pb, 0), h = CVPixelBufferGetHeightOfPlane(pb, 0)
+        let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        let luma = base.assumingMemoryBound(to: UInt8.self)
+        let step = max(1, Int((Double(w * h) / 10_000).squareRoot()))
+        var sum = 0, n = 0
+        for y in stride(from: 0, to: h, by: step) {
+            for x in stride(from: 0, to: w, by: step) {
+                sum += Int(luma[y * rowBytes + x])
+                n += 1
+            }
+        }
+        return n > 0 ? Float(sum) / Float(n) : nil
+    }
+
     /// Sharpness of a CGImage, rendered to gray at most `targetWidth` wide.
     static func sharpness(of image: CGImage, targetWidth: Int = 480) -> Float {
         let w = min(image.width, targetWidth)

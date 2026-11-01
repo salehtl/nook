@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// One frame of a guide's looping animation at `time` seconds: a top-down room plan, plus a side-view close-up of
-/// the phone for the passes. Drawn with Canvas so it renders the same on screen and in ImageRenderer (tests).
+/// the phone while scanning. Drawn with Canvas so it renders the same on screen and in ImageRenderer (tests).
 struct GuideScene: View {
     let guide: ScanGuide
     let time: Double
@@ -13,7 +13,7 @@ struct GuideScene: View {
     var body: some View {
         Canvas { ctx, size in
             let t = (time / Self.period).truncatingRemainder(dividingBy: 1)
-            let showCloseUp = !compact && [.pass1, .pass2, .pass3, .testWalk].contains(guide)
+            let showCloseUp = !compact && guide == .scan
             let planRect: CGRect
             if showCloseUp {
                 planRect = CGRect(x: 0, y: 0, width: size.width * 0.62, height: size.height).insetBy(dx: 6, dy: 6)
@@ -25,7 +25,7 @@ struct GuideScene: View {
             switch guide {
             case .prepare: drawPrepare(&ctx, in: planRect, t: t)
             case .lockLight: drawLock(&ctx, in: planRect, t: t)
-            case .pass1, .pass2, .pass3, .testWalk: drawPass(&ctx, in: planRect, t: t)
+            case .scan: drawPass(&ctx, in: planRect, t: t)
             case .roomShell: drawShell(&ctx, in: planRect, t: t)
             }
         }
@@ -81,41 +81,21 @@ struct GuideScene: View {
         atan2(Double(q.x - p.x), Double(p.y - q.y))
     }
 
-    private var coneColor: Color {
-        switch guide {
-        case .pass2: .orange
-        case .pass3: .mint
-        default: .yellow
-        }
-    }
-
     private func drawPass(_ ctx: inout GraphicsContext, in r: CGRect, t: Double) {
         let room = roomRect(in: r)
         drawRoom(&ctx, room)
         let s = room.width * 0.07
         let center = CGPoint(x: room.midX, y: room.midY)
-        // The walked path, faint, then the phone on it.
+        // The walked path, faint, then the phone on it, looking across the room.
+        let inset = room.width * 0.14
         var path = Path()
-        let p: CGPoint, h: Double
-        switch guide {
-        case .testWalk:
-            let a = CGPoint(x: room.minX + room.width * 0.15, y: room.midY + room.height * 0.12)
-            let b = CGPoint(x: room.maxX - room.width * 0.15, y: room.midY - room.height * 0.12)
-            path.move(to: a); path.addLine(to: b)
-            let u = t < 0.5 ? t * 2 : 2 - t * 2
-            p = CGPoint(x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u)
-            h = t * 4 * .pi   // looks around as it crosses the room
-        default:
-            let inset = room.width * (guide == .pass1 ? 0.12 : guide == .pass2 ? 0.2 : 0.16)
-            for i in 0...64 {
-                let q = loopPoint(room, inset: inset, u: Double(i) / 64)
-                if i == 0 { path.move(to: q) } else { path.addLine(to: q) }
-            }
-            p = loopPoint(room, inset: inset, u: t)
-            h = heading(from: p, to: center)   // looking across the room
+        for i in 0...64 {
+            let q = loopPoint(room, inset: inset, u: Double(i) / 64)
+            if i == 0 { path.move(to: q) } else { path.addLine(to: q) }
         }
+        let p = loopPoint(room, inset: inset, u: t)
         ctx.stroke(path, with: .color(.accentColor.opacity(0.35)), style: StrokeStyle(lineWidth: max(1.5, s * 0.25), dash: [s * 0.4, s * 0.3]))
-        drawPhone(&ctx, at: p, heading: h, scale: s, coneColor: coneColor)
+        drawPhone(&ctx, at: p, heading: heading(from: p, to: center), scale: s)
     }
 
     private func drawPrepare(_ ctx: inout GraphicsContext, in r: CGRect, t: Double) {
@@ -213,8 +193,7 @@ struct GuideScene: View {
 
     // MARK: Close-up (side view)
 
-    /// A person by a wall holding the phone: chest height and level (pass 1), above the head and tilted down (pass 2),
-    /// at the knees and tilted up (pass 3). The test walk moves from seated to standing height.
+    /// A person by a wall holding the phone, moving through low, middle and high with the view tilted to suit.
     private func drawCloseUp(_ ctx: inout GraphicsContext, in r: CGRect, t: Double) {
         ctx.fill(Path(roundedRect: r, cornerRadius: 8), with: .color(.secondary.opacity(0.1)))
         let floorY = r.maxY - r.height * 0.1
@@ -239,25 +218,14 @@ struct GuideScene: View {
         ctx.stroke(body, with: .color(.primary), lineWidth: 2)
 
         let bob = sin(t * 2 * .pi * 2) * Double(tall) * 0.01
-        let height: CGFloat
-        switch guide {
-        case .pass2: height = 1.02
-        case .pass3: height = 0.3
-        case .testWalk: height = t < 0.5 ? 0.55 : 0.8
-        default: height = 0.7
-        }
+        let stage = Int(t * 3) % 3   // low and tilted up, middle and level, high and tilted down
+        let height: CGFloat = [0.3, 0.7, 1.02][stage]
         let phoneY = floorY - tall * height + CGFloat(bob)
         let phoneX = footX + tall * 0.17
         var arm = Path(); arm.move(to: CGPoint(x: footX, y: floorY - tall * 0.72)); arm.addLine(to: CGPoint(x: phoneX, y: phoneY))
         ctx.stroke(arm, with: .color(.primary), lineWidth: 2)
-        // Tilt, radians below level: pass 2 about 35° down, pass 3 about 30° up; the test walk sways as it looks around.
-        let tilt: Double
-        switch guide {
-        case .pass2: tilt = 0.6
-        case .pass3: tilt = -0.5
-        case .testWalk: tilt = 0.08 * sin(t * 4 * .pi)
-        default: tilt = 0
-        }
+        // Tilt, radians below level.
+        let tilt = [-0.5, 0, 0.6][stage]
         var phone = ctx
         phone.translateBy(x: phoneX, y: phoneY)
         phone.rotate(by: .radians(tilt))
@@ -273,7 +241,7 @@ struct GuideScene: View {
             var ray = Path()
             ray.move(to: CGPoint(x: phoneX, y: phoneY))
             ray.addLine(to: CGPoint(x: phoneX + CGFloat(dx * reach), y: phoneY + CGFloat(dy * reach)))
-            ctx.stroke(ray, with: .color(coneColor.opacity(0.8)), style: StrokeStyle(lineWidth: 1.5, dash: [3, 3]))
+            ctx.stroke(ray, with: .color(Color.yellow.opacity(0.8)), style: StrokeStyle(lineWidth: 1.5, dash: [3, 3]))
         }
     }
 }
